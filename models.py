@@ -1,4 +1,4 @@
-"""User model preferences and Ollama model list. All models are local (Ollama)."""
+"""Model preferences and Ollama model list"""
 import json
 import os
 import requests
