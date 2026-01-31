@@ -3,7 +3,7 @@ from collections import defaultdict
 
 
 class ConversationManager:
-    """One thread per channel; continues when replying to the bot."""
+    """One thread per channel. continues chat when replying to the bot."""
 
     def __init__(self, max_history=20, save_file="data/conversations.json"):
         self.max_history = max_history
