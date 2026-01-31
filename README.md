@@ -26,7 +26,10 @@ Discord bot with LLM chat
 
 - **Use** `/help`
 
-Permission levels: **admin** (everything), **himas** (HA + user), **user** (basic)
+### Commands have different permission levels
+- **admin** (everything)
+- **himas** (HA + user)
+- **user** (basic)
 
 ## Structure
 
