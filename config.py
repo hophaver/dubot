@@ -10,6 +10,7 @@ DEFAULTS = {
     "download_limit_mb": 100,
     "start_ollama_on_startup": False,
     "current_persona": "default",
+    "chat_history": 20,
 }
 
 
@@ -62,4 +63,16 @@ def set_current_persona(name: str) -> None:
     """Set the global persona for everyone."""
     cfg = get_config()
     cfg["current_persona"] = name
+    save_config(cfg)
+
+
+def get_chat_history() -> int:
+    """Number of user messages to remember per chat (pairs = user+assistant, so 2x messages kept)."""
+    return max(1, min(100, int(get_config().get("chat_history", DEFAULTS["chat_history"]) or 20)))
+
+
+def set_chat_history(n: int) -> None:
+    """Set how many user messages to remember per chat (1–100)."""
+    cfg = get_config()
+    cfg["chat_history"] = max(1, min(100, n))
     save_config(cfg)

@@ -88,16 +88,18 @@ async def process_discord_message(client, message, permission, conversation_mana
             attachments=attachments if attachments else None
         )
         
-        # Send response; if split into chunks, continuation is reply to the last chunk
-        if len(answer) > 1900:
-            chunks = [answer[i:i+1900] for i in range(0, len(answer), 1900)]
-            response = await message.reply(chunks[0])
-            for chunk in chunks[1:]:
+        from commands.shared import _chunk_message, MAX_MESSAGE_LENGTH
+        import asyncio
+        chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
+        response = None
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                response = await message.reply(chunk)
+            else:
                 response = await message.channel.send(chunk)
-        else:
-            response = await message.reply(answer)
-        
-        conversation_manager.set_last_bot_message(message.channel.id, response.id)
+            conversation_manager.set_last_bot_message(message.channel.id, response.id)
+            if i < len(chunks) - 1:
+                await asyncio.sleep(0.5)
         
         # Save conversations periodically
         conversation_manager.save()

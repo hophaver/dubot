@@ -1,16 +1,23 @@
 import json
 from collections import defaultdict
 
+from config import get_chat_history
+
 
 class ConversationManager:
-    """One thread per channel. continues chat when replying to the bot."""
+    """One thread per channel. Reply to bot = continue that chat; wake word or /chat = new chat."""
 
-    def __init__(self, max_history=20, save_file="data/conversations.json"):
-        self.max_history = max_history
+    def __init__(self, save_file="data/conversations.json"):
+        self.max_history = get_chat_history()
         self.save_file = save_file
         self.conversations = defaultdict(list)
         self.last_bot_message = {}
+        self.recent_bot_message_ids = defaultdict(list)  # per channel, last 10 bot message ids (in-memory only)
         self._load()
+
+    def set_max_history(self, n: int):
+        """Update max history (e.g. after /chat-history). Next add_message will trim to new limit."""
+        self.max_history = max(1, min(100, n))
 
     def _key(self, channel_id):
         return str(channel_id)
@@ -18,7 +25,11 @@ class ConversationManager:
     def is_continuation(self, message):
         if not message.reference or not message.reference.message_id:
             return False
-        return self.last_bot_message.get(self._key(message.channel.id)) == message.reference.message_id
+        key = self._key(message.channel.id)
+        ref_id = message.reference.message_id
+        recent = self.recent_bot_message_ids.get(key, [])
+        last = self.last_bot_message.get(key)
+        return ref_id == last or ref_id in recent
 
     def add_message(self, channel_id, role, content):
         key = self._key(channel_id)
@@ -34,12 +45,19 @@ class ConversationManager:
             key = self._key(channel_id)
             self.conversations.pop(key, None)
             self.last_bot_message.pop(key, None)
+            self.recent_bot_message_ids.pop(key, None)
         elif user_id is not None:
             self.conversations.clear()
             self.last_bot_message.clear()
+            self.recent_bot_message_ids.clear()
 
     def set_last_bot_message(self, channel_id, message_id):
-        self.last_bot_message[self._key(channel_id)] = message_id
+        key = self._key(channel_id)
+        self.last_bot_message[key] = message_id
+        ids = self.recent_bot_message_ids[key]
+        if message_id not in ids:
+            ids.append(message_id)
+        self.recent_bot_message_ids[key] = ids[-10:]
 
     def save(self):
         with open(self.save_file, "w") as f:
@@ -59,4 +77,4 @@ class ConversationManager:
             pass
 
 
-conversation_manager = ConversationManager(max_history=20)
+conversation_manager = ConversationManager()

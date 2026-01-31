@@ -143,8 +143,9 @@ def initialize_command_database():
     command_db.categories.clear()
     
     # General Commands
-    command_db.add_command("chat", "Chat with AI", "General")
+    command_db.add_command("chat", "Chat with AI (starts new chat)", "General")
     command_db.add_command("forget", "Clear your chat history", "General")
+    command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
     command_db.add_command("checkwake", "Check current wake word", "General")
     command_db.add_command("help", "List all commands", "General")
