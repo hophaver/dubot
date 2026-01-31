@@ -116,36 +116,13 @@ class BotClient(discord.Client):
         try:
             from commands.help import HelpCommands
             HelpCommands(self).register()
-        except ImportError:
-            await self._register_basic_help()
+        except ImportError as e:
+            errors.append(f"help: {e}")
         except Exception as e:
             errors.append(f"help: {e}")
-            await self._register_basic_help()
 
         await self.tree.sync()
         self._startup_errors = errors
-    
-    async def _register_basic_help(self):
-        """Register basic help command if help.py is missing"""
-        @self.tree.command(name="help", description="Show all available commands")
-        async def help_command(interaction: discord.Interaction):
-            if not get_user_permission(interaction.user.id):
-                await interaction.response.send_message("❌ Denied", ephemeral=True)
-                return
-            
-            embed = discord.Embed(title="📖 Help", color=discord.Color.blue())
-            embed.set_thumbnail(url=self.user.display_avatar.url if self.user else None)
-            embed.add_field(name="💬 General", value="`/chat` `/forget` `/status` `/checkwake` `/translate` `/help`", inline=True)
-            embed.add_field(name="📄 File", value="`/analyze` `/examine` `/interrogate` `/code-review` `/ocr` `/compare-files`", inline=True)
-            embed.add_field(name="⏰ Reminders", value="`/remind` `/reminders` `/cancel-reminder`", inline=True)
-            embed.add_field(name="🎭 Persona", value="`/persona` `/persona-create`", inline=True)
-            embed.add_field(name="🤖 Model", value="`/model` `/pull-model`", inline=True)
-            embed.add_field(name="📥 Download", value="`/download` `/download-limit`", inline=True)
-            embed.add_field(name="📜 Scripts", value="`/scripts` `/run`", inline=True)
-            embed.add_field(name="🔧 Admin", value="`/whitelist` `/setwake` `/sethome` `/setstatus` `/purge` `/restart` `/kill` `/update`", inline=True)
-            embed.add_field(name="🏠 Home Assistant", value="`/himas` `/explain` `/listentities` `/removeentity` `/ha-status` `/find-sensor`", inline=True)
-            embed.set_footer(text="/help [command]")
-            await interaction.response.send_message(embed=embed)
 
 client = BotClient()
 
