@@ -43,7 +43,7 @@ def has_himas_permission(user_id):
     return get_user_permission(user_id) in ("admin", "himas")
 
 def add_user_to_whitelist(user_id, permission):
-    """Add user to whitelist. permission: 1=user, 2=admin. For himas use set_user_role."""
+    """Add user to whitelist. permission: 1=user, 2=admin. For himas set_user_role."""
     role = "admin" if permission == 2 else "user"
     return set_user_role(user_id, role)
 
