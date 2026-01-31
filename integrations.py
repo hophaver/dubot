@@ -6,7 +6,7 @@ import threading
 import time
 import sys
 
-# Try to load from .env file first
+# Try to load from .env file
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -21,7 +21,7 @@ HA_URL = os.environ.get('HA_URL', 'http://192.168.0.149:8123')
 HA_ACCESS_TOKEN = os.environ.get('HA_ACCESS_TOKEN', '')
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 
-# Permanent admin user ID
+# Permanent admin by user ID
 PERMANENT_ADMIN = 266952987128233985
 
 WHITELIST_FILE = "whitelist.json"
