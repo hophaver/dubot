@@ -20,7 +20,7 @@ def get_system_status():
         hostname = socket.gethostname()
         try:
             ip_address = socket.gethostbyname(hostname)
-        except:
+        except (OSError, socket.gaierror):
             ip_address = "Unknown"
         
         # GPU temperature and usage (if available)
@@ -84,9 +84,9 @@ def get_gpu_temperature():
                 temp = lines[1].split(',')[1].strip()
                 if temp.isdigit():
                     return f"{temp}°C"
-    except:
+    except Exception:
         pass
-    
+
     return "N/A"
 
 def get_gpu_utilization():

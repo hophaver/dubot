@@ -30,7 +30,7 @@ def register(client: discord.Client):
             embed = discord.Embed(title="📖 Help", color=discord.Color.blue())
             embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
             embed.add_field(name="📌 Usage", value=f"Use **`/help <command>`** for details (e.g. `/help himas`).", inline=False)
-            category_icons = {"General": "💬", "File Analysis": "📄", "Reminders": "⏰", "Persona": "🎭", "Model": "🤖", "Download": "📥", "Admin": "🔧", "Home Assistant": "🏠"}
+            category_icons = {"General": "💬", "File Analysis": "📄", "Reminders": "⏰", "Persona": "🎭", "Model": "🤖", "Download": "📥", "Scripts": "📜", "Admin": "🔧", "Home Assistant": "🏠"}
             for category, cmd_names in command_db.categories.items():
                 if cmd_names:
                     icon = category_icons.get(category, "•")

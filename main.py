@@ -53,7 +53,7 @@ class BotClient(discord.Client):
             errors.append(f"general: {e}")
         # 2. File Analysis
         try:
-            from commands.file_commands import FileCommands
+            from commands.file import FileCommands
             FileCommands(self).register()
         except Exception as e:
             errors.append(f"file: {e}")
@@ -95,7 +95,7 @@ class BotClient(discord.Client):
             errors.append(f"translate: {e}")
         # 6d. Scripts
         try:
-            from commands.scripts_commands import ScriptsCommands
+            from commands.scripts import ScriptsCommands
             ScriptsCommands(self).register()
         except Exception as e:
             errors.append(f"scripts: {e}")
@@ -134,15 +134,15 @@ class BotClient(discord.Client):
             
             embed = discord.Embed(title="📖 Help", color=discord.Color.blue())
             embed.set_thumbnail(url=self.user.display_avatar.url if self.user else None)
-            embed.add_field(name="💬 General", value="`/chat` `/clear-chat` `/status` `/checkwake` `/translate` `/help`", inline=True)
-            embed.add_field(name="📄 File", value="`/analyze` `/ocr` `/extract-text` `/compare-files`", inline=True)
-            embed.add_field(name="⏰ Reminders", value="`/remind` `/remind-dm` `/reminders` `/cancel-reminder`", inline=True)
-            embed.add_field(name="🎭 Persona", value="`/personas` `/persona-set` `/persona-info`", inline=True)
-            embed.add_field(name="🤖 Model", value="`/models` `/modelset` `/currentmodel` `/pull-model` `/removemodel`", inline=True)
+            embed.add_field(name="💬 General", value="`/chat` `/forget` `/status` `/checkwake` `/translate` `/help`", inline=True)
+            embed.add_field(name="📄 File", value="`/analyze` `/examine` `/interrogate` `/code-review` `/ocr` `/compare-files`", inline=True)
+            embed.add_field(name="⏰ Reminders", value="`/remind` `/reminders` `/cancel-reminder`", inline=True)
+            embed.add_field(name="🎭 Persona", value="`/persona` `/persona-create`", inline=True)
+            embed.add_field(name="🤖 Model", value="`/model` `/pull-model`", inline=True)
             embed.add_field(name="📥 Download", value="`/download` `/download-limit`", inline=True)
             embed.add_field(name="📜 Scripts", value="`/scripts` `/run`", inline=True)
-            embed.add_field(name="🔧 Admin", value="`/whitelist` `/setwake` `/purge` `/restart` `/kill`", inline=True)
-            embed.add_field(name="🏠 Home Assistant", value="`/himas` `/explain` `/listentities` `/ha-status`", inline=True)
+            embed.add_field(name="🔧 Admin", value="`/whitelist` `/setwake` `/sethome` `/setstatus` `/purge` `/restart` `/kill` `/update`", inline=True)
+            embed.add_field(name="🏠 Home Assistant", value="`/himas` `/explain` `/listentities` `/removeentity` `/ha-status` `/find-sensor`", inline=True)
             embed.set_footer(text="/help [command]")
             await interaction.response.send_message(embed=embed)
 
@@ -249,7 +249,7 @@ async def on_message(message):
                 # Delete processing message
                 try:
                     await processing_msg.delete()
-                except:
+                except Exception:
                     pass
                 
                 # Send result in chunks if too long

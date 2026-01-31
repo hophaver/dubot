@@ -3,6 +3,7 @@ from discord import app_commands
 from whitelist import get_user_permission
 from utils.llm_service import _try_models_with_fallback
 from models import model_manager
+from commands.shared import send_long_message
 
 
 async def do_translate(user_id: int, text: str, target_language: str = "English") -> str:
@@ -29,10 +30,4 @@ def register(client: discord.Client):
         if not result:
             await interaction.followup.send("❌ Translation failed. Try again or check your model.")
             return
-        if len(result) > 1900:
-            chunks = [result[i : i + 1900] for i in range(0, len(result), 1900)]
-            await interaction.followup.send(chunks[0])
-            for c in chunks[1:]:
-                await interaction.channel.send(c)
-        else:
-            await interaction.followup.send(result)
+        await send_long_message(interaction, result)

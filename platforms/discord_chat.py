@@ -218,9 +218,9 @@ async def get_chat_context(channel, limit=5):
                 "content": msg.content,
                 "timestamp": msg.created_at.isoformat()
             })
-    except:
+    except Exception:
         return []
-    
+
     # Reverse to get chronological order
     messages.reverse()
     return messages

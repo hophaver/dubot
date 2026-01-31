@@ -171,10 +171,11 @@ def initialize_command_database():
     
     # Download Commands
     command_db.add_command("download", "Download media from link or last message and send to chat", "Download")
-    command_db.add_command("download-limit", "[Admin] Set max download file size in MB", "Admin")
-    command_db.add_command("translate", "Translate text into requested language (default: English)", "General")
-    command_db.add_command("scripts", "List scripts in the scripts folder", "General")
-    command_db.add_command("run", "Run a script from scripts folder (now or at time)", "General")
+    command_db.add_command("download-limit", "[Admin] Set max download file size in MB", "Download")
+    
+    # Scripts Commands
+    command_db.add_command("scripts", "List scripts in the scripts folder", "Scripts")
+    command_db.add_command("run", "Run a script from scripts folder (now or at time)", "Scripts")
     
     # Admin Commands
     command_db.add_command("update", "Update bot from git repo", "Admin")
@@ -250,7 +251,7 @@ class FileProcessor:
             try:
                 # Try Latin-1 as fallback
                 return content.decode('latin-1')
-            except:
+            except Exception:
                 # Return as base64 if can't decode
                 return f"[Binary file content encoded as base64]\n{base64.b64encode(content).decode('utf-8')}"
     
