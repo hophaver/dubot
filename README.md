@@ -12,7 +12,7 @@ Discord bot with LLM chat
 
 1. Setup `.env`
 2. `pip install -r requirements.txt`
-3. Run: `python main.py` or `./start.sh`
+3. Run: `./start.sh`
 
 ## Config
 
