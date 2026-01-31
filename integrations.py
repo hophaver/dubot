@@ -94,19 +94,25 @@ def get_location_by_ip():
     return LOCATION, CITY, COUNTRY
 
 def start_location_updater():
-    """Start background location updater"""
-    def update_loop():
-        while True:
+    """Run location lookup once on startup; retry until a location is found, then stop."""
+    def try_until_found():
+        max_attempts = 20
+        interval = 30
+        for attempt in range(max_attempts):
             try:
-                update_system_time_date()
                 get_location_by_ip()
+                if LOCATION and LOCATION != "Unknown":
+                    if attempt > 0:
+                        print("✅ Location found")
+                    return
             except Exception as e:
-                print(f"⚠️  Error in location updater: {e}")
-            time.sleep(300)  # Update every 5 minutes
-    
-    thread = threading.Thread(target=update_loop, daemon=True)
+                print(f"⚠️  Error getting location (attempt {attempt + 1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(interval)
+        print("⚠️  Could not get location after maximum attempts")
+
+    thread = threading.Thread(target=try_until_found, daemon=True)
     thread.start()
-    print("✅ Location updater started")
 
 # Validate tokens on startup
 token_errors = validate_tokens()
@@ -129,4 +135,6 @@ if token_errors:
 # Initialize the variables
 update_system_time_date()
 get_location_by_ip()
-start_location_updater()
+# If we didn't get a location yet, retry in background until found (then stop)
+if not LOCATION or LOCATION == "Unknown":
+    start_location_updater()
