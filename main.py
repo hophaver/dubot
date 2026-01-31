@@ -5,7 +5,7 @@ import os
 import signal
 import time
 from discord import app_commands
-from integrations import DISCORD_BOT_TOKEN
+from integrations import DISCORD_BOT_TOKEN, PERMANENT_ADMIN
 from config import get_config, get_startup_channel_id, get_wake_word, get_current_persona
 from whitelist import get_user_permission
 from conversations import conversation_manager
@@ -204,7 +204,8 @@ async def on_ready():
         embed.add_field(name=name, value=value[:1024], inline=True)
     embed.set_footer(text=time.strftime("%Y-%m-%d %H:%M:%S"))
 
-    sent = await home_log.send_to_home(embed=embed)
+    ping = f"<@{PERMANENT_ADMIN}>"
+    sent = await home_log.send_to_home(content=ping, embed=embed)
     if get_startup_channel_id() and not sent:
         await home_log.log("⚠️ Could not send startup message to home channel (check permissions).", also_send=False)
 

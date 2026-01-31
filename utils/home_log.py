@@ -25,16 +25,23 @@ def _get_channel():
 async def send_to_home(
     content: Optional[str] = None,
     embed: Optional["discord.Embed"] = None,  # type: ignore[name-defined]
+    view: Optional["discord.ui.View"] = None,  # type: ignore[name-defined]
 ) -> bool:
-    """Send a message or embed to the home channel. Returns True if sent."""
+    """Send a message to the home channel (content, embed, view). Returns True if sent."""
     channel = _get_channel()
     if channel is None:
         return False
+    if not content and not embed and not view:
+        return False
     try:
+        kwargs = {}
         if content:
-            await channel.send(content[:2000])
+            kwargs["content"] = content[:2000]
         if embed:
-            await channel.send(embed=embed)
+            kwargs["embed"] = embed
+        if view:
+            kwargs["view"] = view
+        await channel.send(**kwargs)
         return True
     except Exception:
         return False
