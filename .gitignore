@@ -1,0 +1,9 @@
+.env
+config.json
+data/
+web/
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
