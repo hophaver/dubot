@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import discord
 
+from utils import home_log
+
 class Reminder:
     def __init__(self, user_id: int, channel_id: int, message: str, trigger_time: datetime, is_dm: bool = False):
         self.user_id = user_id
@@ -91,7 +93,7 @@ class ReminderManager:
                         if reminder.trigger_time > datetime.now():
                             self.reminders[reminder.id] = reminder
             except (json.JSONDecodeError, KeyError) as e:
-                print(f"Error loading reminders: {e}")
+                home_log.log_sync(f"Error loading reminders: {e}")
     
     def save(self):
         """Save reminders to file"""
@@ -130,7 +132,7 @@ class ReminderManager:
                 if channel:
                     await channel.send(f"<@{reminder.user_id}> ⏰ **Reminder:** {reminder.message}")
         except Exception as e:
-            print(f"Error sending reminder: {e}")
+            home_log.log_sync(f"Error sending reminder: {e}")
     
     def start(self):
         """Start the reminder checking thread"""
@@ -138,14 +140,14 @@ class ReminderManager:
             self.running = True
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
-            print("✅ Reminder service started")
+            home_log.log_sync("✅ Reminder service started")
     
     def stop(self):
         """Stop the reminder checking thread"""
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
-        print("🛑 Reminder service stopped")
+        home_log.log_sync("🛑 Reminder service stopped")
     
     def _run(self):
         """Main loop for checking reminders"""

@@ -31,6 +31,17 @@ def get_wake_word() -> str:
     return get_config().get("wake_word", DEFAULTS["wake_word"])
 
 
+def get_startup_channel_id():
+    """Return the /sethome channel ID or None."""
+    raw = get_config().get("startup_channel_id")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def get_download_limit_mb() -> int:
     return int(get_config().get("download_limit_mb", DEFAULTS["download_limit_mb"]))
 

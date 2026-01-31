@@ -8,6 +8,8 @@ from integrations import HA_URL, HA_ACCESS_TOKEN
 import sys
 import os
 
+from utils import home_log
+
 # Add the project root to the path so we can import from utils
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -83,10 +85,10 @@ class HomeAssistantManager:
                     self.last_update = current_time
                     return self.entities_cache
                 else:
-                    print(f"Error fetching HA entities: {response.status}")
+                    home_log.log_sync(f"Error fetching HA entities: {response.status}")
                     return {}
         except Exception as e:
-            print(f"Error fetching HA entities: {e}")
+            home_log.log_sync(f"Error fetching HA entities: {e}")
             return {}
     
     async def get_entity_state(self, entity_id: str) -> Optional[Dict]:
@@ -101,10 +103,10 @@ class HomeAssistantManager:
                 if response.status == 200:
                     return await response.json()
                 else:
-                    print(f"Error getting entity state {entity_id}: {response.status}")
+                    home_log.log_sync(f"Error getting entity state {entity_id}: {response.status}")
                     return None
         except Exception as e:
-            print(f"Error getting entity state {entity_id}: {e}")
+            home_log.log_sync(f"Error getting entity state {entity_id}: {e}")
             return None
     
     async def call_service(self, domain: str, service: str, data: Dict) -> Tuple[bool, str]:
@@ -312,7 +314,7 @@ User command: "{user_command}"
                             except json.JSONDecodeError:
                                 pass
         except Exception as e:
-            print(f"LLM parse error: {e}")
+            home_log.log_sync(f"LLM parse error: {e}")
         return {"type": "error", "message": f"Could not parse: {user_command}"}
 
     async def parse_natural_language(self, user_command: str, user_id: int) -> Dict:

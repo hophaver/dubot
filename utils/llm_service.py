@@ -10,6 +10,7 @@ from integrations import OLLAMA_URL, update_system_time_date, get_location_by_ip
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
+from utils import home_log
 
 def _get_fallback_chain():
     from utils.model_fallback import get_fallback_chain
@@ -466,7 +467,7 @@ async def _try_models_with_fallback(requested_model, messages, images=False):
         if "404" in response or "not found" in response.lower():
             continue
             
-        print(f"Error with model {model_name}: {response}")
+        home_log.log_sync(f"Error with model {model_name}: {response}")
     
     return requested_model, "⚠️ All models are unavailable. Please check your Ollama server."
 

@@ -5,6 +5,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from whitelist import is_admin
+from utils import home_log
 from ._shared import list_scripts, parse_when, SCRIPTS_DIR
 
 
@@ -44,7 +45,7 @@ def register(client: discord.Client):
                     else:
                         subprocess.run(["bash", path], cwd=SCRIPTS_DIR, timeout=300)
                 except Exception as e:
-                    print(f"Script run error: {e}")
+                    home_log.log_sync(f"Script run error: {e}")
             asyncio.create_task(run_later())
             return
         await interaction.response.defer()

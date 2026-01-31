@@ -5,8 +5,8 @@ from config import get_config, save_config
 
 
 def register(client: discord.Client):
-    @client.tree.command(name="sethome", description="Set startup channel")
-    @app_commands.describe(channel="Channel for startup messages")
+    @client.tree.command(name="sethome", description="Set startup channel (startup, errors, and logs)")
+    @app_commands.describe(channel="Channel for startup messages, errors, and logs")
     async def sethome(interaction: discord.Interaction, channel: discord.TextChannel):
         if not is_admin(interaction.user.id):
             await interaction.response.send_message("❌ Admin only.", ephemeral=True)

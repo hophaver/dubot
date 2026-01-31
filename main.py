@@ -7,12 +7,13 @@ import signal
 import time
 from discord import app_commands
 from integrations import DISCORD_BOT_TOKEN
-from config import get_config
+from config import get_config, get_startup_channel_id
 from whitelist import get_user_permission
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from platforms.discord_chat import process_discord_message
 from utils.llm_service import initialize_command_database
+from utils import home_log
 
 # Initialize command database
 initialize_command_database()
@@ -152,6 +153,7 @@ client = BotClient()
 @client.event
 async def on_ready():
     """Called when bot is ready"""
+    home_log.set_client(client)
     config = get_config()
     status_text = config.get("bot_status", "Analyzing files with AI")
     activity = discord.Activity(type=discord.ActivityType.listening, name=status_text)
@@ -159,11 +161,10 @@ async def on_ready():
 
     errors = getattr(client, "_startup_errors", [])
     if errors:
-        print("⚠️ Startup completed with errors:", ", ".join(errors))
+        await home_log.log("⚠️ Startup completed with errors: " + ", ".join(errors))
     else:
-        print("✅ Startup OK")
+        await home_log.log("✅ Startup OK")
 
-    # Check Home Assistant and default model for startup message
     ha_status = "Not configured"
     try:
         from integrations import HA_URL, HA_ACCESS_TOKEN
@@ -180,25 +181,18 @@ async def on_ready():
     model_info = model_manager.get_user_model_info(0)
     current_model = f"{model_info.get('model', 'qwen2.5:7b')} ({model_info.get('provider', 'local')})"
 
-    channel_id = config.get("startup_channel_id")
-    if channel_id:
-        try:
-            channel = client.get_channel(int(channel_id))
-            if channel:
-                embed = discord.Embed(
-                    title="🤖 Startup" if not errors else "🤖 Startup (with issues)",
-                    color=discord.Color.green() if not errors else discord.Color.orange(),
-                )
-                embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
-                embed.add_field(name="Status", value="OK" if not errors else "Errors: " + ", ".join(errors)[:500], inline=True)
-                embed.add_field(name="Model", value=current_model[:100], inline=True)
-                embed.add_field(name="Home Assistant", value=ha_status, inline=True)
-                embed.set_footer(text=time.strftime("%Y-%m-%d %H:%M:%S"))
-                await channel.send(embed=embed)
-        except discord.errors.Forbidden:
-            print("⚠️ Missing permissions in startup channel")
-        except Exception as e:
-            print("⚠️ Startup message:", e)
+    embed = discord.Embed(
+        title="🤖 Startup" if not errors else "🤖 Startup (with issues)",
+        color=discord.Color.green() if not errors else discord.Color.orange(),
+    )
+    embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+    embed.add_field(name="Status", value="OK" if not errors else "Errors: " + ", ".join(errors)[:500], inline=True)
+    embed.add_field(name="Model", value=current_model[:100], inline=True)
+    embed.add_field(name="Home Assistant", value=ha_status, inline=True)
+    embed.set_footer(text=time.strftime("%Y-%m-%d %H:%M:%S"))
+    sent = await home_log.send_to_home(embed=embed)
+    if get_startup_channel_id() and not sent:
+        await home_log.log("⚠️ Could not send startup message to home channel (check permissions).", also_send=False)
 
 @client.event
 async def on_message(message):
@@ -271,7 +265,7 @@ async def on_message(message):
 
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    """Handle slash command errors."""
+    """Handle slash command errors; report to user and to home channel."""
     if isinstance(error, app_commands.CommandInvokeError):
         original = error.original
         error_msg = str(original)
@@ -288,6 +282,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
                 await interaction.response.send_message(msg, ephemeral=True)
         except discord.NotFound:
             pass
+        cmd = getattr(interaction.command, "name", "?")
+        await home_log.send_to_home(f"🔴 **/{cmd}** error: {error_msg[:500]}")
     elif isinstance(error, app_commands.CommandNotFound):
         try:
             await interaction.response.send_message("❌ Command not found. Use `/help` to see available commands.", ephemeral=True)
@@ -308,6 +304,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message(f"❌ Error: {str(error)[:150]}", ephemeral=True)
         except discord.NotFound:
             pass
+        await home_log.send_to_home(f"🔴 **App command** error: {str(error)[:500]}")
 
 def signal_handler(signum, frame):
     """Handle shutdown signals"""

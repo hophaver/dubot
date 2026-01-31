@@ -4,6 +4,7 @@ import os
 import requests
 from typing import Dict, List, Optional
 from integrations import OLLAMA_URL
+from utils import home_log
 
 MODELS_FILE = "data/models.json"
 DEFAULT_FALLBACK = ["qwen2.5:7b", "llama3.2:3b", "llama3.2:1b"]
@@ -22,12 +23,12 @@ class ModelManager:
             if response.status_code == 200:
                 models_data = response.json().get("models", [])
                 self.available_models = [m.get("name") for m in models_data]
-                print(f"✅ Found {len(self.available_models)} Ollama models")
+                home_log.log_sync(f"✅ Found {len(self.available_models)} Ollama models")
                 return True
         except requests.exceptions.ConnectionError:
-            print(f"⚠️ Cannot connect to Ollama at {OLLAMA_URL}")
+            home_log.log_sync(f"⚠️ Cannot connect to Ollama at {OLLAMA_URL}")
         except Exception as e:
-            print(f"⚠️ Error fetching models: {e}")
+            home_log.log_sync(f"⚠️ Error fetching models: {e}")
         self.available_models = DEFAULT_FALLBACK.copy()
         return False
 
