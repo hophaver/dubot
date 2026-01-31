@@ -68,15 +68,14 @@ async def process_discord_message(client, message, permission, conversation_mana
                 except Exception:
                     pass
         
-        # Get context for group chat awareness
+        # Only pass channel context when continuing a chat (reply to bot). Wake word = fresh chat, no prior context.
         context = None
-        if not is_dm and message.channel and hasattr(message.channel, 'history'):
+        if is_continuation and not is_dm and message.channel and hasattr(message.channel, 'history'):
             try:
                 context = await get_chat_context(message.channel, limit=5)
             except Exception:
                 context = None
-        
-        # Use LLM with context and attachments (for vision/file support)
+
         answer = await ask_llm(
             message.author.id,
             message.channel.id,
