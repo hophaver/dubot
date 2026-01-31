@@ -1,4 +1,4 @@
-"""Bot config: wake word, startup channel, download limit, etc. Stored in config.json."""
+"""Bot config: wake word, startup channel, download limit, etc."""
 import json
 from typing import Any, Dict
 
