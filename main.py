@@ -170,6 +170,9 @@ async def _run_startup_checks(client):
     from services.status_server import PORT as STATUS_PORT
     status_api = f"http://localhost:{STATUS_PORT}/status"
 
+    # Admin (global ping)
+    admin_status = f"<@{PERMANENT_ADMIN}>"
+
     return errors, {
         "Commands": cmd_status,
         "Model": model_status,
@@ -179,6 +182,7 @@ async def _run_startup_checks(client):
         "Wake word": wake_status,
         "Home channel": home_status,
         "Status API": status_api,
+        "Admin": admin_status,
     }
 
 
@@ -204,8 +208,7 @@ async def on_ready():
         embed.add_field(name=name, value=value[:1024], inline=True)
     embed.set_footer(text=time.strftime("%Y-%m-%d %H:%M:%S"))
 
-    ping = f"<@{PERMANENT_ADMIN}>"
-    sent = await home_log.send_to_home(content=ping, embed=embed)
+    sent = await home_log.send_to_home(embed=embed)
     if get_startup_channel_id() and not sent:
         await home_log.log("⚠️ Could not send startup message to home channel (check permissions).", also_send=False)
 
