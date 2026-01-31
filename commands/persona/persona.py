@@ -19,7 +19,7 @@ def _persona_embed(current: str, selected: Optional[str], prompts: Dict[str, str
         embed.add_field(name="Selected (confirm to set)", value=f"**{selected}**", inline=True)
         if prompts.get(selected):
             embed.add_field(name="Prompt", value=_truncate_prompt(prompts[selected]), inline=False)
-    embed.set_footer(text="Select persona → Confirm (admin) to set · Remove (admin) to delete")
+    embed.set_footer(text="Select persona → Confirm (admin) to set for everyone · Remove (admin) to delete")
     return embed
 
 
@@ -102,7 +102,7 @@ class PersonaSelectView(View):
 
 
 def register(client: discord.Client):
-    @client.tree.command(name="persona", description="View and switch AI persona (Confirm/Remove: admin only)")
+    @client.tree.command(name="persona", description="View or set global AI persona (Confirm/Remove: admin only)")
     async def persona(interaction: discord.Interaction):
         if not get_user_permission(interaction.user.id):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
@@ -111,7 +111,7 @@ def register(client: discord.Client):
         if not names:
             await interaction.response.send_message("📝 No personas available. Use `/persona-create` to create one.")
             return
-        current = persona_manager.get_user_persona(interaction.user.id)
+        current = persona_manager.get_user_persona(0)
         persona_prompts = {n: persona_manager.get_persona(n) for n in names}
         embed = _persona_embed(current, None, persona_prompts, interaction.client.user.display_avatar.url if interaction.client.user else None)
         view = PersonaSelectView(interaction.client, interaction.user.id, current, names, persona_prompts)

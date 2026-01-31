@@ -1,9 +1,10 @@
-"""Persona definitions and per-user persona selection. Persisted in personas.json and user_personas.json."""
+"""Persona definitions and global persona setting. Persisted in personas.json; current persona in config.json."""
 import json
 import os
 
+from config import get_current_persona, set_current_persona
+
 PERSONAS_FILE = "personas.json"
-USER_PERSONAS_FILE = "user_personas.json"
 
 DEFAULT_PERSONAS = {
     "default": "You are a helpful AI assistant.",
@@ -18,9 +19,7 @@ DEFAULT_PERSONAS = {
 class PersonaManager:
     def __init__(self):
         self.personas = {}
-        self.user_personas = {}
         self.load_personas()
-        self.load_user_personas()
 
     def load_personas(self):
         if os.path.exists(PERSONAS_FILE):
@@ -32,11 +31,11 @@ class PersonaManager:
         else:
             self.personas = dict(DEFAULT_PERSONAS)
             self.save_personas()
-    
+
     def save_personas(self):
         with open(PERSONAS_FILE, "w") as f:
             json.dump(self.personas, f, indent=2)
-    
+
     def get_persona(self, name):
         return self.personas.get(name, self.personas.get("default", ""))
 
@@ -44,45 +43,31 @@ class PersonaManager:
         return name in self.personas
 
     def set_user_persona(self, user_id, persona_name):
+        """Set the global persona for everyone (user_id ignored)."""
         if persona_name in self.personas:
-            self.user_personas[str(user_id)] = persona_name
-            self.save_user_personas()
+            set_current_persona(persona_name)
             return True
         return False
 
-    def load_user_personas(self):
-        if os.path.exists(USER_PERSONAS_FILE):
-            try:
-                with open(USER_PERSONAS_FILE) as f:
-                    self.user_personas = json.load(f)
-            except (json.JSONDecodeError, TypeError):
-                self.user_personas = {}
-        else:
-            self.user_personas = {}
-
-    def save_user_personas(self):
-        with open(USER_PERSONAS_FILE, "w") as f:
-            json.dump(self.user_personas, f, indent=2)
-
     def get_user_persona(self, user_id):
-        return self.user_personas.get(str(user_id), "default")
+        """Return the global persona (same for all users)."""
+        current = get_current_persona()
+        return current if current in self.personas else "default"
 
     def create_persona(self, name, system_prompt):
         self.personas[name] = system_prompt
         self.save_personas()
         return True
-    
+
     def delete_persona(self, name):
         if name != "default" and name in self.personas:
+            if get_current_persona() == name:
+                set_current_persona("default")
             del self.personas[name]
-            for uid, persona_name in list(self.user_personas.items()):
-                if persona_name == name:
-                    self.user_personas[uid] = "default"
             self.save_personas()
-            self.save_user_personas()
             return True
         return False
-    
+
     def list_personas(self):
         return list(self.personas.keys())
 

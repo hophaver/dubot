@@ -9,6 +9,7 @@ DEFAULTS = {
     "startup_channel_id": None,
     "download_limit_mb": 100,
     "start_ollama_on_startup": False,
+    "current_persona": "default",
 }
 
 
@@ -49,4 +50,16 @@ def get_download_limit_mb() -> int:
 def set_download_limit_mb(mb: int) -> None:
     cfg = get_config()
     cfg["download_limit_mb"] = max(1, min(2000, mb))
+    save_config(cfg)
+
+
+def get_current_persona() -> str:
+    """Return the global persona name (used for all users)."""
+    return get_config().get("current_persona", DEFAULTS["current_persona"]) or "default"
+
+
+def set_current_persona(name: str) -> None:
+    """Set the global persona for everyone."""
+    cfg = get_config()
+    cfg["current_persona"] = name
     save_config(cfg)
