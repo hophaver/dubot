@@ -2,11 +2,13 @@
 import asyncio
 import discord
 
+MAX_MESSAGE_LENGTH = 1900
 
-async def send_long_message(interaction: discord.Interaction, message: str, max_length: int = 1900):
+
+def _chunk_message(message: str, max_length: int = MAX_MESSAGE_LENGTH):
+    """Split message into chunks at paragraph/line boundaries, each <= max_length."""
     if len(message) <= max_length:
-        await interaction.followup.send(message)
-        return
+        return [message] if message else []
     chunks = []
     current = ""
     for part in message.split("\n\n"):
@@ -34,6 +36,23 @@ async def send_long_message(interaction: discord.Interaction, message: str, max_
                         current = line
     if current:
         chunks.append(current)
+    return chunks
+
+
+async def send_long_to_channel(channel, message: str, max_length: int = MAX_MESSAGE_LENGTH):
+    """Send a possibly long message to a channel in chunks."""
+    chunks = _chunk_message(message, max_length)
+    for i, chunk in enumerate(chunks):
+        await channel.send(chunk)
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.5)
+
+
+async def send_long_message(interaction: discord.Interaction, message: str, max_length: int = MAX_MESSAGE_LENGTH):
+    if len(message) <= max_length:
+        await interaction.followup.send(message)
+        return
+    chunks = _chunk_message(message, max_length)
     for i, chunk in enumerate(chunks):
         await interaction.followup.send(chunk)
         if i < len(chunks) - 1:

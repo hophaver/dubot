@@ -163,7 +163,7 @@ def initialize_command_database():
     command_db.add_command("cancel-reminder", "Cancel a reminder by ID", "Reminders")
     
     # Persona Commands
-    command_db.add_command("persona", "View and switch AI persona (buttons: admin only)", "Persona")
+    command_db.add_command("persona", "View or set global AI persona (Confirm/Remove: admin only)", "Persona")
     command_db.add_command("persona-create", "[Admin] Create a new persona", "Persona")
     
     # Model Commands

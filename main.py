@@ -1,5 +1,4 @@
 import discord
-import asyncio
 import subprocess
 import sys
 import os
@@ -7,13 +6,14 @@ import signal
 import time
 from discord import app_commands
 from integrations import DISCORD_BOT_TOKEN
-from config import get_config, get_startup_channel_id
+from config import get_config, get_startup_channel_id, get_wake_word, get_current_persona
 from whitelist import get_user_permission
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from platforms.discord_chat import process_discord_message
 from utils.llm_service import initialize_command_database
 from utils import home_log
+from commands.shared import send_long_to_channel
 
 # Initialize command database
 initialize_command_database()
@@ -116,8 +116,6 @@ class BotClient(discord.Client):
         try:
             from commands.help import HelpCommands
             HelpCommands(self).register()
-        except ImportError as e:
-            errors.append(f"help: {e}")
         except Exception as e:
             errors.append(f"help: {e}")
 
@@ -127,46 +125,85 @@ class BotClient(discord.Client):
 client = BotClient()
 
 # Event handlers
+async def _run_startup_checks(client):
+    """Collect all startup check results for the embed. Returns (errors, checks_dict)."""
+    errors = getattr(client, "_startup_errors", [])
+
+    # Commands
+    cmd_status = "✅ All loaded" if not errors else "❌ " + ", ".join(errors)[:200]
+
+    # Model
+    from models import model_manager
+    model_info = model_manager.get_user_model_info(0)
+    model_status = f"{model_info.get('model', 'qwen2.5:7b')} ({model_info.get('provider', 'local')})"
+
+    # Persona
+    persona_status = get_current_persona()
+
+    # Home Assistant
+    ha_status = "○ Not configured"
+    try:
+        from integrations import HA_URL, HA_ACCESS_TOKEN
+        if HA_URL and HA_URL.strip() and HA_ACCESS_TOKEN:
+            from utils.ha_integration import ha_manager
+            entities = await ha_manager.get_all_entities()
+            ha_status = "✅ Connected" if entities else "⚠️ Disconnected"
+        elif not HA_ACCESS_TOKEN:
+            ha_status = "○ Not configured"
+    except Exception:
+        ha_status = "⚠️ Disconnected"
+
+    # Location
+    try:
+        from integrations import LOCATION
+        location_status = LOCATION if (LOCATION and LOCATION != "Unknown") else "○ Unknown"
+    except Exception:
+        location_status = "○ Unknown"
+
+    # Wake word
+    wake_status = get_wake_word()
+
+    # Home channel
+    home_status = "✅ Set" if get_startup_channel_id() else "○ Not set"
+
+    # Status API (started before client.run)
+    from services.status_server import PORT as STATUS_PORT
+    status_api = f"http://localhost:{STATUS_PORT}/status"
+
+    return errors, {
+        "Commands": cmd_status,
+        "Model": model_status,
+        "Persona": persona_status,
+        "Home Assistant": ha_status,
+        "Location": location_status,
+        "Wake word": wake_status,
+        "Home channel": home_status,
+        "Status API": status_api,
+    }
+
+
 @client.event
 async def on_ready():
-    """Called when bot is ready"""
+    """Called when bot is ready. Run startup checks and send a single embed to home."""
     home_log.set_client(client)
     config = get_config()
     status_text = config.get("bot_status", "Analyzing files with AI")
     activity = discord.Activity(type=discord.ActivityType.listening, name=status_text)
     await client.change_presence(activity=activity)
 
-    errors = getattr(client, "_startup_errors", [])
-    if errors:
-        await home_log.log("⚠️ Startup completed with errors: " + ", ".join(errors))
-    else:
-        await home_log.log("✅ Startup OK")
-
-    ha_status = "Not configured"
-    try:
-        from integrations import HA_URL, HA_ACCESS_TOKEN
-        if HA_URL and HA_URL.strip() and HA_ACCESS_TOKEN:
-            from utils.ha_integration import ha_manager
-            entities = await ha_manager.get_all_entities()
-            ha_status = "Connected" if entities else "Disconnected"
-        elif not HA_ACCESS_TOKEN:
-            ha_status = "Not configured"
-    except Exception:
-        ha_status = "Disconnected"
-
-    from models import model_manager
-    model_info = model_manager.get_user_model_info(0)
-    current_model = f"{model_info.get('model', 'qwen2.5:7b')} ({model_info.get('provider', 'local')})"
+    errors, checks = await _run_startup_checks(client)
+    has_issues = bool(errors)
 
     embed = discord.Embed(
-        title="🤖 Startup" if not errors else "🤖 Startup (with issues)",
-        color=discord.Color.green() if not errors else discord.Color.orange(),
+        title="🤖 Bot started" if not has_issues else "🤖 Bot started (with issues)",
+        color=discord.Color.green() if not has_issues else discord.Color.orange(),
+        description="Startup checks:",
     )
     embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
-    embed.add_field(name="Status", value="OK" if not errors else "Errors: " + ", ".join(errors)[:500], inline=True)
-    embed.add_field(name="Model", value=current_model[:100], inline=True)
-    embed.add_field(name="Home Assistant", value=ha_status, inline=True)
+    for name, value in checks.items():
+        embed.add_field(name=name, value=value[:1024], inline=True)
     embed.set_footer(text=time.strftime("%Y-%m-%d %H:%M:%S"))
+
     sent = await home_log.send_to_home(embed=embed)
     if get_startup_channel_id() and not sent:
         await home_log.log("⚠️ Could not send startup message to home channel (check permissions).", also_send=False)
@@ -223,13 +260,7 @@ async def on_message(message):
                 except Exception:
                     pass
                 
-                # Send result in chunks if too long
-                if len(result) > 1900:
-                    chunks = [result[i:i+1900] for i in range(0, len(result), 1900)]
-                    for chunk in chunks:
-                        await message.channel.send(chunk)
-                else:
-                    await message.channel.send(result)
+                await send_long_to_channel(message.channel, result)
                     
             except Exception as e:
                 await message.channel.send(f"❌ Error analyzing {attachment.filename}: {str(e)}")
