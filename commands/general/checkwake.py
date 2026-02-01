@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
-from config import get_config
+from config import get_wake_word
 
 
 def register(client):
@@ -10,8 +10,7 @@ def register(client):
         if not get_user_permission(interaction.user.id):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
-        config = get_config()
-        wake_word = config.get("wake_word", "dubot")
+        wake_word = get_wake_word()
         embed = discord.Embed(title="🔔 Wake Word", color=discord.Color.blue())
         embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
         embed.add_field(name="Current", value=f"`{wake_word}`", inline=True)

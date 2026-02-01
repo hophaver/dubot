@@ -2,6 +2,8 @@ from typing import Optional
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
+from config import get_wake_word
+from utils.llm_service import command_db
 
 
 def register(client: discord.Client):
@@ -11,7 +13,6 @@ def register(client: discord.Client):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
         if command:
-            from utils.llm_service import command_db
             cmd_info = command_db.get_command(command.lower())
             if cmd_info:
                 embed = discord.Embed(title=f"📖 /{cmd_info['name']}", description=cmd_info["description"], color=discord.Color.blue())
@@ -24,8 +25,6 @@ def register(client: discord.Client):
             else:
                 await interaction.response.send_message(f"❌ Command '{command}' not found. Use `/help` to see all commands.")
         else:
-            from utils.llm_service import command_db
-            from config import get_wake_word
             wake = get_wake_word()
             embed = discord.Embed(title="📖 Help", color=discord.Color.blue())
             embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)

@@ -62,8 +62,8 @@ def register(client):
             embed.add_field(name="⏱️ Bot uptime", value=bot_uptime, inline=True)
             embed.add_field(name="🔄 System uptime", value=sys_status["uptime"], inline=True)
             embed.add_field(name="🤖 Model", value=current_model[:100], inline=True)
-            embed.add_field(name="📜 Commands", value=str(len(command_db.commands)), inline=True)
-            embed.add_field(name="📁 File types", value=str(len(SUPPORTED_FILE_TYPES)), inline=True)
+            embed.add_field(name="📜 Commands", value=str(commands_count), inline=True)
+            embed.add_field(name="📁 File types", value=str(file_types_count), inline=True)
             embed.set_footer(text=f"Python {sys_status['python_version']} · /help")
             await interaction.followup.send(embed=embed)
         except Exception as e:

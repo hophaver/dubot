@@ -1,3 +1,4 @@
+import requests
 from typing import Optional, List
 import discord
 from discord.ui import View, Select, Button
@@ -74,9 +75,10 @@ class ModelSelectView(View):
         target = self.selected or self.current
         await interaction.response.defer()
         try:
-            import requests
             r = requests.delete(f"{OLLAMA_URL}/api/delete", json={"name": target}, timeout=60)
             if r.status_code == 200:
+                from utils.llm_service import clear_vision_model_cache
+                clear_vision_model_cache()
                 self.models = model_manager.list_all_models(refresh_local=True)
                 if self.current == target:
                     self.current = self.models[0] if self.models else "qwen2.5:7b"
@@ -104,6 +106,14 @@ def register(client: discord.Client):
             models = model_manager.list_all_models(refresh_local=True)
             info = model_manager.get_user_model_info(interaction.user.id)
             current = info.get("model", "qwen2.5:7b")
+            if not models:
+                await interaction.followup.send(
+                    "No models found. Use **/pull-model** to download one (e.g. `/pull-model llama3.2:3b` or `/pull-model llava` for vision).",
+                    ephemeral=False,
+                )
+                return
+            if current not in models:
+                current = models[0] if models else "qwen2.5:7b"
             embed = _model_embed(current, None)
             view = ModelSelectView(client, interaction.user.id, current, models)
             await interaction.followup.send(embed=embed, view=view)

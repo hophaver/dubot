@@ -428,6 +428,37 @@ def _format_discord_message(username, message, context):
 
 _vision_model_cache = None
 
+
+def clear_vision_model_cache() -> None:
+    """Call when model list changes (e.g. after /pull-model or remove) so vision is re-resolved."""
+    global _vision_model_cache
+    _vision_model_cache = None
+
+
+# Name patterns that typically indicate vision-capable models (Ollama)
+VISION_NAME_PATTERNS = ("llava", "llama3.2", "llama3.1", "pixtral", "minicpm-v", "vision", "moondream", "bakllava", "llava-phi", "nano-llava")
+
+
+def _is_vision_capable(model_name: str) -> bool:
+    """Heuristic: model name suggests vision support."""
+    if not model_name:
+        return False
+    lower = model_name.lower()
+    return any(p in lower for p in VISION_NAME_PATTERNS)
+
+
+def _format_vision_help_message() -> str:
+    """Build message listing available models with vision-capable marked. Call when image request fails."""
+    models = model_manager.list_all_models(refresh_local=True)
+    if not models:
+        return "No vision-capable model could process this image. No models are available. Use **/pull-model** to download one (e.g. `llava` or `llama3.2:3b` for vision)."
+    lines = ["No vision-capable model could process this image. Use **/model** to switch or **/pull-model** to install one.", "", "**Available models** (✅ = typically vision-capable):", ""]
+    for m in models:
+        mark = "✅" if _is_vision_capable(m) else "○"
+        lines.append(f"{mark} `{m}`")
+    return "\n".join(lines)
+
+
 async def _test_model_vision(model_name: str, messages: list) -> bool:
     try:
         r = await _make_ollama_request(model_name, messages)
@@ -452,24 +483,28 @@ async def _try_models_with_fallback(requested_model, messages, images=False):
         if vision_model:
             models_to_try = [vision_model]
         else:
-            models_to_try = [requested_model] + _get_fallback_chain()
+            available = model_manager.list_all_models(refresh_local=True)
+            if available:
+                models_to_try = [requested_model] + [m for m in available if m != requested_model]
+            else:
+                models_to_try = [requested_model] + _get_fallback_chain()
     else:
         models_to_try = [requested_model] + _get_fallback_chain()
-    
+
+    models_to_try = list(dict.fromkeys(models_to_try))
     for model_name in models_to_try:
-        if model_name in models_to_try[:models_to_try.index(model_name)]:
-            continue
-            
         response = await _make_ollama_request(model_name, messages)
-        
+
         if response and not response.startswith("Error:"):
             return model_name, response
-        
+
         if "404" in response or "not found" in response.lower():
             continue
-            
+
         home_log.log_sync(f"Error with model {model_name}: {response}")
-    
+
+    if images:
+        return requested_model, _format_vision_help_message()
     return requested_model, "⚠️ All models are unavailable. Please check your Ollama server."
 
 async def _make_ollama_request(model_name, messages):

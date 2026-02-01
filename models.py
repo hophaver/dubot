@@ -18,18 +18,19 @@ class ModelManager:
         self.refresh_local_models()
 
     def refresh_local_models(self) -> bool:
+        """Fetch available models from Ollama. On failure, set available_models to [] (no fake list)."""
         try:
             response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
             if response.status_code == 200:
                 models_data = response.json().get("models", [])
-                self.available_models = [m.get("name") for m in models_data]
+                self.available_models = [m.get("name") for m in models_data if m.get("name")]
                 home_log.log_sync(f"✅ Found {len(self.available_models)} Ollama models")
                 return True
         except requests.exceptions.ConnectionError:
             home_log.log_sync(f"⚠️ Cannot connect to Ollama at {OLLAMA_URL}")
         except Exception as e:
             home_log.log_sync(f"⚠️ Error fetching models: {e}")
-        self.available_models = DEFAULT_FALLBACK.copy()
+        self.available_models = []
         return False
 
     def set_user_model(self, user_id, model_name: str) -> None:
