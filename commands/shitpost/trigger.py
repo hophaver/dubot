@@ -1,5 +1,4 @@
-"""Shitpost trigger: messages starting with ! or . and a single word (3+ letters, no numbers).
-.age / !age -> random number 1-18 or 30-70. Other words -> LLM response (max 2 words)."""
+"""Shitpost trigger: !word / .word (single token, 3+ letters). .age/!age -> random 1-18 or 30-70; else LLM (max 2 words)."""
 import random
 from config import get_wake_word
 from utils.llm_service import ask_llm_shitpost
@@ -7,10 +6,9 @@ from . import _blacklist
 
 
 def _parse_shitpost(content: str) -> str | None:
-    """If content matches shitpost pattern (prefix ! or ., single token, 3+ letters, letters only,
-    not the wake word), return the word (lowercase). Otherwise return None."""
+    """Return word (lowercase) if content matches shitpost pattern, else None."""
     content = (content or "").strip()
-    if len(content) < 4:  # need at least "X" + 3 letters, e.g. "!age"
+    if len(content) < 4:
         return None
     first = content[0]
     if first not in "!.":
@@ -29,9 +27,8 @@ def _parse_shitpost(content: str) -> str | None:
 
 
 async def handle_shitpost(client, message) -> bool:
-    """Handle shitpost-style messages. Returns True if handled (and reply sent), False otherwise."""
-    content = (message.content or "").strip()
-    word = _parse_shitpost(content)
+    """Handle shitpost messages; return True if handled."""
+    word = _parse_shitpost(message.content)
     if word is None:
         return False
 

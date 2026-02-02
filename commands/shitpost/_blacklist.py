@@ -1,4 +1,4 @@
-"""Persistent blacklist of strings that the shitpost trigger should ignore."""
+"""Blacklist of words the shitpost trigger ignores (data/shitpost_ignore.json)."""
 import json
 import os
 
@@ -21,12 +21,12 @@ def _save(words: list[str]) -> None:
 
 
 def get_ignored_words() -> list[str]:
-    """Return list of blacklisted strings (lowercase)."""
+    """Return blacklisted words (lowercase)."""
     return [w.lower() for w in _load()]
 
 
 def add_ignored(word: str) -> bool:
-    """Add a string to the blacklist (lowercased). Returns True if added, False if already present."""
+    """Add word to blacklist (lowercased). Return True if added."""
     word = (word or "").strip().lower()
     if not word:
         return False
@@ -40,7 +40,7 @@ def add_ignored(word: str) -> bool:
 
 
 def remove_ignored(word: str) -> bool:
-    """Remove a string from the blacklist. Returns True if removed."""
+    """Remove word from blacklist. Return True if removed."""
     word = (word or "").strip().lower()
     words = _load()
     normalized = [w.lower() for w in words]

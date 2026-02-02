@@ -4,7 +4,7 @@ from whitelist import is_admin
 from . import _blacklist
 
 
-def register(client: discord.Client):
+def register(client):
     @client.tree.command(name="ignore", description="Add a word to shitpost ignore list (admin)")
     @app_commands.describe(word="Word to ignore (e.g. !word / .word will do nothing)")
     async def ignore(interaction: discord.Interaction, word: str):
