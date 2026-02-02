@@ -11,6 +11,7 @@ from whitelist import get_user_permission
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from platforms.discord_chat import process_discord_message
+from commands.shitpost import handle_shitpost
 from utils.llm_service import initialize_command_database
 from utils import home_log
 from commands.shared import send_long_to_channel
@@ -270,6 +271,10 @@ async def on_message(message):
                 await message.channel.send(f"❌ Error analyzing {attachment.filename}: {str(e)}")
         
         # Don't process further if we handled files
+        return
+
+    # Shitpost: !word or .word (single token, 3+ letters, letters only; not wake word)
+    if await handle_shitpost(client, message):
         return
     
     # Process Discord-specific chat (original functionality)

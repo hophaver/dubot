@@ -417,6 +417,32 @@ def _clean_response(text):
     
     return text.strip()
 
+
+SHITPOST_SYSTEM = (
+    "Reply with exactly one or two words that confirm or complete the given word as a verb or short phrase. "
+    "No punctuation, no explanation, no quotes. Examples: poop -> pooping; kickit -> kicking it; yo -> yo."
+)
+
+
+async def ask_llm_shitpost(user_id: int, word: str) -> str:
+    """One-shot LLM reply for shitpost: max 2 words confirming/continuing the word. Returns empty on error."""
+    model_info = model_manager.get_user_model_info(user_id)
+    requested_model = model_info.get("model", "llama3.2:1b")
+    messages = [
+        {"role": "system", "content": SHITPOST_SYSTEM},
+        {"role": "user", "content": word},
+    ]
+    try:
+        _, response_text = await _try_models_with_fallback(requested_model, messages, images=False)
+        cleaned = _clean_response(response_text or "")
+        if cleaned.startswith("Error:"):
+            return ""
+        parts = cleaned.split()
+        return " ".join(parts[:2]) if parts else ""
+    except Exception:
+        return ""
+
+
 def _format_discord_message(username, message, context):
     """Format Discord message with chat context; prefix with who is speaking."""
     if not context or len(context) == 0:
