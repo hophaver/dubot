@@ -3,6 +3,7 @@
 import random
 from config import get_wake_word
 from utils.llm_service import ask_llm_shitpost
+from . import _blacklist
 
 
 def _parse_shitpost(content: str) -> str | None:
@@ -21,6 +22,8 @@ def _parse_shitpost(content: str) -> str | None:
         return None
     word = rest.lower()
     if word == get_wake_word().lower():
+        return None
+    if word in _blacklist.get_ignored_words():
         return None
     return word
 

@@ -107,6 +107,12 @@ class BotClient(discord.Client):
             AdminCommands(self).register()
         except Exception as e:
             errors.append(f"admin: {e}")
+        # 7b. Shitpost
+        try:
+            from commands.shitpost import ShitpostCommands
+            ShitpostCommands(self).register()
+        except Exception as e:
+            errors.append(f"shitpost: {e}")
         # 8. Home Assistant
         try:
             from commands.ha import HACommands
