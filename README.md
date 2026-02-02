@@ -21,6 +21,8 @@ Discord bot with LLM chat
 - **`model_fallback.json`** – Model fallback
 - **`system_prompts.json`** – System prompts
 - **`whitelist.json`** – Permissions
+- **`data/ha_mappings.json`** – HA friendly name → entity_id (from `/explain`)
+- **`data/ha_entities_allowlist.json`** – Optional. List of `entity_id`s the bot can see/control. If missing or empty, all entities (from the HA token) are used. Example: `["light.living_room", "switch.plug_1"]`
 
 ## Commands (summary)
 

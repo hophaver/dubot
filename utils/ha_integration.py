@@ -13,6 +13,10 @@ from utils import home_log
 # Add the project root to the path so we can import from utils
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Optional allowlist: only these entity_ids are visible to the bot (data/ha_entities_allowlist.json).
+# If missing or empty, all entities from the HA token are used.
+HA_ENTITIES_ALLOWLIST_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ha_entities_allowlist.json")
+
 # Home Assistant service constants
 HA_SERVICES = {
     "light": ["turn_on", "turn_off", "toggle", "brightness", "color", "effect"],
@@ -63,15 +67,29 @@ class HomeAssistantManager:
             await self.session.close()
             self.session = None
     
+    def _get_entity_allowlist(self) -> Optional[List[str]]:
+        """Return list of allowed entity_ids from data/ha_entities_allowlist.json, or None if not used."""
+        try:
+            if not os.path.isfile(HA_ENTITIES_ALLOWLIST_FILE):
+                return None
+            with open(HA_ENTITIES_ALLOWLIST_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            ids = data if isinstance(data, list) else data.get("entity_ids", data.get("allowlist", []))
+            if not ids:
+                return None
+            return [str(e).strip() for e in ids if e]
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
     async def get_all_entities(self, force_refresh: bool = False) -> Dict:
-        """Get all entities from Home Assistant with caching"""
+        """Get all entities from Home Assistant with caching. If ha_entities_allowlist.json exists, only those entities are returned."""
         import time
-        
+
         # Return cached entities if recent and not forced
         current_time = time.time()
         if not force_refresh and self.entities_cache and (current_time - self.last_update) < 300:  # 5 minutes
             return self.entities_cache
-        
+
         try:
             session = await self.get_session()
             async with session.get(
@@ -81,7 +99,10 @@ class HomeAssistantManager:
             ) as response:
                 if response.status == 200:
                     entities = await response.json()
-                    self.entities_cache = {entity['entity_id']: entity for entity in entities}
+                    self.entities_cache = {entity["entity_id"]: entity for entity in entities}
+                    allowlist = self._get_entity_allowlist()
+                    if allowlist:
+                        self.entities_cache = {eid: self.entities_cache[eid] for eid in allowlist if eid in self.entities_cache}
                     self.last_update = current_time
                     return self.entities_cache
                 else:
