@@ -1,5 +1,7 @@
+"""Permission hierarchy: admin (all commands) > himas (himas + user) > user (user only)."""
 import json
 from integrations import WHITELIST_FILE, PERMANENT_ADMIN
+
 
 def load_whitelist():
     try:

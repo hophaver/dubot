@@ -2,7 +2,7 @@ import requests
 from typing import Optional, List
 import discord
 from discord.ui import View, Select, Button
-from whitelist import get_user_permission, is_admin
+from whitelist import get_user_permission
 from models import model_manager
 from utils.llm_service import validate_and_set_model
 from integrations import OLLAMA_URL
@@ -13,7 +13,7 @@ def _model_embed(current: str, selected: Optional[str]) -> discord.Embed:
     embed.add_field(name="Current", value=f"`{current}`", inline=True)
     if selected:
         embed.add_field(name="Selected (confirm to switch)", value=f"`{selected}`", inline=True)
-    embed.set_footer(text="Select model → Confirm (admin) to switch · Remove (admin) to delete from disk")
+    embed.set_footer(text="Select model → Confirm to switch · Remove to delete from disk")
     return embed
 
 
@@ -51,9 +51,6 @@ class ModelSelectView(View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
             return
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
         target = self.selected or self.current
         await interaction.response.defer()
         success, msg = await validate_and_set_model(interaction.user.id, "local", target)
@@ -68,9 +65,6 @@ class ModelSelectView(View):
     async def _on_remove(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
         target = self.selected or self.current
         await interaction.response.defer()
@@ -96,7 +90,7 @@ class ModelSelectView(View):
 
 
 def register(client: discord.Client):
-    @client.tree.command(name="model", description="View and switch Ollama model (Confirm/Remove: admin only)")
+    @client.tree.command(name="model", description="View and switch Ollama model")
     async def model(interaction: discord.Interaction):
         if not get_user_permission(interaction.user.id):
             await interaction.response.send_message("❌ Denied", ephemeral=True)

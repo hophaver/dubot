@@ -2,7 +2,7 @@ import json
 import os
 import discord
 from discord import app_commands
-from whitelist import has_himas_permission
+from whitelist import is_admin
 from ._shared import HA_MAPPINGS_FILE
 
 
@@ -10,8 +10,8 @@ def register(client: discord.Client):
     @client.tree.command(name="explain", description="Add a friendly name mapping for Home Assistant")
     @app_commands.describe(friendly_name="Friendly name (e.g., 'living room light')", entity_id="Entity ID (e.g., 'light.living_room')")
     async def explain(interaction: discord.Interaction, friendly_name: str, entity_id: str):
-        if not has_himas_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
         try:
             mappings = json.load(open(HA_MAPPINGS_FILE)) if os.path.exists(HA_MAPPINGS_FILE) else {}
