@@ -8,6 +8,8 @@ Discord bot with LLM chat and various features
 - Discord bot token
 - Ollama
 
+- minimum requirements: raspberry pi 4 2GB (LLM has a really hard time)
+
 ## Setup
 
 1. Setup `.env`
