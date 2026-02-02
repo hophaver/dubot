@@ -29,11 +29,11 @@ def register(client: discord.Client):
             embed = discord.Embed(title="📖 Help", color=discord.Color.blue())
             embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
             embed.add_field(name="📌 Usage", value=f"Use **`/help <command>`** for details (e.g. `/help himas`).", inline=False)
-            category_icons = {"General": "💬", "File Analysis": "📄", "Reminders": "⏰", "Persona": "🎭", "Model": "🤖", "Download": "📥", "Scripts": "📜", "Admin": "🔧", "Home Assistant": "🏠"}
+            category_icons = {"General": "💬", "File Analysis": "📄", "Reminders": "⏰", "Persona": "🎭", "Model": "🤖", "Download": "📥", "Scripts": "📜", "Admin": "🔧", "Shitpost": "🎲", "Home Assistant": "🏠"}
             for category, cmd_names in command_db.categories.items():
                 if cmd_names:
                     icon = category_icons.get(category, "•")
                     embed.add_field(name=f"{icon} {category}", value=" ".join(f"`/{name}`" for name in sorted(cmd_names)), inline=True)
-            embed.add_field(name="💡 Tips", value=f"Chat: **{wake}** or mention · Reply to bot to continue · **{wake} dl** or `/download` · `/translate` · `/run` · `/scripts`", inline=False)
+            embed.add_field(name="💡 Tips", value=f"Chat: **{wake}** or mention · Reply to bot to continue · **{wake} dl** or `/download` · **!word** / **.word** (3+ letters) = shitpost · `/translate` · `/run` · `/scripts`", inline=False)
             embed.set_footer(text="/help [command]")
             await interaction.response.send_message(embed=embed)

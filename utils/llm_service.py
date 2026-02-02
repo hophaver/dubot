@@ -144,7 +144,7 @@ def initialize_command_database():
     
     # General Commands
     command_db.add_command("chat", "Chat with AI (starts new chat)", "General")
-    command_db.add_command("forget", "Clear your chat history", "General")
+    command_db.add_command("forget", "Clear chat history (admin only)", "General")
     command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
     command_db.add_command("checkwake", "Check current wake word", "General")
@@ -164,11 +164,11 @@ def initialize_command_database():
     command_db.add_command("cancel-reminder", "Cancel a reminder by ID", "Reminders")
     
     # Persona Commands
-    command_db.add_command("persona", "View or set global AI persona (Confirm/Remove: admin only)", "Persona")
+    command_db.add_command("persona", "View or set global AI persona (set/remove: admin only)", "Persona")
     command_db.add_command("persona-create", "[Admin] Create a new persona", "Persona")
     
     # Model Commands
-    command_db.add_command("model", "View and switch Ollama model (buttons: admin only)", "Model")
+    command_db.add_command("model", "View and switch Ollama model", "Model")
     command_db.add_command("pull-model", "Download new Ollama model", "Model")
     
     # Download Commands
@@ -184,11 +184,16 @@ def initialize_command_database():
     command_db.add_command("purge", "Delete messages from channel", "Admin")
     command_db.add_command("restart", "Restart the bot", "Admin")
     command_db.add_command("kill", "Kill the bot", "Admin")
-    command_db.add_command("whitelist", "View and manage whitelist (roles and users)", "Admin")
+    command_db.add_command("whitelist", "View whitelist or set user role: /whitelist @user admin (set: admin only)", "Admin")
     command_db.add_command("setwake", "Change wake word", "Admin")
     command_db.add_command("sethome", "Set startup channel", "Admin")
     command_db.add_command("setstatus", "Change bot status", "Admin")
-    
+    command_db.add_command("ollama-on", "Start Ollama server (admin only)", "Admin")
+    command_db.add_command("ollama-off", "Stop Ollama server (admin only)", "Admin")
+
+    # Shitpost
+    command_db.add_command("ignore", "Add a word to shitpost ignore list (admin only)", "Shitpost")
+
     # Home Assistant Commands
     command_db.add_command("himas", "Control Home Assistant with natural language", "Home Assistant")
     command_db.add_command("explain", "Add a friendly name mapping for Home Assistant", "Home Assistant")
@@ -418,18 +423,13 @@ def _clean_response(text):
     return text.strip()
 
 
-SHITPOST_SYSTEM = (
-    "Reply with exactly one or two words that confirm or complete the given word as a verb or short phrase. "
-    "No punctuation, no explanation, no quotes. Examples: poop -> pooping; kickit -> kicking it; yo -> yo."
-)
-
-
 async def ask_llm_shitpost(user_id: int, word: str) -> str:
     """One-shot LLM reply for shitpost: max 2 words confirming/continuing the word. Returns empty on error."""
+    system_prompt = get_enhanced_prompt("shitpost")
     model_info = model_manager.get_user_model_info(user_id)
     requested_model = model_info.get("model", "llama3.2:1b")
     messages = [
-        {"role": "system", "content": SHITPOST_SYSTEM},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": word},
     ]
     try:

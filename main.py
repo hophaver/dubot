@@ -1,5 +1,4 @@
 import discord
-import subprocess
 import sys
 import os
 import signal
@@ -113,6 +112,12 @@ class BotClient(discord.Client):
             ShitpostCommands(self).register()
         except Exception as e:
             errors.append(f"shitpost: {e}")
+        # 7c. Ollama
+        try:
+            from commands.ollama import OllamaCommands
+            OllamaCommands(self).register()
+        except Exception as e:
+            errors.append(f"ollama: {e}")
         # 8. Home Assistant
         try:
             from commands.ha import HACommands
@@ -342,30 +347,12 @@ def signal_handler(signum, frame):
 def _ensure_ollama_running():
     """If config says start_ollama_on_startup and Ollama is not responding, start ollama serve in background."""
     try:
-        config = get_config()
-        if not config.get("start_ollama_on_startup"):
+        if not get_config().get("start_ollama_on_startup"):
             return
-        import urllib.request
-        from integrations import OLLAMA_URL
-        base = OLLAMA_URL.rstrip("/")
-        try:
-            urllib.request.urlopen(f"{base}/api/tags", timeout=2)
-            return  # Already running
-        except Exception:
-            pass
-        # Start ollama serve in a new process so it doesn't block
-        kwargs = {}
-        if sys.platform != "win32":
-            kwargs["start_new_session"] = True
-        else:
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(
-            ["ollama", "serve"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **kwargs,
-        )
+        from utils.ollama import check_ollama_running, start_ollama
+        if check_ollama_running():
+            return
+        start_ollama()
     except Exception:
         pass
 

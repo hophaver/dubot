@@ -1,4 +1,4 @@
-"""Shitpost trigger: !word / .word (single token, 3+ letters). .age/!age -> random 1-18 or 30-70; else LLM (max 2 words)."""
+"""Shitpost trigger: !word / .word (single token, 3+ letters). .age/!age -> random 1-18 or 30-70; else LLM (max 2 words)"""
 import random
 from config import get_wake_word
 from utils.llm_service import ask_llm_shitpost
