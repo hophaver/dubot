@@ -1,6 +1,6 @@
 # Dubot
 
-Discord bot with LLM chat
+Discord bot with LLM chat and various features
 
 ## Requirements
 
@@ -11,8 +11,10 @@ Discord bot with LLM chat
 ## Setup
 
 1. Setup `.env`
-2. `pip install -r requirements.txt`
-3. Run: `./start.sh`
+2. `python -m venv venv`
+4. `source venv/bin/activate`
+5. `pip install -r requirements.txt`
+6. Run: `sh start.sh`
 
 ## Config
 
@@ -22,13 +24,14 @@ Discord bot with LLM chat
 - **`system_prompts.json`** – System prompts
 - **`whitelist.json`** – Permissions
 - **`data/ha_mappings.json`** – HA friendly name → entity_id (from `/explain`)
-- **`data/ha_entities_allowlist.json`** – Optional. List of `entity_id`s the bot can see/control. If missing or empty, all entities (from the HA token) are used. Example: `["light.living_room", "switch.plug_1"]`
+- **`data/ha_entities_allowlist.json`** – Optional
 
 ## Commands (summary)
 
 - **Use** `/help`
 
 ### Commands have different permission levels
+- **permanent admin** hardcoded admin
 - **admin** (everything)
 - **himas** (HA + user)
 - **user** (basic)
