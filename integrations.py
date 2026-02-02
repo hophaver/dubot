@@ -24,7 +24,9 @@ OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 # Permanent admin by user ID
 PERMANENT_ADMIN = 266952987128233985
 
-WHITELIST_FILE = "whitelist.json"
+# Paths relative to project root (where integrations.py lives) so they work regardless of cwd
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+WHITELIST_FILE = os.path.join(_ROOT, "whitelist.json")
 CONFIG_FILE = "config.json"
 
 # System time and location

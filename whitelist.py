@@ -3,9 +3,8 @@ from integrations import WHITELIST_FILE, PERMANENT_ADMIN
 
 def load_whitelist():
     try:
-        with open(WHITELIST_FILE, 'r') as f:
+        with open(WHITELIST_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Normalize list contents to int for consistent lookups
         for key in ("admin", "himas", "user"):
             if key in data and isinstance(data[key], list):
                 data[key] = [int(x) for x in data[key]]
@@ -15,9 +14,14 @@ def load_whitelist():
         save_whitelist(default)
         return default
 
+
 def save_whitelist(data):
-    with open(WHITELIST_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    out = {}
+    for key in ("admin", "himas", "user"):
+        lst = data.get(key, [])
+        out[key] = [str(int(x)) for x in lst]
+    with open(WHITELIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=4)
 
 def get_user_permission(user_id):
     whitelist = load_whitelist()
