@@ -16,15 +16,28 @@ def extract_urls(text: str):
 def download_url_sync(url: str, max_bytes: int):
     import requests
     url_lower = url.lower()
-    if any(x in url_lower for x in ["youtube.com", "youtu.be", "twitch.tv", "vimeo.com", "twitter.com", "x.com"]):
+    use_yt_dlp = any(x in url_lower for x in [
+        "youtube.com", "youtu.be", "twitch.tv", "vimeo.com", "twitter.com", "x.com", "soundcloud.com"
+    ])
+    if use_yt_dlp:
         try:
             import yt_dlp
+            # Prefer audio for SoundCloud; video for others
+            if "soundcloud.com" in url_lower:
+                format_str = "bestaudio[ext=m4a]/bestaudio/best"
+            else:
+                format_str = "best[ext=mp4]/best[ext=webm]/best"
             with tempfile.TemporaryDirectory() as tmpdir:
-                opts = {"outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"), "format": "best[ext=mp4]/best[ext=webm]/best", "quiet": True, "no_warnings": True}
+                opts = {
+                    "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
+                    "format": format_str,
+                    "quiet": True,
+                    "no_warnings": True,
+                }
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
                     if not info:
-                        return None, "Could not get video info"
+                        return None, "Could not get media info"
                     files = [f for f in os.listdir(tmpdir) if os.path.isfile(os.path.join(tmpdir, f))]
                     if not files:
                         return None, "No file produced"
