@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts")
-ALLOWED_EXTENSIONS = (".py", ".sh", ".bash", ".exp")
+ALLOWED_EXTENSIONS = (".py", ".sh", ".bash")
 
 
 def list_scripts():

@@ -19,7 +19,7 @@ def register(client: discord.Client):
         names = list_scripts()
         chosen = None
         base = script.lower().strip()
-        for ext in (".py", ".sh", ".bash", ".exp"):
+        for ext in (".py", ".sh", ".bash"):
             if base.endswith(ext):
                 base = base[: -len(ext)]
                 break
@@ -50,8 +50,6 @@ def register(client: discord.Client):
                 try:
                     if chosen.endswith(".py"):
                         subprocess.run([os.environ.get("PYTHON", "python3"), path], cwd=SCRIPTS_DIR, timeout=300)
-                    elif chosen.endswith(".exp"):
-                        subprocess.run(["expect", path], cwd=SCRIPTS_DIR, timeout=300)
                     else:
                         subprocess.run(["bash", path], cwd=SCRIPTS_DIR, timeout=300)
                 except Exception as e:
@@ -62,8 +60,6 @@ def register(client: discord.Client):
         try:
             if chosen.endswith(".py"):
                 result = subprocess.run([os.environ.get("PYTHON", "python3"), path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=120)
-            elif chosen.endswith(".exp"):
-                result = subprocess.run(["expect", path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=120)
             else:
                 result = subprocess.run(["bash", path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=120)
             out = (result.stdout or "").strip() or "(no output)"
