@@ -15,6 +15,7 @@ HOST = os.environ.get("SITE_UPDATE_HOST", "").strip()
 USER = os.environ.get("SITE_UPDATE_USER", "").strip()
 DIRECTORY = os.environ.get("SITE_UPDATE_DIRECTORY", "").strip()
 SCRIPT = os.environ.get("SITE_UPDATE_SCRIPT", "").strip()
+SCRIPT_PREVIEW = os.environ.get("SITE_UPDATE_SCRIPT_PREVIEW", "preview.sh").strip() or "preview.sh"
 PASSWORD = os.environ.get("SITE_UPDATE_SSH_PASSWORD", "").strip()
 
 SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
@@ -53,8 +54,8 @@ def setup_ssh_keys():
 
 
 def run_remote():
-    """Run the configured script on the remote host via SSH (~/sites/dubyu.space/stop.sh)."""
-    remote_cmd = f"cd {DIRECTORY} && sh {SCRIPT}"
+    """Run SCRIPT, then git pull, then SCRIPT_PREVIEW on the remote host."""
+    remote_cmd = f"cd {DIRECTORY} && sh {SCRIPT} && git pull && sh {SCRIPT_PREVIEW}"
     cmd = _ssh_cmd(remote_cmd)
     print(f"Running: ssh {USER}@{HOST} '...'")
     result = subprocess.run(cmd, env=_ssh_env())
