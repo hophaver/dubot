@@ -53,15 +53,37 @@ def setup_ssh_keys():
         return False
 
 
+SENTINEL_LINE = "Run ./stop.sh to stop."
+
+
 def run_remote():
-    """Run SCRIPT, then git pull, then SCRIPT_PREVIEW on the remote host."""
+    """Run SCRIPT, then git pull, then SCRIPT_PREVIEW; close SSH when preview prints the sentinel line."""
     remote_cmd = f"cd {DIRECTORY} && sh {SCRIPT} && git pull && sh {SCRIPT_PREVIEW}"
     cmd = _ssh_cmd(remote_cmd)
     print(f"Running: ssh {USER}@{HOST} '...'")
-    result = subprocess.run(cmd, env=_ssh_env())
-    if result.returncode != 0:
-        print(f"Remote command failed with exit code {result.returncode}")
-    return result.returncode
+    proc = subprocess.Popen(
+        cmd,
+        env=_ssh_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    lines = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            lines.append(line)
+            print(line, flush=True)
+            if SENTINEL_LINE in line:
+                break
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return 0 if SENTINEL_LINE in "".join(lines) else (proc.returncode or 1)
 
 
 def main():
