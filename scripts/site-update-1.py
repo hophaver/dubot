@@ -54,11 +54,16 @@ def setup_ssh_keys():
 
 
 SENTINEL_LINE = "Run ./stop.sh to stop."
+PREVIEW_LOG = "/tmp/site-preview.log"
 
 
 def run_remote():
-    """Run SCRIPT, then git pull, then SCRIPT_PREVIEW; close SSH when preview prints the sentinel line."""
-    remote_cmd = f"cd {DIRECTORY} && sh {SCRIPT} && git pull && sh {SCRIPT_PREVIEW}"
+    """Run SCRIPT, git pull, then SCRIPT_PREVIEW in background; stream output and close SSH when sentinel seen."""
+    # Start preview in background with nohup so it survives SSH disconnect; stream via tail
+    remote_cmd = (
+        f"cd {DIRECTORY} && sh {SCRIPT} && git pull && "
+        f"(nohup sh {SCRIPT_PREVIEW} > {PREVIEW_LOG} 2>&1 &) && sleep 2 && tail -f {PREVIEW_LOG}"
+    )
     cmd = _ssh_cmd(remote_cmd)
     print(f"Running: ssh {USER}@{HOST} '...'")
     proc = subprocess.Popen(
