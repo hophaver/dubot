@@ -8,6 +8,7 @@ ALLOWED_EXTENSIONS = (".py", ".sh", ".bash")
 
 
 def list_scripts():
+    """Return script names from scripts/ (always reads from disk, no cache)."""
     if not os.path.isdir(SCRIPTS_DIR):
         return []
     out = []
@@ -18,6 +19,11 @@ def list_scripts():
         if os.path.isfile(path) and any(name.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS):
             out.append(name)
     return out
+
+
+def recheck_scripts():
+    """Re-scan scripts/ directory and return current script names. Use when /scripts is run."""
+    return list_scripts()
 
 
 def parse_when(when: Optional[str]) -> Tuple[bool, Optional[float], None]:
