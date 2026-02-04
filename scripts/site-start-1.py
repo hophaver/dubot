@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Run preview.sh on the remote host in background; stream output and close SSH when sentinel seen. Reads SITE_UPDATE_* from .env."""
+
+import os
+import subprocess
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
+
+HOST = os.environ.get("SITE_UPDATE_HOST", "").strip()
+USER = os.environ.get("SITE_UPDATE_USER", "").strip()
+DIRECTORY = os.environ.get("SITE_UPDATE_DIRECTORY", "").strip()
+SCRIPT_PREVIEW = os.environ.get("SITE_UPDATE_SCRIPT_PREVIEW", "preview.sh").strip() or "preview.sh"
+PASSWORD = os.environ.get("SITE_UPDATE_SSH_PASSWORD", "").strip()
+
+SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
+SENTINEL_LINE = "Run ./stop.sh to stop."
+PREVIEW_LOG = "/tmp/site-preview.log"
+
+
+def _ssh_env():
+    """Env dict for subprocess; adds SSHPASS when password is set."""
+    env = os.environ.copy()
+    if PASSWORD:
+        env["SSHPASS"] = PASSWORD
+    return env
+
+
+def _ssh_cmd(remote_cmd):
+    """Build ssh command (with sshpass when password set)."""
+    base = ["ssh"] + SSH_OPTS + [f"{USER}@{HOST}", remote_cmd]
+    if PASSWORD:
+        return ["sshpass", "-e"] + base
+    return base
+
+
+def setup_ssh_keys():
+    """Set up SSH keys for passwordless login. Skipped when using password auth."""
+    if PASSWORD:
+        return True
+    key_file = os.path.expanduser("~/.ssh/id_ed25519")
+    if not os.path.exists(key_file):
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", key_file, "-N", ""], check=True)
+    try:
+        subprocess.run(["ssh-copy-id"] + SSH_OPTS + [f"{USER}@{HOST}"], check=True)
+        print(f"✓ SSH keys set up for {USER}@{HOST}")
+        return True
+    except subprocess.CalledProcessError:
+        print(f"✗ Could not copy SSH key. Run manually: ssh-copy-id {USER}@{HOST}")
+        return False
+
+
+def run_remote():
+    """Start preview.sh in background, stream output via tail; close SSH when sentinel seen."""
+    remote_cmd = (
+        f"cd {DIRECTORY} && (nohup sh {SCRIPT_PREVIEW} > {PREVIEW_LOG} 2>&1 &) && "
+        f"sleep 2 && tail -f {PREVIEW_LOG}"
+    )
+    cmd = _ssh_cmd(remote_cmd)
+    print(f"Running: ssh {USER}@{HOST} '...'")
+    proc = subprocess.Popen(
+        cmd,
+        env=_ssh_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    lines = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            lines.append(line)
+            print(line, flush=True)
+            if SENTINEL_LINE in line:
+                break
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return 0 if SENTINEL_LINE in "".join(lines) else (proc.returncode or 1)
+
+
+def _have_sshpass():
+    try:
+        subprocess.run(["which", "sshpass"], capture_output=True, check=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def main():
+    if not all([HOST, USER, DIRECTORY, SCRIPT_PREVIEW]):
+        print("Missing SITE_UPDATE_HOST, SITE_UPDATE_USER, SITE_UPDATE_DIRECTORY or SITE_UPDATE_SCRIPT_PREVIEW in .env")
+        return
+    if PASSWORD and not _have_sshpass():
+        print("SITE_UPDATE_SSH_PASSWORD is set but sshpass not found. Install sshpass or use key-based auth.")
+        return
+    setup_ssh_keys()
+    run_remote()
+
+
+if __name__ == "__main__":
+    main()
