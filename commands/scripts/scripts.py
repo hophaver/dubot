@@ -15,12 +15,12 @@ def register(client: discord.Client):
         embed = discord.Embed(title="📜 Scripts", color=discord.Color.blue())
         embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
         if not names:
-            embed.description = "*No scripts in `scripts/` folder.*"
-            embed.set_footer(text="Scanned scripts/ · Add .py or .sh files to list")
+            embed.description = "*No contents in `scripts/` folder.*"
+            embed.set_footer(text="Scanned scripts/ · Add files or folders to list")
         else:
             value = ", ".join(f"`{n}`" for n in names[:25])
             if len(names) > 25:
                 value += f" *+{len(names) - 25} more*"
-            embed.add_field(name="Available", value=value, inline=False)
-            embed.set_footer(text="Scanned scripts/ · /run <script> [now|in N min|at HH:MM]")
+            embed.add_field(name="Contents", value=value, inline=False)
+            embed.set_footer(text="Scanned scripts/ · /run <script> for .py or .sh [now|in N min|at HH:MM]")
         await interaction.response.send_message(embed=embed)

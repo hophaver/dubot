@@ -21,9 +21,21 @@ def list_scripts():
     return out
 
 
+def list_scripts_dir_contents():
+    """Return all contents of scripts/ (files and dirs, no extension filter). Skips dotfiles."""
+    if not os.path.isdir(SCRIPTS_DIR):
+        return []
+    out = []
+    for name in sorted(os.listdir(SCRIPTS_DIR)):
+        if name.startswith("."):
+            continue
+        out.append(name)
+    return out
+
+
 def recheck_scripts():
-    """Re-scan scripts/ directory and return current script names. Use when /scripts is run."""
-    return list_scripts()
+    """Re-scan scripts/ directory and return all contents. Use when /scripts is run."""
+    return list_scripts_dir_contents()
 
 
 def parse_when(when: Optional[str]) -> Tuple[bool, Optional[float], None]:
