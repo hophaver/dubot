@@ -49,9 +49,22 @@ def register(client: discord.Client):
                 await asyncio.sleep(delay_sec)
                 try:
                     if chosen.endswith(".py"):
-                        subprocess.run([os.environ.get("PYTHON", "python3"), path], cwd=SCRIPTS_DIR, timeout=300)
+                        result = subprocess.run([os.environ.get("PYTHON", "python3"), path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=300)
                     else:
-                        subprocess.run(["bash", path], cwd=SCRIPTS_DIR, timeout=300)
+                        result = subprocess.run(["bash", path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=300)
+                    out = (result.stdout or "").strip() or "(no output)"
+                    err = (result.stderr or "").strip()
+                    if result.returncode != 0:
+                        out = f"Exit code: {result.returncode}\n{out}"
+                        if err:
+                            out += f"\n{err}"
+                    if len(out) > 1900:
+                        out = out[:1900] + "..."
+                    embed = discord.Embed(title=f"📜 Ran `{chosen}` (scheduled)", description=out, color=discord.Color.green() if result.returncode == 0 else discord.Color.orange())
+                    embed.set_footer(text=f"Exit code: {result.returncode}")
+                    await home_log.send_to_home(embed=embed)
+                except subprocess.TimeoutExpired:
+                    await home_log.send_to_home(content=f"❌ Script `{chosen}` timed out (300s).")
                 except Exception as e:
                     home_log.log_sync(f"Script run error: {e}")
             asyncio.create_task(run_later())
@@ -72,7 +85,14 @@ def register(client: discord.Client):
                 out = out[:1900] + "..."
             embed = discord.Embed(title=f"📜 Ran `{chosen}`", description=out, color=discord.Color.green() if result.returncode == 0 else discord.Color.orange())
             embed.set_footer(text=f"Exit code: {result.returncode}")
-            await interaction.followup.send(embed=embed)
+            sent = await home_log.send_to_home(embed=embed)
+            if sent:
+                await interaction.followup.send("✅ Output sent to home channel.", ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    embed=embed,
+                    content="*(Home channel not set; use /sethome.)*",
+                )
         except subprocess.TimeoutExpired:
             await interaction.followup.send(f"❌ Script `{chosen}` timed out (120s).")
         except Exception as e:
