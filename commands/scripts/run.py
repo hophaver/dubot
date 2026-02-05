@@ -8,6 +8,10 @@ from whitelist import is_admin
 from utils import home_log
 from ._shared import list_scripts, parse_when, SCRIPTS_DIR
 
+# Scripts that wait for remote output (e.g. tail -f until sentinel): need longer timeout and background run
+LONG_RUNNING_SCRIPTS = {"site-update-1.py", "site-start-1.py"}
+LONG_RUNNING_TIMEOUT = 600  # seconds
+
 
 def register(client: discord.Client):
     @client.tree.command(name="run", description="Run a script from the scripts folder (now or at specified time)")
@@ -69,12 +73,64 @@ def register(client: discord.Client):
                     home_log.log_sync(f"Script run error: {e}")
             asyncio.create_task(run_later())
             return
+        is_long_running = chosen in LONG_RUNNING_SCRIPTS
+        if is_long_running:
+            await interaction.response.send_message(
+                f"⏳ Running `{chosen}` (may take a few minutes). Output will be sent to home when done.",
+                ephemeral=True,
+            )
+
+        async def run_and_send_to_home():
+            timeout = LONG_RUNNING_TIMEOUT if is_long_running else 120
+            try:
+                if chosen.endswith(".py"):
+                    result = subprocess.run(
+                        [os.environ.get("PYTHON", "python3"), path],
+                        cwd=SCRIPTS_DIR,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+                else:
+                    result = subprocess.run(
+                        ["bash", path],
+                        cwd=SCRIPTS_DIR,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+                out = (result.stdout or "").strip() or "(no output)"
+                err = (result.stderr or "").strip()
+                if result.returncode != 0:
+                    out = f"Exit code: {result.returncode}\n{out}"
+                    if err:
+                        out += f"\n{err}"
+                if len(out) > 1900:
+                    out = out[:1900] + "..."
+                embed = discord.Embed(
+                    title=f"📜 Ran `{chosen}`",
+                    description=out,
+                    color=discord.Color.green() if result.returncode == 0 else discord.Color.orange(),
+                )
+                embed.set_footer(text=f"Exit code: {result.returncode}")
+                await home_log.send_to_home(embed=embed)
+            except subprocess.TimeoutExpired:
+                await home_log.send_to_home(content=f"❌ Script `{chosen}` timed out ({timeout}s).")
+            except Exception as e:
+                await home_log.send_to_home(content=f"❌ Script `{chosen}` error: {str(e)[:500]}")
+
+        if is_long_running:
+            asyncio.create_task(run_and_send_to_home())
+            return
         await interaction.response.defer()
         try:
-            if chosen.endswith(".py"):
-                result = subprocess.run([os.environ.get("PYTHON", "python3"), path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=120)
-            else:
-                result = subprocess.run(["bash", path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(
+                [os.environ.get("PYTHON", "python3"), path] if chosen.endswith(".py") else ["bash", path],
+                cwd=SCRIPTS_DIR,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
             out = (result.stdout or "").strip() or "(no output)"
             err = (result.stderr or "").strip()
             if result.returncode != 0:
@@ -83,7 +139,11 @@ def register(client: discord.Client):
                     out += f"\n{err}"
             if len(out) > 1900:
                 out = out[:1900] + "..."
-            embed = discord.Embed(title=f"📜 Ran `{chosen}`", description=out, color=discord.Color.green() if result.returncode == 0 else discord.Color.orange())
+            embed = discord.Embed(
+                title=f"📜 Ran `{chosen}`",
+                description=out,
+                color=discord.Color.green() if result.returncode == 0 else discord.Color.orange(),
+            )
             embed.set_footer(text=f"Exit code: {result.returncode}")
             sent = await home_log.send_to_home(embed=embed)
             if sent:
