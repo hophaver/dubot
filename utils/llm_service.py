@@ -146,6 +146,8 @@ def initialize_command_database():
     command_db.add_command("chat", "Chat with AI (starts new chat)", "General")
     command_db.add_command("forget", "Clear chat history (admin only)", "General")
     command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
+    command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
+    command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
     command_db.add_command("checkwake", "Check current wake word", "General")
     command_db.add_command("help", "List all commands", "General")
@@ -448,7 +450,7 @@ def _format_discord_message(username, message, context):
     if not context or len(context) == 0:
         return f"{username} says: {message}"
     context_str = "\nRecent messages in this channel:\n"
-    for msg in context[-3:]:
+    for msg in context[-10:]:
         context_str += f"{msg['author']}: {msg['content']}\n"
     return f"{context_str}\n{username} says: {message}"
 

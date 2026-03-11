@@ -11,6 +11,10 @@ DEFAULTS = {
     "start_ollama_on_startup": False,
     "current_persona": "default",
     "chat_history": 20,
+    # Auto-conversation settings
+    "conversation_channels": [],
+    "conversation_min_interval": 5,
+    "conversation_max_interval": 20,
 }
 
 
@@ -75,4 +79,65 @@ def set_chat_history(n: int) -> None:
     """Set how many user messages to remember per chat (1–100)."""
     cfg = get_config()
     cfg["chat_history"] = max(1, min(100, n))
+    save_config(cfg)
+
+
+def get_conversation_channels():
+    """Return list of channel IDs where auto-conversation is enabled."""
+    cfg = get_config()
+    raw = cfg.get("conversation_channels", []) or []
+    ids = []
+    for item in raw:
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def add_conversation_channel(channel_id: int) -> None:
+    """Add a channel to auto-conversation list."""
+    cfg = get_config()
+    raw = cfg.get("conversation_channels", []) or []
+    str_id = str(channel_id)
+    if str_id not in [str(x) for x in raw]:
+        raw.append(str_id)
+        cfg["conversation_channels"] = raw
+        save_config(cfg)
+
+
+def remove_conversation_channel(channel_id: int) -> None:
+    """Remove a channel from auto-conversation list."""
+    cfg = get_config()
+    raw = cfg.get("conversation_channels", []) or []
+    str_id = str(channel_id)
+    new_raw = [x for x in raw if str(x) != str_id]
+    cfg["conversation_channels"] = new_raw
+    save_config(cfg)
+
+
+def get_conversation_frequency():
+    """Return (min_messages, max_messages) for auto-conversation trigger."""
+    cfg = get_config()
+    try:
+        min_n = int(cfg.get("conversation_min_interval", DEFAULTS["conversation_min_interval"]) or 5)
+    except (TypeError, ValueError):
+        min_n = 5
+    try:
+        max_n = int(cfg.get("conversation_max_interval", DEFAULTS["conversation_max_interval"]) or 20)
+    except (TypeError, ValueError):
+        max_n = 20
+    min_n = max(1, min_n)
+    if max_n < min_n:
+        max_n = min_n
+    return min_n, max_n
+
+
+def set_conversation_frequency(min_messages: int, max_messages: int) -> None:
+    """Set how often the bot auto-replies in conversation channels."""
+    min_messages = max(1, int(min_messages))
+    max_messages = max(min_messages, int(max_messages))
+    cfg = get_config()
+    cfg["conversation_min_interval"] = min_messages
+    cfg["conversation_max_interval"] = max_messages
     save_config(cfg)

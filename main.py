@@ -3,9 +3,17 @@ import sys
 import os
 import signal
 import time
+import random
 from discord import app_commands
 from integrations import DISCORD_BOT_TOKEN, PERMANENT_ADMIN
-from config import get_config, get_startup_channel_id, get_wake_word, get_current_persona
+from config import (
+    get_config,
+    get_startup_channel_id,
+    get_wake_word,
+    get_current_persona,
+    get_conversation_channels,
+    get_conversation_frequency,
+)
 from whitelist import get_user_permission
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
@@ -136,6 +144,9 @@ class BotClient(discord.Client):
 
 client = BotClient()
 
+# In-memory counters for auto-conversation per channel: {channel_id: {"count": int, "next": int}}
+_auto_conversation_state = {}
+
 # Event handlers
 async def _run_startup_checks(client):
     """Collect all startup check results for the embed. Returns (errors, checks_dict)."""
@@ -230,6 +241,10 @@ async def on_message(message):
     if message.author == client.user:
         return
 
+    # Ignore other bots for auto-conversation and permissions
+    if message.author.bot:
+        return
+
     # Get permission level
     permission = get_user_permission(message.author.id)
     if permission is None:
@@ -287,9 +302,106 @@ async def on_message(message):
     # Shitpost: !word or .word (single token, 3+ letters, letters only; not wake word)
     if await handle_shitpost(client, message):
         return
-    
+
+    # Passive auto-conversation in configured channels
+    await _handle_auto_conversation(message)
+
     # Process Discord-specific chat (original functionality)
     await process_discord_message(client, message, permission, conversation_manager)
+
+
+async def _handle_auto_conversation(message: discord.Message) -> None:
+    """Occasionally continue conversation in configured channels without wake word."""
+    try:
+        channel_id = message.channel.id
+    except AttributeError:
+        return
+
+    # Only in enabled channels
+    if channel_id not in get_conversation_channels():
+        return
+
+    # Do not trigger on messages aimed directly at the bot
+    content = (message.content or "").strip()
+    content_lower = content.lower()
+    wake_word = get_wake_word().lower()
+    if client.user.mentioned_in(message):
+        return
+    if content_lower == wake_word or content_lower.startswith(wake_word + " "):
+        return
+
+    # Update per-channel counters and decide whether to trigger
+    min_n, max_n = get_conversation_frequency()
+    state = _auto_conversation_state.get(channel_id)
+    if not state:
+        state = {"count": 0, "next": random.randint(min_n, max_n)}
+        _auto_conversation_state[channel_id] = state
+
+    state["count"] += 1
+    if state["count"] < state["next"]:
+        return
+
+    # Reset for next trigger
+    state["count"] = 0
+    state["next"] = random.randint(min_n, max_n)
+
+    # Collect last 10 human text messages from this channel (excluding bots)
+    messages = []
+    try:
+        async for msg in message.channel.history(limit=50):
+            if msg.author.bot:
+                continue
+            text = (msg.content or "").strip()
+            if not text:
+                continue
+            messages.append(
+                {
+                    "author": msg.author.name,
+                    "content": text,
+                    "timestamp": msg.created_at.isoformat(),
+                }
+            )
+            if len(messages) >= 10:
+                break
+    except Exception as e:
+        await home_log.log(f"Error fetching channel history for auto-conversation: {e}", also_send=False)
+        return
+
+    if not messages:
+        return
+
+    messages.reverse()  # chronological order
+
+    # Ask LLM to continue conversation briefly, using global persona (user_id=0)
+    from utils.llm_service import ask_llm
+
+    prompt = (
+        "Read the recent messages above and continue the conversation with one short, natural reply. "
+        "Do not list what each person said or describe the conversation; just answer as if you are a real user in this chat."
+    )
+
+    try:
+        answer = await ask_llm(
+            0,
+            channel_id,
+            prompt,
+            str(client.user.name),
+            is_continuation=False,
+            platform="discord",
+            chat_context=messages,
+        )
+    except Exception as e:
+        await home_log.log(f"Error generating auto-conversation reply: {e}", also_send=False)
+        return
+
+    if not answer:
+        return
+
+    # Send as a regular message (no reply)
+    try:
+        await message.channel.send(answer)
+    except Exception as e:
+        await home_log.log(f"Error sending auto-conversation reply: {e}", also_send=False)
 
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
