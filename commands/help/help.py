@@ -12,6 +12,8 @@ def register(client: discord.Client):
         if not get_user_permission(interaction.user.id):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
+        from services.clone_service import sync_identity
+        await sync_identity(client, interaction.guild)
         if command:
             cmd_info = command_db.get_command(command.lower())
             if cmd_info:

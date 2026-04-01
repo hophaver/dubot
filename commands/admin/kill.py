@@ -1,9 +1,6 @@
 import asyncio
-import sys
 import discord
 from whitelist import is_admin
-from conversations import conversation_manager
-from services.reminder_service import reminder_manager
 
 
 def register(client: discord.Client):
@@ -16,7 +13,6 @@ def register(client: discord.Client):
 
         async def _delayed_exit():
             await asyncio.sleep(1.5)
-            conversation_manager.save()
-            reminder_manager.stop()
-            sys.exit(0)
+            await client.close()
+
         asyncio.create_task(_delayed_exit())

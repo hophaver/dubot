@@ -1,3 +1,4 @@
+import asyncio
 import discord
 import sys
 import os
@@ -37,7 +38,17 @@ class BotClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.start_time = time.time()
         self.commands_registered = False
-    
+
+    async def close(self):
+        try:
+            from services.clone_service import revert_if_active
+            await revert_if_active(self)
+        except Exception:
+            pass
+        conversation_manager.save()
+        reminder_manager.stop()
+        await super().close()
+
     async def setup_hook(self):
         """Setup hook to sync commands"""
         # Only register commands if not already registered
@@ -213,6 +224,8 @@ async def _run_startup_checks(client):
 async def on_ready():
     """Called when bot is ready. Run startup checks and send a single embed to home."""
     home_log.set_client(client)
+    from services.clone_service import on_bot_ready_baseline
+    await on_bot_ready_baseline(client)
     config = get_config()
     status_text = config.get("bot_status", "Analyzing files with AI")
     activity = discord.Activity(type=discord.ActivityType.listening, name=status_text)
@@ -239,6 +252,10 @@ async def on_ready():
 async def on_message(message):
     """Handle incoming messages with file attachments"""
     if message.author == client.user:
+        return
+
+    from services.clone_service import mirror_message_if_clone
+    if await mirror_message_if_clone(client, message):
         return
 
     # Ignore other bots for auto-conversation and permissions
@@ -449,12 +466,19 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 def signal_handler(signum, frame):
     """Handle shutdown signals"""
     print("\n👋 Received shutdown signal, cleaning up...")
-    # Save conversation data
-    conversation_manager.save()
-    # Stop reminder service
-    reminder_manager.stop()
-    # Exit gracefully
-    sys.exit(0)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        conversation_manager.save()
+        reminder_manager.stop()
+        sys.exit(0)
+        return
+    if not client.is_closed():
+        loop.create_task(client.close())
+    else:
+        conversation_manager.save()
+        reminder_manager.stop()
+        sys.exit(0)
 
 def _ensure_ollama_running():
     """If config says start_ollama_on_startup and Ollama is not responding, start ollama serve in background."""
@@ -477,6 +501,7 @@ if __name__ == "__main__":
     # Ensure data directory exists
     os.makedirs("data", exist_ok=True)
     os.makedirs("data/files", exist_ok=True)
+    os.makedirs("assets", exist_ok=True)
     os.makedirs("web", exist_ok=True)
 
     # Start HTTP server for GET /status (localhost:3000/status)

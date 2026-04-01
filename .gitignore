@@ -1,6 +1,9 @@
 .env
 config.json
 data/
+assets/original_avatar.png
+assets/original_avatar.gif
+assets/original_avatar.webp
 web/
 __pycache__/
 *.pyc

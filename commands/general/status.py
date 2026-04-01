@@ -35,6 +35,8 @@ def register(client):
             return
         await interaction.response.defer()
         try:
+            from services.clone_service import sync_identity
+            await sync_identity(client, interaction.guild)
             from utils.llm_service import command_db, SUPPORTED_FILE_TYPES
             sys_status = get_system_status()
             if "error" in sys_status:

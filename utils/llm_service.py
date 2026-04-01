@@ -190,6 +190,7 @@ def initialize_command_database():
     command_db.add_command("setwake", "Change wake word", "Admin")
     command_db.add_command("sethome", "Set startup channel", "Admin")
     command_db.add_command("setstatus", "Change bot status", "Admin")
+    command_db.add_command("clone", "Mirror a member's avatar, nickname, and messages (permanent admin only)", "Admin")
     command_db.add_command("ollama-on", "Start Ollama server (admin only)", "Admin")
     command_db.add_command("ollama-off", "Stop Ollama server (admin only)", "Admin")
 
