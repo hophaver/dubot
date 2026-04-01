@@ -1,6 +1,7 @@
-"""Clone mode: mirror a member's avatar, nickname, and messages (permanent admin only)."""
+"""Clone mode: bot mirror and optional server-wide nickname clone (permanent admin only)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any, Dict, Optional
@@ -13,11 +14,13 @@ STATE_PATH = os.path.join(_ROOT, "data", "clone_state.json")
 
 _default_state: Dict[str, Any] = {
     "active": False,
+    "variant": None,
     "target_user_id": None,
     "delete_original": False,
     "guild_id": None,
     "original_nickname": None,
     "mirror_avatar_url": None,
+    "server_wide": None,
 }
 
 
@@ -60,13 +63,22 @@ def save_state(state: Dict[str, Any]) -> None:
         json.dump(state, f, indent=2)
 
 
+def _effective_variant(state: Dict[str, Any]) -> Optional[str]:
+    if not state.get("active"):
+        return None
+    v = state.get("variant")
+    if v:
+        return v
+    return "bot_mirror"
+
+
 def is_clone_active() -> bool:
     return bool(load_state().get("active"))
 
 
 def get_clone_target_user_id() -> Optional[int]:
     s = load_state()
-    if not s.get("active"):
+    if not s.get("active") or _effective_variant(s) != "bot_mirror":
         return None
     tid = s.get("target_user_id")
     return int(tid) if tid is not None else None
@@ -80,6 +92,14 @@ def get_clone_guild_id() -> Optional[int]:
 
 def should_delete_original() -> bool:
     return bool(load_state().get("delete_original"))
+
+
+def _nick_norm(n: Optional[str]) -> str:
+    return (n or "").strip()
+
+
+def _avatar_key(member: discord.Member) -> str:
+    return str(member.display_avatar.key)
 
 
 async def snapshot_baseline_avatar(client: discord.Client) -> None:
@@ -125,13 +145,48 @@ async def restore_original_appearance(client: discord.Client, guild: Optional[di
         await guild.me.edit(nick=nick)
 
 
+async def _revert_server_wide(client: discord.Client, guild: Optional[discord.Guild]) -> None:
+    state = load_state()
+    sw = state.get("server_wide")
+    if not sw or not isinstance(sw, dict):
+        return
+    if not guild:
+        return
+    members_snap = sw.get("members") or {}
+    delay = 0.35
+    for uid_str, snap in members_snap.items():
+        try:
+            uid = int(uid_str)
+        except (TypeError, ValueError):
+            continue
+        member = guild.get_member(uid)
+        if not member or member.bot:
+            continue
+        cur_nick = member.nick
+        cur_key = _avatar_key(member)
+        post_nick = snap.get("post_nick")
+        post_key = snap.get("post_avatar_key")
+        if _nick_norm(cur_nick) != _nick_norm(post_nick) or cur_key != post_key:
+            continue
+        orig_nick = snap.get("orig_nick")
+        try:
+            await member.edit(nick=orig_nick)
+        except discord.HTTPException:
+            pass
+        await asyncio.sleep(delay)
+
+
 async def revert_if_active(client: discord.Client) -> None:
     state = load_state()
     if not state.get("active"):
         return
+    variant = _effective_variant(state)
     gid = state.get("guild_id")
     guild = client.get_guild(int(gid)) if gid is not None else None
-    await restore_original_appearance(client, guild)
+    if variant == "server_wide":
+        await _revert_server_wide(client, guild)
+    else:
+        await restore_original_appearance(client, guild)
     save_state(dict(_default_state))
     await snapshot_baseline_avatar(client)
 
@@ -156,32 +211,115 @@ async def start_clone(
     guild = member.guild
     if not guild.me:
         raise RuntimeError("Bot member not available")
-    prev = load_state()
-    already = bool(prev.get("active"))
-    if not already:
-        await snapshot_baseline_avatar(client)
-        path = _find_saved_avatar_path()
-        if not path and client.user:
-            u = client.user
-            animated = u.display_avatar.is_animated()
-            p = _avatar_path(animated)
-            data = await u.display_avatar.read()
-            with open(p, "wb") as f:
-                f.write(data)
-        stored_original_nick = guild.me.nick
-    else:
-        stored_original_nick = prev.get("original_nickname")
+    if load_state().get("active"):
+        await revert_if_active(client)
+    await snapshot_baseline_avatar(client)
+    path = _find_saved_avatar_path()
+    if not path and client.user:
+        u = client.user
+        animated = u.display_avatar.is_animated()
+        p = _avatar_path(animated)
+        data = await u.display_avatar.read()
+        with open(p, "wb") as f:
+            f.write(data)
+    stored_original_nick = guild.me.nick
     state = {
         "active": True,
+        "variant": "bot_mirror",
         "target_user_id": member.id,
         "delete_original": delete_original,
         "guild_id": guild.id,
         "original_nickname": stored_original_nick,
         "mirror_avatar_url": str(member.display_avatar.url),
+        "server_wide": None,
     }
     save_state(state)
     await _apply_avatar_from_member(client, member)
     await guild.me.edit(nick=member.display_name)
+
+
+async def start_server_wide_clone(client: discord.Client, template: discord.Member) -> tuple[int, int]:
+    """
+    Snapshot all non-bot members, set nick to template display name where the API allows.
+    Returns (edited_ok, edit_failed).
+    Discord does not allow bots to change other users' avatars; avatar URL/key per member is stored for restore rules.
+    """
+    guild = template.guild
+    if not guild.me:
+        raise RuntimeError("Bot member not available")
+    if load_state().get("active"):
+        await revert_if_active(client)
+
+    try:
+        await guild.chunk()
+    except Exception:
+        pass
+
+    if not guild.me.guild_permissions.manage_nicknames and not guild.me.guild_permissions.administrator:
+        raise RuntimeError("Bot needs Manage Nicknames (or Administrator) to run server-wide clone.")
+
+    template_nick = template.display_name[:32]
+    members_map: Dict[str, Dict[str, Any]] = {}
+
+    for member in list(guild.members):
+        if member.bot:
+            continue
+        orig_nick = member.nick
+        orig_key = _avatar_key(member)
+        members_map[str(member.id)] = {
+            "orig_nick": orig_nick,
+            "orig_avatar_key": orig_key,
+            "orig_avatar_url": str(member.display_avatar.url),
+            "post_nick": orig_nick,
+            "post_avatar_key": orig_key,
+        }
+
+    state = {
+        "active": True,
+        "variant": "server_wide",
+        "target_user_id": None,
+        "delete_original": False,
+        "guild_id": guild.id,
+        "original_nickname": None,
+        "mirror_avatar_url": None,
+        "server_wide": {
+            "template_user_id": template.id,
+            "members": members_map,
+        },
+    }
+    save_state(state)
+
+    ok = 0
+    failed = 0
+    delay = 0.35
+
+    for member in list(guild.members):
+        if member.bot:
+            continue
+        uid = str(member.id)
+        snap = members_map.get(uid)
+        if not snap:
+            continue
+        if _nick_norm(member.nick) == _nick_norm(template_nick):
+            snap["post_nick"] = member.nick
+            snap["post_avatar_key"] = _avatar_key(member)
+            continue
+        try:
+            await member.edit(nick=template_nick)
+            snap["post_nick"] = template_nick
+            snap["post_avatar_key"] = _avatar_key(member)
+            ok += 1
+        except discord.HTTPException:
+            failed += 1
+            m2 = guild.get_member(member.id)
+            if m2:
+                snap["post_nick"] = m2.nick
+                snap["post_avatar_key"] = _avatar_key(m2)
+        await asyncio.sleep(delay)
+
+    state["server_wide"]["members"] = members_map
+    save_state(state)
+    return ok, failed
 
 
 async def stop_clone(client: discord.Client) -> None:
@@ -190,7 +328,7 @@ async def stop_clone(client: discord.Client) -> None:
 
 async def refresh_clone_appearance(client: discord.Client, guild: Optional[discord.Guild]) -> None:
     state = load_state()
-    if not state.get("active"):
+    if not state.get("active") or _effective_variant(state) != "bot_mirror":
         return
     gid = state.get("guild_id")
     g = guild or (client.get_guild(int(gid)) if gid is not None else None)
@@ -209,8 +347,9 @@ async def refresh_clone_appearance(client: discord.Client, guild: Optional[disco
 
 
 async def sync_identity(client: discord.Client, guild: Optional[discord.Guild]) -> None:
-    """Refresh baseline on disk when inactive; refresh mirror when active (/status, /help)."""
-    if load_state().get("active"):
+    """Refresh baseline on disk when inactive; refresh bot mirror when active (/status, /help)."""
+    state = load_state()
+    if state.get("active") and _effective_variant(state) == "bot_mirror":
         await refresh_clone_appearance(client, guild)
     else:
         await snapshot_baseline_avatar(client)
@@ -218,13 +357,15 @@ async def sync_identity(client: discord.Client, guild: Optional[discord.Guild]) 
 
 async def mirror_message_if_clone(client: discord.Client, message: discord.Message) -> bool:
     """
-    If clone is active and this message is from the target, echo it and optionally delete the original.
+    If bot-mirror clone is active and this message is from the target, echo it and optionally delete the original.
     Returns True if handled (caller should skip further processing).
     """
     if not message.guild:
         return False
     state = load_state()
     if not state.get("active"):
+        return False
+    if _effective_variant(state) != "bot_mirror":
         return False
     if int(state["guild_id"]) != message.guild.id:
         return False

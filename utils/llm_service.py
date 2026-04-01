@@ -164,7 +164,12 @@ def initialize_command_database():
     command_db.add_command("remind", "Set a reminder", "Reminders")
     command_db.add_command("reminders", "List your active reminders", "Reminders")
     command_db.add_command("cancel-reminder", "Cancel a reminder by ID", "Reminders")
-    
+    command_db.add_command(
+        "cal",
+        "Build an .ics file: repeated events on chosen weekdays between two dates (local server timezone)",
+        "Calendar",
+    )
+
     # Persona Commands
     command_db.add_command("persona", "View or set global AI persona (set/remove: admin only)", "Persona")
     command_db.add_command("persona-create", "[Admin] Create a new persona", "Persona")
@@ -190,7 +195,11 @@ def initialize_command_database():
     command_db.add_command("setwake", "Change wake word", "Admin")
     command_db.add_command("sethome", "Set startup channel", "Admin")
     command_db.add_command("setstatus", "Change bot status", "Admin")
-    command_db.add_command("clone", "Mirror a member's avatar, nickname, and messages (permanent admin only)", "Admin")
+    command_db.add_command(
+        "clone",
+        "Bot mirror (on/replace) or server-wide nick clone as one user (all); off reverts (permanent admin only)",
+        "Admin",
+    )
     command_db.add_command("ollama-on", "Start Ollama server (admin only)", "Admin")
     command_db.add_command("ollama-off", "Stop Ollama server (admin only)", "Admin")
 

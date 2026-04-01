@@ -89,6 +89,12 @@ class BotClient(discord.Client):
             ReminderCommands(self).register()
         except Exception as e:
             errors.append(f"reminder: {e}")
+        # 4b. Calendar (.ics batch)
+        try:
+            from commands.cal import CalCommands
+            CalCommands(self).register()
+        except Exception as e:
+            errors.append(f"cal: {e}")
         # 5. Persona
         try:
             from commands.persona import PersonaCommands
