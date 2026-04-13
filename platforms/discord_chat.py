@@ -303,9 +303,10 @@ async def process_discord_message(client, message, permission, conversation_mana
     
     # Check activation methods
     raw_content = (message.content or "").strip()
-    is_admin_bang = message.author.id == PERMANENT_ADMIN and raw_content.startswith("!")
     is_wake_word = (message_lower == wake_word or 
                     message_lower.startswith(wake_word + " "))
+    # If wake word itself starts with "!" (e.g. "!d"), wake-word chat must take precedence.
+    is_admin_bang = message.author.id == PERMANENT_ADMIN and raw_content.startswith("!") and not is_wake_word
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mentioned = client.user.mentioned_in(message)
     is_reply_to_bot = conversation_manager.is_continuation(message)
