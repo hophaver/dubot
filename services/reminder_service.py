@@ -12,14 +12,29 @@ try:
 except ImportError:
     TelegramForbidden = Exception
 
+
+def _runtime_platform() -> str:
+    platform = os.environ.get("DUBOT_RUNTIME", "discord").strip().lower()
+    return platform if platform in {"discord", "telegram"} else "discord"
+
+
 class Reminder:
-    def __init__(self, user_id: int, channel_id: int, message: str, trigger_time: datetime, is_dm: bool = False):
+    def __init__(
+        self,
+        user_id: int,
+        channel_id: int,
+        message: str,
+        trigger_time: datetime,
+        is_dm: bool = False,
+        platform: str = "discord",
+    ):
         self.user_id = user_id
         self.channel_id = channel_id
         self.message = message
         self.trigger_time = trigger_time
         self.is_dm = is_dm
-        self.id = f"{user_id}_{int(trigger_time.timestamp())}"
+        self.platform = platform
+        self.id = f"{platform}_{user_id}_{int(trigger_time.timestamp())}"
     
     def to_dict(self):
         return {
@@ -28,6 +43,7 @@ class Reminder:
             "message": self.message,
             "trigger_time": self.trigger_time.isoformat(),
             "is_dm": self.is_dm,
+            "platform": self.platform,
             "id": self.id
         }
     
@@ -38,7 +54,8 @@ class Reminder:
             data["channel_id"],
             data["message"],
             datetime.fromisoformat(data["trigger_time"]),
-            data.get("is_dm", False)
+            data.get("is_dm", False),
+            data.get("platform", "discord"),
         )
         reminder.id = data.get("id", reminder.id)
         return reminder
@@ -51,7 +68,7 @@ class ReminderManager:
         self.thread = None
         self.client = None
         self.telegram_bot = None
-        self.platform = "discord"
+        self.platform = _runtime_platform()
         self.loop = None
         self.load()
     
@@ -72,14 +89,14 @@ class ReminderManager:
     def add_reminder(self, user_id: int, channel_id: int, message: str, delay_minutes: int, is_dm: bool = False) -> str:
         """Add a new reminder"""
         trigger_time = datetime.now() + timedelta(minutes=delay_minutes)
-        reminder = Reminder(user_id, channel_id, message, trigger_time, is_dm)
+        reminder = Reminder(user_id, channel_id, message, trigger_time, is_dm, self.platform)
         self.reminders[reminder.id] = reminder
         self.save()
         return reminder.id
     
     def add_timed_reminder(self, user_id: int, channel_id: int, message: str, trigger_time: datetime, is_dm: bool = False) -> str:
         """Add reminder for specific time"""
-        reminder = Reminder(user_id, channel_id, message, trigger_time, is_dm)
+        reminder = Reminder(user_id, channel_id, message, trigger_time, is_dm, self.platform)
         self.reminders[reminder.id] = reminder
         self.save()
         return reminder.id
@@ -122,6 +139,8 @@ class ReminderManager:
         triggered = []
         
         for reminder_id, reminder in list(self.reminders.items()):
+            if reminder.platform != self.platform:
+                continue
             if reminder.trigger_time <= now:
                 triggered.append(reminder)
                 del self.reminders[reminder_id]

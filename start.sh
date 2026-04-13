@@ -4,6 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 PID_FILE="${SCRIPT_DIR}/.bot.pid"
+PIDS_FILE="${SCRIPT_DIR}/.bot.pids"
 LOG_FILE="${SCRIPT_DIR}/bot.log"
 
 echo "=== Startup checks ==="
@@ -24,19 +25,29 @@ if [ -f "requirements.txt" ]; then
     echo "  ✓ Dependencies OK"
 fi
 
-if [ -f ".bot.pid" ]; then
-    OLD_PID=$(cat ".bot.pid")
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
         echo "  ⚠ Bot already running (PID $OLD_PID). Run ./stop.sh first."
         exit 1
     fi
-    rm -f ".bot.pid"
+    rm -f "$PID_FILE"
+fi
+
+if [ -f "$PIDS_FILE" ]; then
+    if rg -n "^[^:]+:[0-9]+$" "$PIDS_FILE" >/dev/null 2>&1; then
+        while IFS=: read -r _name _pid; do
+            if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+                echo "  ⚠ Bot already running (PID $_pid). Run ./stop.sh first."
+                exit 1
+            fi
+        done < "$PIDS_FILE"
+    fi
+    rm -f "$PIDS_FILE"
 fi
 
 echo "=== Starting bot in background ==="
-BOT_ENTRY="${BOT_ENTRY:-}"
-if [ -z "$BOT_ENTRY" ]; then
-    BOT_ENTRY="$(python3 - <<'PY'
+PLATFORM_DECISION="$(python3 - <<'PY'
 import os
 try:
     from dotenv import load_dotenv
@@ -46,14 +57,33 @@ except Exception:
 platform = os.environ.get("BOT_PLATFORM", "").strip().lower()
 discord = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 telegram = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-if platform == "telegram" or (telegram and not discord):
-    print("main_telegram.py")
+if platform in {"discord", "telegram", "both"}:
+    print(platform)
+elif discord and telegram:
+    print("both")
+elif telegram:
+    print("telegram")
 else:
-    print("main.py")
+    print("discord")
 PY
 )"
+
+if [ "$PLATFORM_DECISION" = "both" ]; then
+    nohup env DUBOT_RUNTIME=discord python3 "main.py" >> "$LOG_FILE" 2>&1 &
+    DISCORD_PID=$!
+    nohup env DUBOT_RUNTIME=telegram python3 "main_telegram.py" >> "$LOG_FILE" 2>&1 &
+    TELEGRAM_PID=$!
+    printf "discord:%s\ntelegram:%s\n" "$DISCORD_PID" "$TELEGRAM_PID" > "$PIDS_FILE"
+    echo "  ✓ Discord started (PID $DISCORD_PID)"
+    echo "  ✓ Telegram started (PID $TELEGRAM_PID)"
+    echo "  ✓ Multi-platform mode active. Logs: $LOG_FILE"
+elif [ "$PLATFORM_DECISION" = "telegram" ]; then
+    nohup env DUBOT_RUNTIME=telegram python3 "main_telegram.py" >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "  ✓ Telegram started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+else
+    nohup env DUBOT_RUNTIME=discord python3 "main.py" >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "  ✓ Discord started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
 fi
-nohup python3 "$BOT_ENTRY" >> "$LOG_FILE" 2>&1 &
-echo $! > "$PID_FILE"
-echo "  ✓ Bot started (PID $(cat "$PID_FILE"), entry: $BOT_ENTRY). Logs: $LOG_FILE"
 echo "  Run ./stop.sh to stop."

@@ -1,6 +1,8 @@
 import sys
 import os
 
+os.environ["DUBOT_RUNTIME"] = "discord"
+
 try:
     from utils.bootstrap_deps import ensure_news_dependencies
     ensure_news_dependencies()

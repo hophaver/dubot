@@ -4,6 +4,8 @@ import signal
 import sys
 from typing import Optional, Tuple
 
+os.environ["DUBOT_RUNTIME"] = "telegram"
+
 from telegram import Update
 from telegram.constants import ChatType
 from telegram.ext import (

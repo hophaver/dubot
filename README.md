@@ -19,11 +19,13 @@ Discord/Telegram bot with LLM chat and various features
 5. `pip install -r requirements.txt`
 6. Run: `sh start.sh`
 
-### Telegram mode
+### Multi-platform mode
 
 - Add `TELEGRAM_BOT_TOKEN` to `.env`
-- Optional: set `BOT_PLATFORM=telegram` to force Telegram entrypoint
-- Optional: set `BOT_PLATFORM=discord` to force Discord entrypoint
+- If both `DISCORD_BOT_TOKEN` and `TELEGRAM_BOT_TOKEN` are set, `start.sh` runs both bots simultaneously
+- Optional: set `BOT_PLATFORM=both` to force both
+- Optional: set `BOT_PLATFORM=telegram` to force Telegram only
+- Optional: set `BOT_PLATFORM=discord` to force Discord only
 - If only Telegram token is set, `start.sh` auto-selects `main_telegram.py`
 
 ## Config

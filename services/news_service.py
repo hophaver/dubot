@@ -34,6 +34,54 @@ FETCH_INTERVAL_SECONDS = 600  # 10 minutes between fetches
 MAX_SEEN_ARTICLES = 5000
 MAX_ARTICLES_PER_CYCLE = 8  # per topic per cycle
 
+
+def _runtime_platform() -> str:
+    platform = os.environ.get("DUBOT_RUNTIME", "discord").strip().lower()
+    return platform if platform in {"discord", "telegram"} else "discord"
+
+
+def _platform_user_key(user_id: int) -> str:
+    return f"{_runtime_platform()}:{int(user_id)}"
+
+
+def _legacy_user_key(user_id: int) -> str:
+    return str(int(user_id))
+
+
+def _keys_for_lookup(user_id: int) -> List[str]:
+    keys = [_platform_user_key(user_id)]
+    if _runtime_platform() == "discord":
+        keys.append(_legacy_user_key(user_id))
+    return keys
+
+
+def _platform_of_key(uid_key: str) -> str:
+    if ":" in uid_key:
+        return uid_key.split(":", 1)[0]
+    return "discord"
+
+
+def _user_id_from_key(uid_key: str) -> Optional[int]:
+    raw = uid_key.split(":", 1)[1] if ":" in uid_key else uid_key
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_user_entry(subs: Dict, user_id: int) -> Dict:
+    merged_topics = set()
+    active = False
+    for key in _keys_for_lookup(user_id):
+        entry = subs.get(key)
+        if not isinstance(entry, dict):
+            continue
+        active = active or bool(entry.get("active", False))
+        for t in entry.get("topics", []):
+            if isinstance(t, str) and t.strip():
+                merged_topics.add(t.lower().strip())
+    return {"topics": sorted(merged_topics), "active": active}
+
 # Reliable RSS sources by topic keyword. Each entry: (feed_url, source_name).
 # The service matches user topics to these via keyword overlap.
 TOPIC_FEEDS: Dict[str, List[Tuple[str, str]]] = {
@@ -136,14 +184,17 @@ def save_subscriptions(data: Dict) -> None:
 def subscribe_user(user_id: int, topics: List[str]) -> List[str]:
     """Add topics for user. Returns the full topic list after merge."""
     subs = get_subscriptions()
-    uid = str(user_id)
-    entry = subs.get(uid, {"topics": [], "active": True})
+    uid = _platform_user_key(user_id)
+    entry = _get_user_entry(subs, user_id)
+    entry["active"] = True
     existing = set(t.lower() for t in entry.get("topics", []))
     for t in topics:
         existing.add(t.lower().strip())
     entry["topics"] = sorted(existing)
     entry["active"] = True
     subs[uid] = entry
+    if _runtime_platform() == "discord":
+        subs.pop(_legacy_user_key(user_id), None)
     save_subscriptions(subs)
     return entry["topics"]
 
@@ -151,9 +202,13 @@ def subscribe_user(user_id: int, topics: List[str]) -> List[str]:
 def unsubscribe_user(user_id: int, topics: Optional[List[str]] = None) -> List[str]:
     """Remove specific topics or all. Returns remaining topics."""
     subs = get_subscriptions()
-    uid = str(user_id)
+    uid = _platform_user_key(user_id)
     entry = subs.get(uid)
-    if not entry:
+    if not entry and _runtime_platform() == "discord":
+        legacy = subs.get(_legacy_user_key(user_id))
+        if legacy:
+            entry = legacy
+    if not isinstance(entry, dict):
         return []
     if topics is None:
         entry["topics"] = []
@@ -164,13 +219,15 @@ def unsubscribe_user(user_id: int, topics: Optional[List[str]] = None) -> List[s
         if not entry["topics"]:
             entry["active"] = False
     subs[uid] = entry
+    if _runtime_platform() == "discord":
+        subs.pop(_legacy_user_key(user_id), None)
     save_subscriptions(subs)
     return entry["topics"]
 
 
 def get_user_topics(user_id: int) -> List[str]:
     subs = get_subscriptions()
-    entry = subs.get(str(user_id), {})
+    entry = _get_user_entry(subs, user_id)
     if not entry.get("active", False):
         return []
     return entry.get("topics", [])
@@ -222,7 +279,7 @@ def save_preferences(data: Dict) -> None:
 def record_feedback(user_id: int, article_hash: str, feedback_type: str, topic: str) -> None:
     """Record user feedback on an article to calibrate future delivery."""
     prefs = get_preferences()
-    uid = str(user_id)
+    uid = _platform_user_key(user_id)
     user_prefs = prefs.setdefault(uid, {})
     topic_prefs = user_prefs.setdefault(topic, {
         "slop_count": 0,
@@ -273,7 +330,9 @@ def _extract_keywords(text: str) -> List[str]:
 def get_user_detail_level(user_id: int, topic: str) -> str:
     """Return 'detailed', 'normal', or 'brief' based on accumulated feedback."""
     prefs = get_preferences()
-    tp = prefs.get(str(user_id), {}).get(topic, {})
+    tp = prefs.get(_platform_user_key(user_id), {}).get(topic, {})
+    if not tp and _runtime_platform() == "discord":
+        tp = prefs.get(_legacy_user_key(user_id), {}).get(topic, {})
     critical = tp.get("critical_count", 0)
     not_critical = tp.get("not_critical_count", 0)
     if critical > not_critical + 2:
@@ -286,7 +345,9 @@ def get_user_detail_level(user_id: int, topic: str) -> str:
 def should_suppress_article(user_id: int, topic: str, title: str) -> bool:
     """Heuristic: suppress if title keywords heavily overlap with suppressed keywords."""
     prefs = get_preferences()
-    tp = prefs.get(str(user_id), {}).get(topic, {})
+    tp = prefs.get(_platform_user_key(user_id), {}).get(topic, {})
+    if not tp and _runtime_platform() == "discord":
+        tp = prefs.get(_legacy_user_key(user_id), {}).get(topic, {})
     suppress = set(tp.get("keywords_suppress", []))
     boost = set(tp.get("keywords_boost", []))
     slop_count = tp.get("slop_count", 0)
@@ -368,7 +429,10 @@ def format_minutes_as_clock(mins: int) -> str:
 def get_daily_quiet_schedule(user_id: int) -> Optional[Tuple[int, int]]:
     """Return (pause_min, resume_min) if set, else None. Uses server local time."""
     cfg = get_news_config()
-    qt = cfg.get("quiet_times", {}).get(str(user_id))
+    qt_map = cfg.get("quiet_times", {})
+    qt = qt_map.get(_platform_user_key(user_id))
+    if not qt and _runtime_platform() == "discord":
+        qt = qt_map.get(_legacy_user_key(user_id))
     if not qt:
         return None
     try:
@@ -395,7 +459,7 @@ def set_daily_quiet_schedule(user_id: int, resume_min: int, pause_min: int) -> N
     """resume = when notifications turn on again; pause = when they turn off (daily, server local time)."""
     cfg = get_news_config()
     qt = cfg.setdefault("quiet_times", {})
-    uid = str(user_id)
+    uid = _platform_user_key(user_id)
     prev = qt.get(uid) if isinstance(qt.get(uid), dict) else {}
     articles = prev.get("articles") if isinstance(prev.get("articles"), list) else []
     qt[uid] = {"pause_min": pause_min, "resume_min": resume_min, "articles": articles}
@@ -407,7 +471,10 @@ def add_quiet_time_article(user_id: int, article: Dict) -> None:
     if get_daily_quiet_schedule(user_id) is None:
         return
     cfg = get_news_config()
-    qt = cfg.get("quiet_times", {}).get(str(user_id))
+    qt_map = cfg.get("quiet_times", {})
+    qt = qt_map.get(_platform_user_key(user_id))
+    if not qt and _runtime_platform() == "discord":
+        qt = qt_map.get(_legacy_user_key(user_id))
     if qt:
         qt.setdefault("articles", []).append(article)
         save_news_config(cfg)
@@ -416,7 +483,10 @@ def add_quiet_time_article(user_id: int, article: Dict) -> None:
 def pop_queued_articles_only(user_id: int) -> List[Dict]:
     """Return queued articles and clear the queue; keep the daily schedule."""
     cfg = get_news_config()
-    qt = cfg.get("quiet_times", {}).get(str(user_id))
+    qt_map = cfg.get("quiet_times", {})
+    qt = qt_map.get(_platform_user_key(user_id))
+    if not qt and _runtime_platform() == "discord":
+        qt = qt_map.get(_legacy_user_key(user_id))
     if not qt:
         return []
     arts = list(qt.get("articles") or [])
@@ -427,7 +497,10 @@ def pop_queued_articles_only(user_id: int) -> List[Dict]:
 
 def clear_quiet_time(user_id: int) -> None:
     cfg = get_news_config()
-    cfg.get("quiet_times", {}).pop(str(user_id), None)
+    qt = cfg.get("quiet_times", {})
+    qt.pop(_platform_user_key(user_id), None)
+    if _runtime_platform() == "discord":
+        qt.pop(_legacy_user_key(user_id), None)
     save_news_config(cfg)
 
 
@@ -774,7 +847,7 @@ class NewsManager:
         self.thread: Optional[threading.Thread] = None
         self.client: Optional[discord.Client] = None
         self.telegram_bot = None
-        self.platform = "discord"
+        self.platform = _runtime_platform()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         _ensure_data_dir()
 
@@ -828,12 +901,18 @@ class NewsManager:
         await self._flush_daily_quiet_digests()
 
         # Collect all unique topics
-        all_topics: Dict[str, List[int]] = {}
+        all_topics: Dict[str, set] = {}
+        runtime = _runtime_platform()
         for uid_str, entry in subs.items():
+            if _platform_of_key(uid_str) != runtime:
+                continue
+            uid_val = _user_id_from_key(uid_str)
+            if uid_val is None:
+                continue
             if not entry.get("active", False):
                 continue
             for topic in entry.get("topics", []):
-                all_topics.setdefault(topic, []).append(int(uid_str))
+                all_topics.setdefault(topic, set()).add(uid_val)
 
         if not all_topics:
             return
@@ -863,7 +942,7 @@ class NewsManager:
                     "sent_at": datetime.now().isoformat(),
                 })
 
-                for uid in user_ids:
+                for uid in sorted(user_ids):
                     try:
                         await self._deliver_article(uid, article, topic)
                     except Exception as e:
@@ -946,11 +1025,16 @@ class NewsManager:
         cfg = get_news_config()
         qt_dict = cfg.get("quiet_times", {})
         now = datetime.now()
+        runtime = _runtime_platform()
 
         for uid_str, qt_data in list(qt_dict.items()):
-            if get_daily_quiet_schedule(int(uid_str)) is None:
+            if _platform_of_key(uid_str) != runtime:
                 continue
-            uid = int(uid_str)
+            uid = _user_id_from_key(uid_str)
+            if uid is None:
+                continue
+            if get_daily_quiet_schedule(uid) is None:
+                continue
             if user_in_quiet_window(uid, now):
                 continue
             articles = qt_data.get("articles") or []
