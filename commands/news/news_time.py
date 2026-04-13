@@ -21,7 +21,7 @@ from services.news_service import (
 def register(client: discord.Client):
     @client.tree.command(
         name="news-time",
-        description="Set daily quiet hours for news (server local time). Example: resume 9.00, pause 1.00 → quiet 1:00–9:00",
+        description="Set daily quiet hours for news DMs (e.g. pause 1:00, resume 9:00)",
     )
     @app_commands.describe(
         resume="When notifications turn ON again each day (e.g. 9.00 = 9:00 AM)",

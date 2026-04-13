@@ -21,7 +21,7 @@ _MAX_EVENTS = 1000
 def register(client: discord.Client):
     @client.tree.command(
         name="cal",
-        description="Create calendar events on selected weekdays between two dates (sends an .ics file to import)",
+        description="Create recurring calendar events between two dates (.ics export)",
     )
     @app_commands.rename(
         start_date="startdate",
