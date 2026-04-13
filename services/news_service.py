@@ -1105,7 +1105,7 @@ class NewsCompactView(discord.ui.View):
         await interaction.response.edit_message(
             content=self.expanded_text,
             view=expanded_view,
-            suppress=False,
+            suppress_embeds=False,
         )
 
     @discord.ui.button(label="Slop", emoji="🗑️", style=discord.ButtonStyle.secondary)
