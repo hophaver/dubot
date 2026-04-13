@@ -995,6 +995,121 @@ class NewsFeedbackView(discord.ui.View):
         await interaction.response.send_message("Marked as critical — I'll give more detail for news like this.", ephemeral=True)
 
 
+def _clean_sentence(text: str) -> str:
+    s = re.sub(r"\s+", " ", (text or "").strip())
+    if not s:
+        return ""
+    if s[-1] not in ".!?":
+        s += "."
+    return s
+
+
+def _build_compact_news_text(summary: str, article: Dict) -> str:
+    """Build a 2-4 sentence compact preview without source link."""
+    lines = [(ln or "").strip() for ln in (summary or "").splitlines() if (ln or "").strip()]
+    headline = ""
+    body_parts: List[str] = []
+
+    for line in lines:
+        if line.lower().startswith("**headline:**"):
+            headline = line.split(":", 1)[1].strip().strip("* ")
+            continue
+        if line.startswith("•"):
+            body_parts.append(line.lstrip("•").strip())
+
+    if not headline:
+        headline = article.get("title", "News update")
+
+    selected = []
+    for part in body_parts:
+        clean = _clean_sentence(part)
+        if clean:
+            selected.append(clean)
+        if len(selected) >= 3:
+            break
+
+    if len(selected) < 2:
+        fallback = _clean_sentence((article.get("summary", "") or "")[:280])
+        if fallback:
+            selected.append(fallback)
+    if len(selected) < 2:
+        selected.append("This item passed the high-importance filter for your topic.")
+
+    selected = selected[:3]
+    return f"**HEADLINE:** {headline}\n" + "\n".join(selected)
+
+
+def _build_expanded_news_text(summary: str, article: Dict) -> str:
+    """Render expanded content with a visual headline (without 'HEADLINE:' label)."""
+    lines = [(ln or "").strip() for ln in (summary or "").splitlines()]
+    headline = ""
+    body_lines: List[str] = []
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            body_lines.append("")
+            continue
+        if line.lower().startswith("**headline:**"):
+            headline = line.split(":", 1)[1].strip().strip("* ")
+            continue
+        body_lines.append(line)
+
+    if not headline:
+        headline = article.get("title", "News update")
+
+    body = "\n".join(body_lines).strip()
+    if body:
+        return f"# **{headline}**\n\n{body}"
+    return f"# **{headline}**"
+
+
+class NewsExpandedView(discord.ui.View):
+    def __init__(self, article_hash: str, topic: str):
+        super().__init__(timeout=86400)
+        self.article_hash = article_hash
+        self.topic = topic
+
+    @discord.ui.button(label="Gem", emoji="💎", style=discord.ButtonStyle.success)
+    async def gem(self, interaction: discord.Interaction, button: discord.ui.Button):
+        record_feedback(interaction.user.id, self.article_hash, "more", self.topic)
+        await interaction.response.send_message("Saved as gem — prioritizing similar stories.", ephemeral=True)
+
+    @discord.ui.button(label="Not critical", emoji="📋", style=discord.ButtonStyle.secondary)
+    async def not_critical(self, interaction: discord.Interaction, button: discord.ui.Button):
+        record_feedback(interaction.user.id, self.article_hash, "not_critical", self.topic)
+        await interaction.response.send_message("Noted — I will de-prioritize similar updates.", ephemeral=True)
+
+    @discord.ui.button(label="Critical", emoji="🚨", style=discord.ButtonStyle.danger)
+    async def critical(self, interaction: discord.Interaction, button: discord.ui.Button):
+        record_feedback(interaction.user.id, self.article_hash, "critical", self.topic)
+        await interaction.response.send_message("Marked critical — similar updates will be prioritized.", ephemeral=True)
+
+
+class NewsCompactView(discord.ui.View):
+    def __init__(self, article_hash: str, topic: str, compact_text: str, expanded_text: str):
+        super().__init__(timeout=86400)
+        self.article_hash = article_hash
+        self.topic = topic
+        self.compact_text = compact_text
+        self.expanded_text = expanded_text
+
+    @discord.ui.button(label="Expand", emoji="🔎", style=discord.ButtonStyle.primary)
+    async def expand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        expanded_view = NewsExpandedView(self.article_hash, self.topic)
+        await interaction.response.edit_message(
+            content=self.expanded_text,
+            view=expanded_view,
+            suppress=False,
+        )
+
+    @discord.ui.button(label="Slop", emoji="🗑️", style=discord.ButtonStyle.secondary)
+    async def slop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        record_feedback(interaction.user.id, self.article_hash, "slop", self.topic)
+        slop_text = f"~~{self.compact_text}~~\n\n**SLOP**"
+        await interaction.response.edit_message(content=slop_text, view=None)
+
+
 def build_news_embed(article: Dict, summary: str, topic: str) -> discord.Embed:
     """Build a nicely formatted embed for a news article."""
     emoji = CATEGORY_EMOJIS.get(topic.lower(), "📰")
@@ -1245,16 +1360,16 @@ class NewsManager:
                 home_log.log_sync(f"⚠️ Telegram send error for user {user_id}: {e}")
             return False
 
-        # Discord path
-        embed = build_news_embed(article, summary, topic)
-        view = NewsFeedbackView(article["hash"], topic)
+        # Discord path: compact first, then expand in-place.
+        compact_text = _build_compact_news_text(summary, article)
+        source_url = (article.get("link") or "").strip()
+        expanded_text = _build_expanded_news_text(summary, article)
+        if source_url:
+            expanded_text = f"{expanded_text}\n\n{source_url}"
+        view = NewsCompactView(article["hash"], topic, compact_text, expanded_text)
         try:
             user = await self.client.fetch_user(user_id)
-            source_url = (article.get("link") or "").strip()
-            if source_url:
-                # Plain URL gives Discord a chance to render native preview cards.
-                await user.send(content=source_url, suppress_embeds=False)
-            await user.send(embed=embed, view=view)
+            await user.send(content=compact_text, view=view)
             return True
         except discord.Forbidden:
             home_log.log_sync(f"⚠️ Cannot DM user {user_id} (DMs disabled)")
