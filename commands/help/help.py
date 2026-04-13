@@ -2,6 +2,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
+from commands.shared import bot_embed_thumbnail_url
 from config import get_wake_word
 from utils.llm_service import command_db
 
@@ -18,7 +19,9 @@ def register(client: discord.Client):
             cmd_info = command_db.get_command(command.lower())
             if cmd_info:
                 embed = discord.Embed(title=f"📖 /{cmd_info['name']}", description=cmd_info["description"], color=discord.Color.blue())
-                embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+                _thumb = bot_embed_thumbnail_url(client.user)
+                if _thumb:
+                    embed.set_thumbnail(url=_thumb)
                 embed.add_field(name="Category", value=cmd_info["category"], inline=True)
                 if cmd_info.get("aliases"):
                     embed.add_field(name="Aliases", value=", ".join(cmd_info["aliases"]), inline=True)
@@ -29,7 +32,9 @@ def register(client: discord.Client):
         else:
             wake = get_wake_word()
             embed = discord.Embed(title="📖 Help", color=discord.Color.blue())
-            embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+            _thumb = bot_embed_thumbnail_url(client.user)
+            if _thumb:
+                embed.set_thumbnail(url=_thumb)
             embed.add_field(name="📌 Usage", value=f"Use **`/help <command>`** for details (e.g. `/help himas`).", inline=False)
             category_icons = {"General": "💬", "File Analysis": "📄", "Reminders": "⏰", "Calendar": "📅", "Persona": "🎭", "Model": "🤖", "Download": "📥", "Scripts": "📜", "Admin": "🔧", "Shitpost": "🎲", "Home Assistant": "🏠"}
             for category, cmd_names in command_db.categories.items():

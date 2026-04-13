@@ -4,6 +4,7 @@ import time
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
+from commands.shared import bot_embed_thumbnail_url
 from config import get_config
 from utils.system_monitor import get_system_status
 from models import model_manager
@@ -53,7 +54,9 @@ def register(client):
             file_types_count = len(SUPPORTED_FILE_TYPES)
             _write_status_json(sys_status, bot_uptime_sec, bot_uptime, current_model, commands_count, file_types_count)
             embed = discord.Embed(title="🤖 Status", color=discord.Color.blue())
-            embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+            _thumb = bot_embed_thumbnail_url(client.user)
+            if _thumb:
+                embed.set_thumbnail(url=_thumb)
             embed.add_field(name="🌐 IP", value=sys_status["ip_address"], inline=True)
             embed.add_field(name="🖥️ Host", value=sys_status["hostname"], inline=True)
             embed.add_field(name="📋 OS", value=sys_status["os"], inline=True)

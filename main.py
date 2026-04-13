@@ -28,7 +28,7 @@ from platforms.discord_chat import process_discord_message
 from commands.shitpost import handle_shitpost
 from utils.llm_service import initialize_command_database
 from utils import home_log
-from commands.shared import send_long_to_channel
+from commands.shared import send_long_to_channel, bot_embed_thumbnail_url
 
 # Initialize command database
 initialize_command_database()
@@ -261,7 +261,9 @@ async def on_ready():
         color=discord.Color.green() if not has_issues else discord.Color.orange(),
         description="Startup checks:",
     )
-    embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+    _thumb = bot_embed_thumbnail_url(client.user)
+    if _thumb:
+        embed.set_thumbnail(url=_thumb)
     for name, value in checks.items():
         embed.add_field(name=name, value=value[:1024], inline=True)
     embed.set_footer(text=time.strftime("%Y-%m-%d %H:%M:%S"))

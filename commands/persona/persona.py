@@ -3,6 +3,7 @@ import discord
 from discord import app_commands
 from discord.ui import View, Select, Button
 from whitelist import get_user_permission, is_admin
+from commands.shared import bot_embed_thumbnail_url
 from personas import persona_manager
 
 
@@ -52,7 +53,7 @@ class PersonaSelectView(View):
         self.selected = (interaction.data.get("values") or [None])[0]
         await interaction.response.edit_message(
             embed=_persona_embed(self.current_persona, self.selected, self.persona_prompts,
-                self.client.user.display_avatar.url if self.client.user else None),
+                bot_embed_thumbnail_url(self.client.user)),
             view=self,
         )
 
@@ -70,7 +71,7 @@ class PersonaSelectView(View):
         await interaction.response.edit_message(
             content=f"✅ Persona set to **{target}**.",
             embed=_persona_embed(self.current_persona, None, self.persona_prompts,
-                self.client.user.display_avatar.url if self.client.user else None),
+                bot_embed_thumbnail_url(self.client.user)),
             view=self,
         )
 
@@ -96,7 +97,7 @@ class PersonaSelectView(View):
         await interaction.response.edit_message(
             content=f"✅ Persona **{target}** removed.",
             embed=_persona_embed(self.current_persona, None, self.persona_prompts,
-                self.client.user.display_avatar.url if self.client.user else None),
+                bot_embed_thumbnail_url(self.client.user)),
             view=PersonaSelectView(self.client, self.user_id, self.current_persona, self.persona_names, self.persona_prompts, timeout=self.timeout),
         )
 
@@ -113,6 +114,6 @@ def register(client: discord.Client):
             return
         current = persona_manager.get_user_persona(0)
         persona_prompts = {n: persona_manager.get_persona(n) for n in names}
-        embed = _persona_embed(current, None, persona_prompts, interaction.client.user.display_avatar.url if interaction.client.user else None)
+        embed = _persona_embed(current, None, persona_prompts, bot_embed_thumbnail_url(interaction.client.user))
         view = PersonaSelectView(interaction.client, interaction.user.id, current, names, persona_prompts)
         await interaction.response.send_message(embed=embed, view=view)

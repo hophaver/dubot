@@ -3,6 +3,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from whitelist import is_admin, get_user_permission, set_user_role, load_whitelist
+from commands.shared import bot_embed_thumbnail_url
 
 
 async def build_whitelist_embed(client: discord.Client) -> discord.Embed:
@@ -21,7 +22,9 @@ async def build_whitelist_embed(client: discord.Client) -> discord.Embed:
         description="Use `/whitelist @user admin` (or himas/user) to add or change a user's role. Admin only.",
         color=discord.Color.dark_blue(),
     )
-    embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+    _thumb = bot_embed_thumbnail_url(client.user)
+    if _thumb:
+        embed.set_thumbnail(url=_thumb)
     for key, label in role_config:
         ids = data.get(key, []) or []
         if not ids:

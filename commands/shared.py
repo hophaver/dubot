@@ -1,8 +1,23 @@
 """Shared helpers for commands (e.g. long message chunking)."""
 import asyncio
+from typing import Optional
+
 import discord
 
 MAX_MESSAGE_LENGTH = 1900
+
+
+def bot_embed_thumbnail_url(bot_user: Optional[discord.ClientUser]) -> Optional[str]:
+    """Avatar URL safe for embed thumbnails.
+
+    Discord rejects many default-avatar CDN URLs in embeds with 404 *asset not found*;
+    only return a URL when the bot has a custom uploaded avatar.
+    """
+    if bot_user is None:
+        return None
+    if bot_user.avatar is None:
+        return None
+    return str(bot_user.display_avatar.url)
 
 
 def _chunk_message(message: str, max_length: int = MAX_MESSAGE_LENGTH):

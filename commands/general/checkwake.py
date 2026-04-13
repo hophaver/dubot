@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
+from commands.shared import bot_embed_thumbnail_url
 from config import get_wake_word
 
 
@@ -12,7 +13,9 @@ def register(client):
             return
         wake_word = get_wake_word()
         embed = discord.Embed(title="🔔 Wake Word", color=discord.Color.blue())
-        embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+        _thumb = bot_embed_thumbnail_url(client.user)
+        if _thumb:
+            embed.set_thumbnail(url=_thumb)
         embed.add_field(name="Current", value=f"`{wake_word}`", inline=True)
         embed.add_field(name="Usage", value=f"Mention me or start with **{wake_word}** to chat.", inline=True)
         embed.set_footer(text="/setwake [Admin]")

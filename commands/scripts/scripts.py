@@ -1,6 +1,7 @@
 import os
 import discord
 from whitelist import is_admin
+from commands.shared import bot_embed_thumbnail_url
 from ._shared import recheck_scripts
 
 
@@ -13,7 +14,9 @@ def register(client: discord.Client):
         # Recheck scripts/ on every /scripts run so the list is always current
         names = recheck_scripts()
         embed = discord.Embed(title="📜 Scripts", color=discord.Color.blue())
-        embed.set_thumbnail(url=client.user.display_avatar.url if client.user else None)
+        _thumb = bot_embed_thumbnail_url(client.user)
+        if _thumb:
+            embed.set_thumbnail(url=_thumb)
         if not names:
             embed.description = "*No contents in `scripts/` folder.*"
             embed.set_footer(text="Scanned scripts/ · Add files or folders to list")
