@@ -65,7 +65,8 @@ def register(client: discord.Client):
                 return
             note = (
                 "Discord does not let bots change **other users' profile pictures** — only **server nicknames** were set to match the template. "
-                "Avatars are stored in state so if someone changes nickname or avatar during clone, they are **not** reverted on `/clone off`."
+                "Avatars are stored in state so if someone changes nickname or avatar during clone, they are **not** reverted on `/clone off`. "
+                f"Edits run **one member every ~{int(clone_service.SERVER_WIDE_PER_MEMBER_DELAY_SEC)}s** to reduce rate limits."
             )
             await interaction.followup.send(
                 f"✅ Server-wide nick clone: **{ok}** updated, **{failed}** failed (permissions / hierarchy / rate limits).\n{note}\n"

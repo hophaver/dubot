@@ -12,6 +12,21 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(_ROOT, "assets")
 STATE_PATH = os.path.join(_ROOT, "data", "clone_state.json")
 
+# One member at a time; space out PATCH /guilds/.../members/... to avoid rate limits.
+SERVER_WIDE_PER_MEMBER_DELAY_SEC = 2.5
+
+
+def _extra_backoff_for_http_exception(exc: discord.HTTPException) -> float:
+    if exc.status != 429:
+        return 0.0
+    try:
+        ra = exc.response.headers.get("Retry-After")
+        if ra is not None:
+            return float(ra) + 1.0
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return 8.0
+
 _default_state: Dict[str, Any] = {
     "active": False,
     "variant": None,
@@ -153,8 +168,9 @@ async def _revert_server_wide(client: discord.Client, guild: Optional[discord.Gu
     if not guild:
         return
     members_snap = sw.get("members") or {}
-    delay = 0.35
+    delay = SERVER_WIDE_PER_MEMBER_DELAY_SEC
     for uid_str, snap in members_snap.items():
+        await asyncio.sleep(delay)
         try:
             uid = int(uid_str)
         except (TypeError, ValueError):
@@ -171,9 +187,8 @@ async def _revert_server_wide(client: discord.Client, guild: Optional[discord.Gu
         orig_nick = snap.get("orig_nick")
         try:
             await member.edit(nick=orig_nick)
-        except discord.HTTPException:
-            pass
-        await asyncio.sleep(delay)
+        except discord.HTTPException as e:
+            await asyncio.sleep(_extra_backoff_for_http_exception(e))
 
 
 async def revert_if_active(client: discord.Client) -> None:
@@ -291,11 +306,12 @@ async def start_server_wide_clone(client: discord.Client, template: discord.Memb
 
     ok = 0
     failed = 0
-    delay = 0.35
+    delay = SERVER_WIDE_PER_MEMBER_DELAY_SEC
 
     for member in list(guild.members):
         if member.bot:
             continue
+        await asyncio.sleep(delay)
         uid = str(member.id)
         snap = members_map.get(uid)
         if not snap:
@@ -309,13 +325,13 @@ async def start_server_wide_clone(client: discord.Client, template: discord.Memb
             snap["post_nick"] = template_nick
             snap["post_avatar_key"] = _avatar_key(member)
             ok += 1
-        except discord.HTTPException:
+        except discord.HTTPException as e:
             failed += 1
             m2 = guild.get_member(member.id)
             if m2:
                 snap["post_nick"] = m2.nick
                 snap["post_avatar_key"] = _avatar_key(m2)
-        await asyncio.sleep(delay)
+            await asyncio.sleep(_extra_backoff_for_http_exception(e))
 
     state["server_wide"]["members"] = members_map
     save_state(state)

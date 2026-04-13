@@ -1,0 +1,906 @@
+"""Background news service: fetches RSS feeds, summarizes via LLM, sends DMs with feedback buttons."""
+
+import asyncio
+import hashlib
+import json
+import os
+import re
+import threading
+import time
+import traceback
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+import discord
+import requests
+
+from utils import home_log
+
+DATA_DIR = os.path.join("data", "news")
+SUBSCRIPTIONS_FILE = os.path.join(DATA_DIR, "subscriptions.json")
+SEEN_FILE = os.path.join(DATA_DIR, "seen_articles.json")
+PREFERENCES_FILE = os.path.join(DATA_DIR, "preferences.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "news_config.json")
+
+FETCH_INTERVAL_SECONDS = 600  # 10 minutes between fetches
+MAX_SEEN_ARTICLES = 5000
+MAX_ARTICLES_PER_CYCLE = 8  # per topic per cycle
+
+# Reliable RSS sources by topic keyword. Each entry: (feed_url, source_name).
+# The service matches user topics to these via keyword overlap.
+TOPIC_FEEDS: Dict[str, List[Tuple[str, str]]] = {
+    "tech": [
+        ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
+        ("https://techcrunch.com/feed/", "TechCrunch"),
+        ("https://www.theverge.com/rss/index.xml", "The Verge"),
+        ("https://news.ycombinator.com/rss", "Hacker News"),
+        ("https://www.wired.com/feed/rss", "Wired"),
+    ],
+    "ai": [
+        ("https://www.technologyreview.com/feed/", "MIT Technology Review"),
+        ("https://techcrunch.com/category/artificial-intelligence/feed/", "TechCrunch AI"),
+        ("https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "The Verge AI"),
+        ("https://news.ycombinator.com/rss", "Hacker News"),
+    ],
+    "finland": [
+        ("https://feeds.yle.fi/uutiset/v1/recent.rss?publisherIds=YLE_UUTISET", "YLE News"),
+        ("https://www.hs.fi/rss/tuoreimmat.xml", "Helsingin Sanomat"),
+        ("https://yle.fi/rss/uutiset.rss", "YLE"),
+    ],
+    "us": [
+        ("https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml", "New York Times"),
+        ("https://feeds.npr.org/1001/rss.xml", "NPR"),
+        ("https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml", "BBC US & Canada"),
+        ("https://rss.politico.com/politics-news.xml", "Politico"),
+    ],
+    "trade": [
+        ("https://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business"),
+        ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC"),
+        ("https://rss.nytimes.com/services/xml/rss/nyt/Business.xml", "NYT Business"),
+    ],
+    "global politics": [
+        ("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC World"),
+        ("https://rss.nytimes.com/services/xml/rss/nyt/World.xml", "NYT World"),
+        ("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera"),
+        ("https://feeds.npr.org/1004/rss.xml", "NPR World"),
+    ],
+    "science": [
+        ("https://rss.nytimes.com/services/xml/rss/nyt/Science.xml", "NYT Science"),
+        ("https://www.newscientist.com/section/news/feed/", "New Scientist"),
+        ("https://feeds.bbci.co.uk/news/science_and_environment/rss.xml", "BBC Science"),
+    ],
+    "gaming": [
+        ("https://kotaku.com/rss", "Kotaku"),
+        ("https://www.polygon.com/rss/index.xml", "Polygon"),
+        ("https://www.ign.com/articles.rss", "IGN"),
+    ],
+    "crypto": [
+        ("https://cointelegraph.com/rss", "CoinTelegraph"),
+        ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
+    ],
+    "europe": [
+        ("https://www.euronews.com/rss", "Euronews"),
+        ("https://feeds.bbci.co.uk/news/world/europe/rss.xml", "BBC Europe"),
+        ("https://rss.nytimes.com/services/xml/rss/nyt/Europe.xml", "NYT Europe"),
+    ],
+}
+
+
+def _ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _hash_article(title: str, link: str) -> str:
+    raw = f"{title.strip().lower()}|{link.strip().lower()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Persistence helpers
+# ---------------------------------------------------------------------------
+
+def _load_json(path: str, default: Any = None) -> Any:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default if default is not None else {}
+
+
+def _save_json(path: str, data: Any) -> None:
+    _ensure_data_dir()
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Subscriptions: {user_id_str: {"topics": [...], "active": bool}}
+# ---------------------------------------------------------------------------
+
+def get_subscriptions() -> Dict:
+    return _load_json(SUBSCRIPTIONS_FILE, {})
+
+
+def save_subscriptions(data: Dict) -> None:
+    _save_json(SUBSCRIPTIONS_FILE, data)
+
+
+def subscribe_user(user_id: int, topics: List[str]) -> List[str]:
+    """Add topics for user. Returns the full topic list after merge."""
+    subs = get_subscriptions()
+    uid = str(user_id)
+    entry = subs.get(uid, {"topics": [], "active": True})
+    existing = set(t.lower() for t in entry.get("topics", []))
+    for t in topics:
+        existing.add(t.lower().strip())
+    entry["topics"] = sorted(existing)
+    entry["active"] = True
+    subs[uid] = entry
+    save_subscriptions(subs)
+    return entry["topics"]
+
+
+def unsubscribe_user(user_id: int, topics: Optional[List[str]] = None) -> List[str]:
+    """Remove specific topics or all. Returns remaining topics."""
+    subs = get_subscriptions()
+    uid = str(user_id)
+    entry = subs.get(uid)
+    if not entry:
+        return []
+    if topics is None:
+        entry["topics"] = []
+        entry["active"] = False
+    else:
+        remove_set = set(t.lower().strip() for t in topics)
+        entry["topics"] = [t for t in entry["topics"] if t.lower() not in remove_set]
+        if not entry["topics"]:
+            entry["active"] = False
+    subs[uid] = entry
+    save_subscriptions(subs)
+    return entry["topics"]
+
+
+def get_user_topics(user_id: int) -> List[str]:
+    subs = get_subscriptions()
+    entry = subs.get(str(user_id), {})
+    if not entry.get("active", False):
+        return []
+    return entry.get("topics", [])
+
+
+# ---------------------------------------------------------------------------
+# Seen articles
+# ---------------------------------------------------------------------------
+
+def _load_seen() -> Dict:
+    return _load_json(SEEN_FILE, {"hashes": [], "details": {}})
+
+
+def _save_seen(data: Dict) -> None:
+    _save_json(SEEN_FILE, data)
+
+
+def _is_seen(article_hash: str) -> bool:
+    return article_hash in _load_seen().get("hashes", [])
+
+
+def _mark_seen(article_hash: str, meta: Dict) -> None:
+    data = _load_seen()
+    hashes = data.get("hashes", [])
+    if article_hash not in hashes:
+        hashes.append(article_hash)
+        if len(hashes) > MAX_SEEN_ARTICLES:
+            removed = hashes[:len(hashes) - MAX_SEEN_ARTICLES]
+            hashes = hashes[-MAX_SEEN_ARTICLES:]
+            for h in removed:
+                data.get("details", {}).pop(h, None)
+    data["hashes"] = hashes
+    data.setdefault("details", {})[article_hash] = meta
+    _save_seen(data)
+
+
+# ---------------------------------------------------------------------------
+# User preferences / feedback weights: {user_id_str: {topic: {weight_adjustments}}}
+# ---------------------------------------------------------------------------
+
+def get_preferences() -> Dict:
+    return _load_json(PREFERENCES_FILE, {})
+
+
+def save_preferences(data: Dict) -> None:
+    _save_json(PREFERENCES_FILE, data)
+
+
+def record_feedback(user_id: int, article_hash: str, feedback_type: str, topic: str) -> None:
+    """Record user feedback on an article to calibrate future delivery."""
+    prefs = get_preferences()
+    uid = str(user_id)
+    user_prefs = prefs.setdefault(uid, {})
+    topic_prefs = user_prefs.setdefault(topic, {
+        "slop_count": 0,
+        "more_count": 0,
+        "not_critical_count": 0,
+        "critical_count": 0,
+        "keywords_boost": [],
+        "keywords_suppress": [],
+    })
+    seen = _load_seen()
+    article_meta = seen.get("details", {}).get(article_hash, {})
+    title_words = _extract_keywords(article_meta.get("title", ""))
+
+    if feedback_type == "slop":
+        topic_prefs["slop_count"] = topic_prefs.get("slop_count", 0) + 1
+        for w in title_words:
+            if w not in topic_prefs.get("keywords_suppress", []):
+                topic_prefs.setdefault("keywords_suppress", []).append(w)
+                # Cap list
+                topic_prefs["keywords_suppress"] = topic_prefs["keywords_suppress"][-50:]
+    elif feedback_type == "more":
+        topic_prefs["more_count"] = topic_prefs.get("more_count", 0) + 1
+        for w in title_words:
+            if w not in topic_prefs.get("keywords_boost", []):
+                topic_prefs.setdefault("keywords_boost", []).append(w)
+                topic_prefs["keywords_boost"] = topic_prefs["keywords_boost"][-50:]
+    elif feedback_type == "not_critical":
+        topic_prefs["not_critical_count"] = topic_prefs.get("not_critical_count", 0) + 1
+    elif feedback_type == "critical":
+        topic_prefs["critical_count"] = topic_prefs.get("critical_count", 0) + 1
+
+    prefs[uid] = user_prefs
+    save_preferences(prefs)
+
+
+def _extract_keywords(text: str) -> List[str]:
+    """Extract meaningful words from a title for preference tracking."""
+    stop = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "and",
+            "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+            "from", "as", "into", "about", "it", "its", "this", "that", "will",
+            "has", "have", "had", "not", "no", "do", "does", "did", "can",
+            "could", "would", "should", "may", "might", "shall", "new", "says",
+            "said", "how", "what", "when", "where", "why", "who", "which", "s"}
+    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
+    return [w for w in words if w not in stop][:10]
+
+
+def get_user_detail_level(user_id: int, topic: str) -> str:
+    """Return 'detailed', 'normal', or 'brief' based on accumulated feedback."""
+    prefs = get_preferences()
+    tp = prefs.get(str(user_id), {}).get(topic, {})
+    critical = tp.get("critical_count", 0)
+    not_critical = tp.get("not_critical_count", 0)
+    if critical > not_critical + 2:
+        return "detailed"
+    elif not_critical > critical + 2:
+        return "brief"
+    return "normal"
+
+
+def should_suppress_article(user_id: int, topic: str, title: str) -> bool:
+    """Heuristic: suppress if title keywords heavily overlap with suppressed keywords."""
+    prefs = get_preferences()
+    tp = prefs.get(str(user_id), {}).get(topic, {})
+    suppress = set(tp.get("keywords_suppress", []))
+    boost = set(tp.get("keywords_boost", []))
+    slop_count = tp.get("slop_count", 0)
+    if slop_count < 3:
+        return False
+    kws = _extract_keywords(title)
+    if not kws:
+        return False
+    suppress_hits = sum(1 for w in kws if w in suppress)
+    boost_hits = sum(1 for w in kws if w in boost)
+    ratio = suppress_hits / len(kws)
+    return ratio > 0.4 and boost_hits == 0
+
+
+# ---------------------------------------------------------------------------
+# News config (model, quiet times)
+# ---------------------------------------------------------------------------
+
+def get_news_config() -> Dict:
+    return _load_json(CONFIG_FILE, {
+        "model_type": "local",
+        "model_name": None,
+        "quiet_times": {},
+    })
+
+
+def save_news_config(data: Dict) -> None:
+    _save_json(CONFIG_FILE, data)
+
+
+def set_news_model(model_type: str, model_name: str) -> None:
+    cfg = get_news_config()
+    cfg["model_type"] = model_type
+    cfg["model_name"] = model_name
+    save_news_config(cfg)
+
+
+def get_news_model() -> Tuple[str, Optional[str]]:
+    cfg = get_news_config()
+    return cfg.get("model_type", "local"), cfg.get("model_name")
+
+
+def set_quiet_time(user_id: int, until: datetime) -> None:
+    cfg = get_news_config()
+    qt = cfg.setdefault("quiet_times", {})
+    qt[str(user_id)] = {"until": until.isoformat(), "articles": []}
+    save_news_config(cfg)
+
+
+def get_quiet_time(user_id: int) -> Optional[datetime]:
+    cfg = get_news_config()
+    qt = cfg.get("quiet_times", {}).get(str(user_id))
+    if not qt:
+        return None
+    try:
+        return datetime.fromisoformat(qt["until"])
+    except (ValueError, KeyError):
+        return None
+
+
+def add_quiet_time_article(user_id: int, article: Dict) -> None:
+    """Queue an article during quiet time for the summary later."""
+    cfg = get_news_config()
+    qt = cfg.get("quiet_times", {}).get(str(user_id))
+    if qt:
+        qt.setdefault("articles", []).append(article)
+        save_news_config(cfg)
+
+
+def pop_quiet_time_articles(user_id: int) -> List[Dict]:
+    """Return queued articles and clear quiet time."""
+    cfg = get_news_config()
+    qt = cfg.get("quiet_times", {}).pop(str(user_id), None)
+    save_news_config(cfg)
+    if qt:
+        return qt.get("articles", [])
+    return []
+
+
+def clear_quiet_time(user_id: int) -> None:
+    cfg = get_news_config()
+    cfg.get("quiet_times", {}).pop(str(user_id), None)
+    save_news_config(cfg)
+
+
+# ---------------------------------------------------------------------------
+# RSS fetching
+# ---------------------------------------------------------------------------
+
+def _resolve_feeds_for_topic(topic: str) -> List[Tuple[str, str]]:
+    """Return list of (feed_url, source_name) for a user topic string."""
+    topic_lower = topic.lower().strip()
+    if topic_lower in TOPIC_FEEDS:
+        return TOPIC_FEEDS[topic_lower]
+    # Fuzzy match: check if topic is substring of any key or vice-versa
+    for key, feeds in TOPIC_FEEDS.items():
+        if topic_lower in key or key in topic_lower:
+            return feeds
+    # Fallback: use multiple general feeds
+    return TOPIC_FEEDS.get("tech", [])[:2] + TOPIC_FEEDS.get("global politics", [])[:2]
+
+
+def _fetch_feed(url: str, timeout: int = 15) -> List[Dict]:
+    """Fetch and parse an RSS feed. Returns list of article dicts."""
+    try:
+        import feedparser
+    except ImportError:
+        home_log.log_sync("⚠️ feedparser not installed – news service cannot fetch RSS")
+        return []
+
+    try:
+        resp = requests.get(url, timeout=timeout, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; DuBot/1.0; +https://github.com/dubot)"
+        })
+        resp.raise_for_status()
+        feed = feedparser.parse(resp.text)
+    except Exception as e:
+        home_log.log_sync(f"⚠️ RSS fetch error for {url}: {e}")
+        return []
+
+    articles = []
+    for entry in feed.entries[:MAX_ARTICLES_PER_CYCLE]:
+        title = entry.get("title", "").strip()
+        link = entry.get("link", "").strip()
+        if not title or not link:
+            continue
+        summary = entry.get("summary", entry.get("description", "")).strip()
+        # Strip HTML tags from summary
+        summary = re.sub(r"<[^>]+>", "", summary)
+        published = entry.get("published", entry.get("updated", ""))
+        articles.append({
+            "title": title,
+            "link": link,
+            "summary": summary[:1500],
+            "published": published,
+        })
+    return articles
+
+
+def fetch_articles_for_topic(topic: str) -> List[Dict]:
+    """Fetch articles from all feeds related to a topic. Each article has source_name added."""
+    feeds = _resolve_feeds_for_topic(topic)
+    all_articles = []
+    for url, source in feeds:
+        articles = _fetch_feed(url)
+        for a in articles:
+            a["source"] = source
+            a["topic"] = topic
+            a["hash"] = _hash_article(a["title"], a["link"])
+        all_articles.extend(articles)
+    return all_articles
+
+
+# ---------------------------------------------------------------------------
+# LLM summarization
+# ---------------------------------------------------------------------------
+
+async def _summarize_article(article: Dict, detail_level: str = "normal", topic: str = "") -> Optional[str]:
+    """Summarize an article using the configured LLM."""
+    from integrations import OLLAMA_URL
+    from models import model_manager
+
+    model_type, model_name = get_news_model()
+    if not model_name:
+        info = model_manager.get_user_model_info(0)
+        model_name = info.get("model", "qwen2.5:7b")
+
+    from utils.llm_service import get_enhanced_prompt
+
+    is_finnish = topic.lower() == "finland"
+
+    if detail_level == "detailed":
+        length_instruction = "Provide a comprehensive and detailed summary (200-300 words). Include extensive context, background, and analysis."
+    elif detail_level == "brief":
+        length_instruction = "Provide a very brief summary (2-3 sentences max). Just the key facts."
+    else:
+        length_instruction = "Provide a clear summary (100-150 words). Cover the essentials without being too verbose."
+
+    language_note = ""
+    if is_finnish:
+        language_note = "If the article is in Finnish, keep the summary in Finnish. Otherwise translate to English."
+    else:
+        language_note = "The summary MUST be in English. Translate if necessary."
+
+    prompt = f"""Summarize this news article for a busy professional. {length_instruction}
+
+{language_note}
+
+Your response must follow this EXACT structure (use these headers):
+**📰 What:** [One-sentence description of the news]
+**❗ Why it matters:** [Why this is significant]
+**🔗 Impact:** [What this could affect - markets, people, industries, etc.]
+**💡 Key takeaway:** [The most important thing to remember]
+
+Article title: {article['title']}
+Source: {article.get('source', 'Unknown')}
+Content: {article.get('summary', 'No content preview available.')}
+
+Do NOT add any introduction or conclusion outside the structure above. Be factual and objective."""
+
+    messages = [
+        {"role": "system", "content": "You are a professional news analyst. Summarize news articles clearly and objectively. Always follow the exact output format requested."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        url = f"{OLLAMA_URL}/api/chat"
+        data = {
+            "model": model_name,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 800},
+        }
+        resp = await asyncio.to_thread(requests.post, url, json=data, timeout=90)
+        if resp.status_code == 200:
+            result = resp.json()
+            return result.get("message", {}).get("content", "").strip()
+    except Exception as e:
+        home_log.log_sync(f"⚠️ News summarization error: {e}")
+    return None
+
+
+async def _summarize_quiet_time_batch(articles: List[Dict]) -> Optional[str]:
+    """Produce a combined summary of articles queued during quiet time."""
+    from integrations import OLLAMA_URL
+    from models import model_manager
+
+    if not articles:
+        return None
+
+    model_type, model_name = get_news_model()
+    if not model_name:
+        info = model_manager.get_user_model_info(0)
+        model_name = info.get("model", "qwen2.5:7b")
+
+    article_list = ""
+    for i, a in enumerate(articles[:30], 1):
+        article_list += f"\n{i}. [{a.get('topic', '?').upper()}] {a.get('title', 'Untitled')} ({a.get('source', '?')})\n   {a.get('summary', '')[:200]}\n"
+
+    prompt = f"""You received {len(articles)} news articles while notifications were paused. Create a structured briefing.
+
+Group them by topic/category. For each group:
+- State the category with an emoji
+- List the most important developments (combine similar stories)
+- Note anything that needs immediate attention
+
+Articles:
+{article_list}
+
+Keep the total summary concise but comprehensive. Use bullet points. End with a "🔴 Requires Attention" section if any story seems urgent."""
+
+    messages = [
+        {"role": "system", "content": "You are a news briefing assistant. Create clear, organized news summaries grouped by topic."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        url = f"{OLLAMA_URL}/api/chat"
+        data = {
+            "model": model_name,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 2000},
+        }
+        resp = await asyncio.to_thread(requests.post, url, json=data, timeout=120)
+        if resp.status_code == 200:
+            result = resp.json()
+            return result.get("message", {}).get("content", "").strip()
+    except Exception as e:
+        home_log.log_sync(f"⚠️ Quiet-time summary error: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Discord message building
+# ---------------------------------------------------------------------------
+
+CATEGORY_EMOJIS = {
+    "tech": "💻", "ai": "🤖", "finland": "🇫🇮", "us": "🇺🇸",
+    "trade": "📈", "global politics": "🌍", "science": "🔬",
+    "gaming": "🎮", "crypto": "₿", "europe": "🇪🇺",
+}
+
+
+class NewsFeedbackView(discord.ui.View):
+    """Persistent buttons for news feedback. Timeout=None so they survive restarts."""
+
+    def __init__(self, article_hash: str, topic: str):
+        super().__init__(timeout=None)
+        self.article_hash = article_hash
+        self.topic = topic
+
+        slop_btn = discord.ui.Button(
+            label="Slop", emoji="🗑️", style=discord.ButtonStyle.secondary,
+            custom_id=f"news_slop_{article_hash}",
+        )
+        slop_btn.callback = self._slop_callback
+        self.add_item(slop_btn)
+
+        more_btn = discord.ui.Button(
+            label="More like this", emoji="🔥", style=discord.ButtonStyle.success,
+            custom_id=f"news_more_{article_hash}",
+        )
+        more_btn.callback = self._more_callback
+        self.add_item(more_btn)
+
+        notcrit_btn = discord.ui.Button(
+            label="Not critical", emoji="📋", style=discord.ButtonStyle.secondary,
+            custom_id=f"news_notcrit_{article_hash}",
+        )
+        notcrit_btn.callback = self._notcrit_callback
+        self.add_item(notcrit_btn)
+
+        crit_btn = discord.ui.Button(
+            label="Critical", emoji="🚨", style=discord.ButtonStyle.danger,
+            custom_id=f"news_crit_{article_hash}",
+        )
+        crit_btn.callback = self._crit_callback
+        self.add_item(crit_btn)
+
+    async def _slop_callback(self, interaction: discord.Interaction):
+        record_feedback(interaction.user.id, self.article_hash, "slop", self.topic)
+        await interaction.response.send_message("Got it — I'll send less of this type.", ephemeral=True)
+
+    async def _more_callback(self, interaction: discord.Interaction):
+        record_feedback(interaction.user.id, self.article_hash, "more", self.topic)
+        await interaction.response.send_message("Noted — I'll find more content like this!", ephemeral=True)
+
+    async def _notcrit_callback(self, interaction: discord.Interaction):
+        record_feedback(interaction.user.id, self.article_hash, "not_critical", self.topic)
+        await interaction.response.send_message("Understood — shorter summaries for this type going forward.", ephemeral=True)
+
+    async def _crit_callback(self, interaction: discord.Interaction):
+        record_feedback(interaction.user.id, self.article_hash, "critical", self.topic)
+        await interaction.response.send_message("Marked as critical — I'll give more detail for news like this.", ephemeral=True)
+
+
+def build_news_embed(article: Dict, summary: str, topic: str) -> discord.Embed:
+    """Build a nicely formatted embed for a news article."""
+    emoji = CATEGORY_EMOJIS.get(topic.lower(), "📰")
+    color_map = {
+        "tech": 0x00B4D8, "ai": 0x7B2FF7, "finland": 0x003580, "us": 0xB22234,
+        "trade": 0x2E8B57, "global politics": 0xDAA520, "science": 0x20B2AA,
+        "gaming": 0x9B59B6, "crypto": 0xF7931A, "europe": 0x003399,
+    }
+    color = color_map.get(topic.lower(), 0x5865F2)
+
+    embed = discord.Embed(
+        title=f"{emoji} {article['title'][:250]}",
+        url=article.get("link", ""),
+        color=color,
+        timestamp=datetime.utcnow(),
+    )
+
+    # Trim summary to fit embed field limits
+    if len(summary) > 4000:
+        summary = summary[:3997] + "..."
+    embed.description = summary
+
+    source = article.get("source", "Unknown")
+    pub = article.get("published", "")
+    footer_parts = [f"Source: {source}"]
+    if pub:
+        footer_parts.append(f"Published: {pub[:25]}")
+    footer_parts.append(f"Topic: {topic.capitalize()}")
+    embed.set_footer(text=" • ".join(footer_parts))
+
+    return embed
+
+
+# ---------------------------------------------------------------------------
+# Persistent view re-registration on startup
+# ---------------------------------------------------------------------------
+
+class PersistentNewsFeedbackView(discord.ui.View):
+    """Re-registered on startup so old buttons keep working."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Slop", emoji="🗑️", style=discord.ButtonStyle.secondary, custom_id="news_slop_persistent")
+    async def slop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = interaction.data.get("custom_id", "")
+        ahash = cid.replace("news_slop_", "")
+        record_feedback(interaction.user.id, ahash, "slop", self._guess_topic(interaction))
+        await interaction.response.send_message("Got it — I'll send less of this type.", ephemeral=True)
+
+    @discord.ui.button(label="More like this", emoji="🔥", style=discord.ButtonStyle.success, custom_id="news_more_persistent")
+    async def more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = interaction.data.get("custom_id", "")
+        ahash = cid.replace("news_more_", "")
+        record_feedback(interaction.user.id, ahash, "more", self._guess_topic(interaction))
+        await interaction.response.send_message("Noted — I'll find more content like this!", ephemeral=True)
+
+    @discord.ui.button(label="Not critical", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="news_notcrit_persistent")
+    async def notcrit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = interaction.data.get("custom_id", "")
+        ahash = cid.replace("news_notcrit_", "")
+        record_feedback(interaction.user.id, ahash, "not_critical", self._guess_topic(interaction))
+        await interaction.response.send_message("Understood — shorter summaries for this type going forward.", ephemeral=True)
+
+    @discord.ui.button(label="Critical", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="news_crit_persistent")
+    async def crit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cid = interaction.data.get("custom_id", "")
+        ahash = cid.replace("news_crit_", "")
+        record_feedback(interaction.user.id, ahash, "critical", self._guess_topic(interaction))
+        await interaction.response.send_message("Marked as critical — I'll give more detail for news like this.", ephemeral=True)
+
+    @staticmethod
+    def _guess_topic(interaction: discord.Interaction) -> str:
+        """Try to extract topic from embed footer."""
+        try:
+            if interaction.message and interaction.message.embeds:
+                footer = interaction.message.embeds[0].footer.text or ""
+                for part in footer.split("•"):
+                    part = part.strip()
+                    if part.lower().startswith("topic:"):
+                        return part.split(":", 1)[1].strip().lower()
+        except Exception:
+            pass
+        return "general"
+
+
+# ---------------------------------------------------------------------------
+# Main news manager
+# ---------------------------------------------------------------------------
+
+class NewsManager:
+    def __init__(self):
+        self.running = False
+        self.thread: Optional[threading.Thread] = None
+        self.client: Optional[discord.Client] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        _ensure_data_dir()
+
+    def set_client(self, client: discord.Client) -> None:
+        self.client = client
+        self.loop = client.loop if client else None
+
+    def start(self) -> None:
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+            home_log.log_sync("✅ News service started")
+
+    def stop(self) -> None:
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        home_log.log_sync("🛑 News service stopped")
+
+    def _run(self) -> None:
+        # Wait a bit for the bot to be ready
+        time.sleep(30)
+        while self.running:
+            try:
+                if self.loop and self.client and self.client.is_ready():
+                    future = asyncio.run_coroutine_threadsafe(self._cycle(), self.loop)
+                    future.result(timeout=300)
+            except Exception as e:
+                home_log.log_sync(f"⚠️ News cycle error: {e}")
+                traceback.print_exc()
+            time.sleep(FETCH_INTERVAL_SECONDS)
+
+    async def _cycle(self) -> None:
+        """One fetch-summarize-send cycle for all subscribed users."""
+        subs = get_subscriptions()
+        if not subs:
+            return
+
+        # Check quiet time expiries first
+        await self._check_quiet_time_expiries()
+
+        # Collect all unique topics
+        all_topics: Dict[str, List[int]] = {}
+        for uid_str, entry in subs.items():
+            if not entry.get("active", False):
+                continue
+            for topic in entry.get("topics", []):
+                all_topics.setdefault(topic, []).append(int(uid_str))
+
+        if not all_topics:
+            return
+
+        # Fetch articles per topic
+        for topic, user_ids in all_topics.items():
+            try:
+                articles = await asyncio.to_thread(fetch_articles_for_topic, topic)
+            except Exception as e:
+                home_log.log_sync(f"⚠️ Fetch failed for topic '{topic}': {e}")
+                continue
+
+            # Filter already seen
+            new_articles = [a for a in articles if not _is_seen(a["hash"])]
+            if not new_articles:
+                continue
+
+            # Limit per cycle
+            new_articles = new_articles[:5]
+
+            for article in new_articles:
+                _mark_seen(article["hash"], {
+                    "title": article["title"],
+                    "link": article.get("link", ""),
+                    "source": article.get("source", ""),
+                    "topic": topic,
+                    "sent_at": datetime.now().isoformat(),
+                })
+
+                for uid in user_ids:
+                    try:
+                        await self._deliver_article(uid, article, topic)
+                    except Exception as e:
+                        home_log.log_sync(f"⚠️ Deliver error user={uid} topic={topic}: {e}")
+
+                # Small delay between articles to avoid rate limits
+                await asyncio.sleep(2)
+
+    async def _deliver_article(self, user_id: int, article: Dict, topic: str) -> None:
+        """Deliver a single article to a user via DM. Respects quiet time and preferences."""
+        if not self.client:
+            return
+
+        # Check quiet time
+        qt = get_quiet_time(user_id)
+        if qt and datetime.now() < qt:
+            add_quiet_time_article(user_id, {
+                "title": article["title"],
+                "link": article.get("link", ""),
+                "source": article.get("source", ""),
+                "summary": article.get("summary", ""),
+                "topic": topic,
+                "hash": article["hash"],
+            })
+            return
+
+        # Check user preferences for suppression
+        if should_suppress_article(user_id, topic, article["title"]):
+            return
+
+        # Determine detail level
+        detail = get_user_detail_level(user_id, topic)
+
+        # Summarize
+        summary = await _summarize_article(article, detail_level=detail, topic=topic)
+        if not summary:
+            summary = f"**📰 What:** {article['title']}\n\n*Could not generate AI summary. See the source link for details.*"
+
+        # Build embed and view
+        embed = build_news_embed(article, summary, topic)
+        view = NewsFeedbackView(article["hash"], topic)
+
+        # Send DM
+        try:
+            user = await self.client.fetch_user(user_id)
+            link_text = f"\n🔗 **Source:** {article.get('link', 'N/A')}"
+            await user.send(content=link_text, embed=embed, view=view)
+        except discord.Forbidden:
+            home_log.log_sync(f"⚠️ Cannot DM user {user_id} (DMs disabled)")
+        except Exception as e:
+            home_log.log_sync(f"⚠️ DM send error for user {user_id}: {e}")
+
+    async def _check_quiet_time_expiries(self) -> None:
+        """Check if any user's quiet time has expired and send the summary."""
+        if not self.client:
+            return
+        cfg = get_news_config()
+        qt_dict = cfg.get("quiet_times", {})
+        now = datetime.now()
+
+        expired_users = []
+        for uid_str, qt_data in list(qt_dict.items()):
+            try:
+                until = datetime.fromisoformat(qt_data["until"])
+                if now >= until:
+                    expired_users.append(int(uid_str))
+            except (ValueError, KeyError):
+                expired_users.append(int(uid_str))
+
+        for uid in expired_users:
+            articles = pop_quiet_time_articles(uid)
+            if not articles:
+                continue
+
+            summary = await _summarize_quiet_time_batch(articles)
+            if not summary:
+                summary = f"You had {len(articles)} articles queued. Could not generate summary."
+
+            embed = discord.Embed(
+                title="📬 News Briefing — Quiet Time Summary",
+                description=summary[:4096],
+                color=0xF39C12,
+                timestamp=datetime.utcnow(),
+            )
+            sources = set()
+            links = []
+            for a in articles[:15]:
+                sources.add(a.get("source", ""))
+                links.append(f"• [{a.get('title', 'Link')[:60]}]({a.get('link', '')})")
+            embed.add_field(
+                name="📎 Sources",
+                value=", ".join(s for s in sources if s)[:1024] or "Various",
+                inline=False,
+            )
+            if links:
+                embed.add_field(
+                    name="🔗 Links",
+                    value="\n".join(links[:10])[:1024],
+                    inline=False,
+                )
+            embed.set_footer(text=f"{len(articles)} articles during quiet time")
+
+            try:
+                user = await self.client.fetch_user(uid)
+                await user.send(
+                    content="⏰ **Your quiet time has ended!** Here's what you missed:",
+                    embed=embed,
+                )
+            except Exception as e:
+                home_log.log_sync(f"⚠️ Quiet time summary send error user={uid}: {e}")
+
+
+# Global instance
+news_manager = NewsManager()

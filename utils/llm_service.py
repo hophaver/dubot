@@ -150,6 +150,7 @@ def initialize_command_database():
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
     command_db.add_command("checkwake", "Check current wake word", "General")
+    command_db.add_command("bal", "Check OpenRouter account credits (OPENROUTER_API_KEY)", "General")
     command_db.add_command("help", "List all commands", "General")
     
     # File Analysis Commands
@@ -187,7 +188,7 @@ def initialize_command_database():
     command_db.add_command("run", "Run a script from scripts folder (now or at time)", "Scripts")
     
     # Admin Commands
-    command_db.add_command("update", "Update bot from git repo", "Admin")
+    command_db.add_command("update", "Update bot from git and upgrade dependencies (requirements.txt)", "Admin")
     command_db.add_command("purge", "Delete messages from channel", "Admin")
     command_db.add_command("restart", "Restart the bot", "Admin")
     command_db.add_command("kill", "Kill the bot", "Admin")
@@ -223,6 +224,9 @@ def initialize_command_database():
     command_db.add_alias("forget", "clear-chat")
     command_db.add_alias("status", "info")
     command_db.add_alias("status", "stats")
+    command_db.add_alias("bal", "balance")
+    command_db.add_alias("bal", "openrouter")
+    command_db.add_alias("bal", "credits")
     command_db.add_alias("whitelist", "permissions")
     command_db.add_alias("whitelist", "users")
     command_db.add_alias("himas", "home")
@@ -242,7 +246,17 @@ def initialize_command_database():
     command_db.add_alias("code-review", "review-code")
     command_db.add_alias("compare-files", "compare")
     command_db.add_alias("download", "dl")
-    
+
+    # News Commands
+    command_db.add_command("news", "Subscribe to news topics delivered to your DMs", "News")
+    command_db.add_command("news-model", "[Admin] Set the LLM model for news summarization", "News")
+    command_db.add_command("news-model-info", "Show the current news summarization model", "News")
+    command_db.add_command("news-time", "Pause news notifications for a set time (summary when done)", "News")
+    command_db.add_alias("news", "subscribe")
+    command_db.add_alias("news", "news feed")
+    command_db.add_alias("news-time", "quiet time")
+    command_db.add_alias("news-time", "pause news")
+
     print(f"✅ Initialized command database with {len(command_db.commands)} commands")
 
 

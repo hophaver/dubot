@@ -1,6 +1,11 @@
+import sys
+
+from utils.bootstrap_deps import ensure_news_dependencies
+
+ensure_news_dependencies()
+
 import asyncio
 import discord
-import sys
 import os
 import signal
 import time
@@ -18,6 +23,7 @@ from config import (
 from whitelist import get_user_permission
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
+from services.news_service import news_manager
 from platforms.discord_chat import process_discord_message
 from commands.shitpost import handle_shitpost
 from utils.llm_service import initialize_command_database
@@ -47,6 +53,7 @@ class BotClient(discord.Client):
             pass
         conversation_manager.save()
         reminder_manager.stop()
+        news_manager.stop()
         await super().close()
 
     async def setup_hook(self):
@@ -58,6 +65,9 @@ class BotClient(discord.Client):
             
         # Set reminder service client
         reminder_manager.set_client(self)
+
+        # Set news service client
+        news_manager.set_client(self)
     
     async def register_all_commands(self):
         """Register ALL commands without duplicates"""
@@ -155,6 +165,12 @@ class BotClient(discord.Client):
             HelpCommands(self).register()
         except Exception as e:
             errors.append(f"help: {e}")
+        # 10. News
+        try:
+            from commands.news import NewsCommands
+            NewsCommands(self).register()
+        except Exception as e:
+            errors.append(f"news: {e}")
 
         await self.tree.sync()
         self._startup_errors = errors
@@ -426,6 +442,54 @@ async def _handle_auto_conversation(message: discord.Message) -> None:
     except Exception as e:
         await home_log.log(f"Error sending auto-conversation reply: {e}", also_send=False)
 
+@client.event
+async def on_interaction(interaction: discord.Interaction):
+    """Route persistent button interactions for news feedback."""
+    if interaction.type != discord.InteractionType.component:
+        return
+    custom_id = interaction.data.get("custom_id", "")
+    if not custom_id.startswith("news_"):
+        return
+
+    from services.news_service import record_feedback
+
+    # Extract feedback type and article hash from custom_id
+    # Format: news_{type}_{hash}
+    parts = custom_id.split("_", 2)
+    if len(parts) < 3:
+        return
+    feedback_type_raw = parts[1]
+    article_hash = parts[2]
+
+    feedback_map = {
+        "slop": ("slop", "Got it — I'll send less of this type."),
+        "more": ("more", "Noted — I'll find more content like this!"),
+        "notcrit": ("not_critical", "Understood — shorter summaries for this type going forward."),
+        "crit": ("critical", "Marked as critical — I'll give more detail for news like this."),
+    }
+
+    entry = feedback_map.get(feedback_type_raw)
+    if not entry:
+        return
+
+    feedback_type, response_msg = entry
+
+    # Try to extract topic from embed footer
+    topic = "general"
+    try:
+        if interaction.message and interaction.message.embeds:
+            footer = interaction.message.embeds[0].footer.text or ""
+            for part in footer.split("•"):
+                part = part.strip()
+                if part.lower().startswith("topic:"):
+                    topic = part.split(":", 1)[1].strip().lower()
+    except Exception:
+        pass
+
+    record_feedback(interaction.user.id, article_hash, feedback_type, topic)
+    await interaction.response.send_message(response_msg, ephemeral=True)
+
+
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Handle slash command errors; report to user and to home channel."""
@@ -477,6 +541,7 @@ def signal_handler(signum, frame):
     except RuntimeError:
         conversation_manager.save()
         reminder_manager.stop()
+        news_manager.stop()
         sys.exit(0)
         return
     if not client.is_closed():
@@ -484,6 +549,7 @@ def signal_handler(signum, frame):
     else:
         conversation_manager.save()
         reminder_manager.stop()
+        news_manager.stop()
         sys.exit(0)
 
 def _ensure_ollama_running():
@@ -520,20 +586,26 @@ if __name__ == "__main__":
     # Start reminder service
     reminder_manager.start()
 
+    # Start news service
+    news_manager.start()
+
     try:
         client.run(DISCORD_BOT_TOKEN)
     except KeyboardInterrupt:
         print("\n👋 Shutting down gracefully...")
         conversation_manager.save()
         reminder_manager.stop()
+        news_manager.stop()
         sys.exit(0)
     except discord.errors.LoginFailure:
         print("❌ Invalid Discord token. Check your DISCORD_BOT_TOKEN in integrations.py")
         reminder_manager.stop()
+        news_manager.stop()
         sys.exit(1)
     except Exception as e:
         print(f"❌ Error starting bot: {e}")
         import traceback
         traceback.print_exc()
         reminder_manager.stop()
+        news_manager.stop()
         sys.exit(1)

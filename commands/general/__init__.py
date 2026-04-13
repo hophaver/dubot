@@ -1,5 +1,6 @@
 from . import status
 from . import checkwake
+from . import bal
 
 
 class GeneralCommands:
@@ -9,3 +10,4 @@ class GeneralCommands:
     def register(self):
         status.register(self.client)
         checkwake.register(self.client)
+        bal.register(self.client)

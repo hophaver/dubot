@@ -20,6 +20,8 @@ DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '').strip()
 HA_URL = os.environ.get('HA_URL', 'http://192.168.0.149:8123')
 HA_ACCESS_TOKEN = os.environ.get('HA_ACCESS_TOKEN', '')
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+# OpenRouter management key (for /bal credits); optional
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '').strip()
 
 # Permanent admin by user ID
 PERMANENT_ADMIN = 266952987128233985
