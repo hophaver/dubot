@@ -3,6 +3,7 @@ from . import checkwake
 from . import bal
 from . import cursor
 from . import sleep_mode
+from . import reliability
 
 
 class GeneralCommands:
@@ -15,3 +16,4 @@ class GeneralCommands:
         bal.register(self.client)
         cursor.register(self.client)
         sleep_mode.register(self.client)
+        reliability.register(self.client)

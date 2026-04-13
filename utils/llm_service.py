@@ -150,6 +150,7 @@ def initialize_command_database():
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
+    command_db.add_command("reliability", "[Admin] View or reset reliability telemetry counters", "General")
     command_db.add_command("checkwake", "Check current wake word", "General")
     command_db.add_command("sleep", "Put bot offline until /wake", "General")
     command_db.add_command("wake", "Bring bot back online", "General")

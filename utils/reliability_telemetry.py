@@ -30,6 +30,14 @@ def snapshot() -> Dict[str, int]:
         return dict(_COUNTERS)
 
 
+def reset() -> Dict[str, int]:
+    """Reset all counters to zero and return the new snapshot."""
+    with _LOCK:
+        for key in list(_COUNTERS.keys()):
+            _COUNTERS[key] = 0
+        return dict(_COUNTERS)
+
+
 def format_snapshot(prefix: str = "Reliability counters") -> str:
     data = snapshot()
     ordered = [
