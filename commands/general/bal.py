@@ -35,11 +35,9 @@ def register(client):
         embed = discord.Embed(
             title="OpenRouter credits",
             color=discord.Color.blurple(),
-            description="Totals from OpenRouter (`GET /api/v1/credits`).",
         )
-        embed.add_field(name="Purchased (total)", value=_fmt_money(total), inline=True)
+        embed.add_field(name="Total", value=_fmt_money(total), inline=True)
         embed.add_field(name="Used", value=_fmt_money(used), inline=True)
         embed.add_field(name="Remaining", value=_fmt_money(rem), inline=True)
-        embed.set_footer(text="Set OPENROUTER_API_KEY in .env (management key)")
 
         await interaction.followup.send(embed=embed, ephemeral=True)

@@ -23,6 +23,10 @@ HA_ACCESS_TOKEN = os.environ.get('HA_ACCESS_TOKEN', '')
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 # OpenRouter management key (for /bal credits); optional
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '').strip()
+# Cursor user key (preferred var for /cursor spend check attempts)
+CURSOR_USER_API_KEY = os.environ.get('CURSOR_USER_API_KEY', '').strip()
+# Backward-compatible alias for older env setups
+CURSOR_API_KEY = os.environ.get('CURSOR_API_KEY', '').strip()
 
 # Permanent admin by user ID
 PERMANENT_ADMIN = 266952987128233985
