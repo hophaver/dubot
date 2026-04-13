@@ -212,9 +212,11 @@ async def _run_startup_checks(client):
 
     # Models
     from models import model_manager
-    model_info = model_manager.get_user_model_info(0)
+    model_owner_id = PERMANENT_ADMIN
+    model_info = model_manager.get_user_model_info(model_owner_id)
     chat_provider = str(model_info.get("provider", "local")).strip().lower() or "local"
     chat_model = str(model_info.get("model", "qwen2.5:7b")).strip() or "qwen2.5:7b"
+    basic_local_model = model_manager.get_last_local_model(model_owner_id, refresh_local=True)
 
     news_provider = "local"
     news_model = None
@@ -229,7 +231,7 @@ async def _run_startup_checks(client):
     else:
         news_model_status = f"{chat_model} ({chat_provider}) · inherited from chat model"
 
-    local_models = model_manager.list_all_models(refresh_local=True)
+    local_models = model_manager.list_all_models(refresh_local=False)
     local_status = f"{len(local_models)} available" if local_models else "0 available"
 
     # Persona
@@ -277,6 +279,7 @@ async def _run_startup_checks(client):
     return errors, {
         "🧩 Commands": cmd_status,
         "🤖 Chat Model": f"{chat_model} ({chat_provider})",
+        "⚙️ Basic Command Model": f"`{basic_local_model}` (always local Ollama)",
         "📰 News Model": news_model_status,
         "🎭 Persona": persona_status,
         "🏠 Home Assistant": ha_status,
