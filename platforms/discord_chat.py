@@ -295,8 +295,8 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
         )
     return True
 
-async def process_discord_message(client, message, permission, conversation_manager):
-    """Process Discord messages with group chat awareness"""
+async def process_discord_message(client, message, permission, conversation_manager) -> bool:
+    """Process Discord messages with group chat awareness. Return True if handled."""
     config = get_config()
     wake_word = config.get("wake_word", "robot").lower()
     message_lower = message.content.lower()
@@ -313,7 +313,7 @@ async def process_discord_message(client, message, permission, conversation_mana
     
     # Only process if activated
     if not (is_wake_word or is_dm or is_mentioned or is_reply_to_bot or is_admin_bang):
-        return
+        return False
     
     # Extract clean content
     if is_wake_word:
@@ -324,12 +324,12 @@ async def process_discord_message(client, message, permission, conversation_mana
         clean_content = message.content.replace(f'<@{client.user.id}>', '').strip()
     
     if not clean_content:
-        return
+        return True
     
     # Parse command for wake word / admin !command (only for non-continuations)
     if is_admin_bang and not is_reply_to_bot:
         if await _process_admin_bang_slash_command(client, message, clean_content):
-            return
+            return True
 
     if is_wake_word and not is_reply_to_bot:
         parts = clean_content.split(maxsplit=1)
@@ -341,13 +341,13 @@ async def process_discord_message(client, message, permission, conversation_mana
             client, message, command, command_content, permission
         )
         if processed:
-            return
+            return True
         
         # "dl" = download media from last message/link and send to chat
         if command == "dl":
             processed = await process_wakeword_download(client, message, command_content)
             if processed:
-                return
+                return True
 
     async with message.channel.typing():
         # Determine if this is a continuation
@@ -397,6 +397,7 @@ async def process_discord_message(client, message, permission, conversation_mana
         
         # Save conversations periodically
         conversation_manager.save()
+        return True
 
 async def process_wakeword_download(client, message, link_or_empty):
     """Download media from link or last message with media, send to chat. Files not stored."""

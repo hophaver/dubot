@@ -378,15 +378,17 @@ async def on_message(message):
         # Don't process further if we handled files
         return
 
-    # Shitpost: !word or .word (single token, 3+ letters, letters only; not wake word)
-    if await handle_shitpost(client, message):
-        return
-
     # Passive auto-conversation in configured channels
     await _handle_auto_conversation(message)
 
     # Process Discord-specific chat (original functionality)
-    await process_discord_message(client, message, permission, conversation_manager)
+    handled = await process_discord_message(client, message, permission, conversation_manager)
+    if handled:
+        return
+
+    # Shitpost fallback: only when no command/chat path handled the message.
+    if await handle_shitpost(client, message):
+        return
 
 
 async def _handle_auto_conversation(message: discord.Message) -> None:
