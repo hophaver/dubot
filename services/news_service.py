@@ -1036,7 +1036,12 @@ def _build_compact_news_text(summary: str, article: Dict) -> str:
         selected.append("This item passed the high-importance filter for your topic.")
 
     selected = selected[:3]
-    return f"**HEADLINE:** {headline}\n" + "\n".join(selected)
+    body = "\n".join(selected).strip()
+    source_url = (article.get("link") or "").strip()
+    source_line = f"\n\nSource: {source_url}" if source_url else ""
+    if body:
+        return f"# **{headline}**\n\n{body}{source_line}"
+    return f"# **{headline}**{source_line}"
 
 
 def _build_expanded_news_text(summary: str, article: Dict) -> str:
@@ -1369,7 +1374,7 @@ class NewsManager:
         view = NewsCompactView(article["hash"], topic, compact_text, expanded_text)
         try:
             user = await self.client.fetch_user(user_id)
-            await user.send(content=compact_text, view=view)
+            await user.send(content=compact_text, view=view, suppress_embeds=True)
             return True
         except discord.Forbidden:
             home_log.log_sync(f"⚠️ Cannot DM user {user_id} (DMs disabled)")

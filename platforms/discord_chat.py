@@ -13,7 +13,42 @@ from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from utils.llm_service import ask_llm
 from utils.ha_integration import ask_home_assistant
+from utils import home_log
+from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
+
+
+def _is_transient_http_error(exc: Exception) -> bool:
+    if not isinstance(exc, discord.HTTPException):
+        return False
+    status = getattr(exc, "status", None)
+    return status in {408, 425, 429, 500, 502, 503, 504}
+
+
+async def _send_with_retry(send_coro_factory, retries: int = 3):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            return await send_coro_factory()
+        except Exception as exc:
+            last_error = exc
+            if _is_transient_http_error(exc) and attempt < retries - 1:
+                retry_count = reliability_telemetry.increment("discord_send_retries")
+                await home_log.send_to_home(
+                    f"⚠️ Discord send retry ({attempt + 1}/{retries - 1}) due to transient HTTP error. "
+                    f"retry_count={retry_count}"
+                )
+                await asyncio.sleep(1 + attempt)
+                continue
+            error_count = reliability_telemetry.increment("discord_send_errors")
+            await home_log.send_to_home(
+                f"🔴 Discord send failed after retries (error #{error_count}): {str(exc)[:280]}. "
+                f"{reliability_telemetry.format_snapshot('Counters')}"
+            )
+            raise
+    if last_error:
+        raise last_error
+    return None
 
 
 def _parse_bool(value: str) -> bool:
@@ -371,16 +406,51 @@ async def process_discord_message(client, message, permission, conversation_mana
             except Exception:
                 context = None
 
-        answer = await ask_llm(
-            message.author.id,
-            message.channel.id,
-            clean_content,
-            str(message.author.name),
-            is_continuation=is_continuation,
-            platform="discord",
-            chat_context=context,
-            attachments=attachments if attachments else None
-        )
+        try:
+            answer = await asyncio.wait_for(
+                ask_llm(
+                    message.author.id,
+                    message.channel.id,
+                    clean_content,
+                    str(message.author.name),
+                    is_continuation=is_continuation,
+                    platform="discord",
+                    chat_context=context,
+                    attachments=attachments if attachments else None
+                ),
+                timeout=150,
+            )
+        except asyncio.TimeoutError:
+            timeout_count = reliability_telemetry.increment("llm_timeouts")
+            await home_log.send_to_home(
+                f"🔴 Message generation timed out (timeout #{timeout_count}) in channel {message.channel.id}. "
+                f"user={message.author.id}. {reliability_telemetry.format_snapshot('Counters')}"
+            )
+            await _send_with_retry(
+                lambda: message.reply("⚠️ I timed out while generating a reply. Please try again in a moment.")
+            )
+            return True
+        except Exception as exc:
+            error_count = reliability_telemetry.increment("llm_errors")
+            await home_log.send_to_home(
+                f"🔴 Message generation crashed (error #{error_count}) in channel {message.channel.id}. "
+                f"user={message.author.id}. error={str(exc)[:280]}"
+            )
+            await _send_with_retry(
+                lambda: message.reply("⚠️ I hit an internal error while generating a reply. Please try again.")
+            )
+            return True
+
+        if not answer:
+            error_count = reliability_telemetry.increment("llm_errors")
+            await home_log.send_to_home(
+                f"🔴 Message generation returned empty response (error #{error_count}) in channel {message.channel.id}. "
+                f"user={message.author.id}. {reliability_telemetry.format_snapshot('Counters')}"
+            )
+            await _send_with_retry(
+                lambda: message.reply("⚠️ I could not generate a response this time. Please try again.")
+            )
+            return True
         
         from commands.shared import _chunk_message, MAX_MESSAGE_LENGTH
         import asyncio
@@ -388,9 +458,9 @@ async def process_discord_message(client, message, permission, conversation_mana
         response = None
         for i, chunk in enumerate(chunks):
             if i == 0:
-                response = await message.reply(chunk)
+                response = await _send_with_retry(lambda: message.reply(chunk))
             else:
-                response = await message.channel.send(chunk)
+                response = await _send_with_retry(lambda: message.channel.send(chunk))
             conversation_manager.set_last_bot_message(message.channel.id, response.id)
             if i < len(chunks) - 1:
                 await asyncio.sleep(0.5)

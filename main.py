@@ -33,6 +33,7 @@ from platforms.discord_chat import process_discord_message
 from commands.shitpost import handle_shitpost
 from utils.llm_service import initialize_command_database
 from utils import home_log
+from utils import reliability_telemetry
 from commands.shared import send_long_to_channel, bot_embed_thumbnail_url
 
 # Initialize command database
@@ -399,7 +400,20 @@ async def on_message(message):
     await _handle_auto_conversation(message)
 
     # Process Discord-specific chat (original functionality)
-    handled = await process_discord_message(client, message, permission, conversation_manager)
+    try:
+        handled = await process_discord_message(client, message, permission, conversation_manager)
+    except Exception as e:
+        handled = True
+        error_count = reliability_telemetry.increment("message_handler_errors")
+        try:
+            await message.reply("⚠️ I hit an unexpected error while handling your message. Please retry.")
+        except Exception:
+            pass
+        await home_log.send_to_home(
+            f"🔴 process_discord_message failed (error #{error_count}): {str(e)[:500]}. "
+            f"channel={getattr(message.channel, 'id', '?')} user={getattr(message.author, 'id', '?')}. "
+            f"{reliability_telemetry.format_snapshot('Counters')}"
+        )
     if handled:
         return
 

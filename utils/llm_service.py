@@ -11,6 +11,7 @@ from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
 from utils import home_log
+from utils import reliability_telemetry
 
 def _get_fallback_chain():
     from utils.model_fallback import get_fallback_chain
@@ -679,17 +680,20 @@ async def _make_ollama_request(model_name, messages):
         "http://localhost:11434",
         "http://127.0.0.1:11434",
     ]
-    
+
+    def _is_transient_status(code: int) -> bool:
+        return code in {408, 425, 429, 500, 502, 503, 504}
+
     for base_url in endpoints:
         url = f"{base_url}/api/chat"
-        
+
         # Check if any message has images
         has_images = False
         for msg in messages:
             if isinstance(msg, dict) and msg.get("images"):
                 has_images = True
                 break
-        
+
         # Prepare data
         if has_images:
             # For vision models, we need to format messages with images
@@ -707,7 +711,7 @@ async def _make_ollama_request(model_name, messages):
                         "role": msg.get("role", "user"),
                         "content": msg.get("content", "")
                     })
-            
+
             data = {
                 "model": model_name,
                 "messages": formatted_messages,
@@ -723,27 +727,91 @@ async def _make_ollama_request(model_name, messages):
                     "num_predict": 1024  # Increased for file analysis
                 }
             }
-        
-        try:
-            response = requests.post(url, json=data, timeout=60)
-            
-            if response.status_code == 404:
-                continue
-            
-            if response.status_code != 200:
-                error_text = response.text[:100]
-                return f"Error {response.status_code}: {error_text}"
-            
-            result = response.json()
-            return result.get("message", {}).get("content", "No response.")
-            
-        except requests.exceptions.ConnectionError:
-            continue
-        except requests.exceptions.Timeout:
-            return "Error: Request timed out"
-        except Exception as e:
-            return f"Error: {str(e)}"
-    
+
+        for attempt in range(3):
+            try:
+                # Run blocking I/O in a thread so Discord event loop stays responsive.
+                response = await asyncio.to_thread(requests.post, url, json=data, timeout=75)
+
+                if response.status_code == 404:
+                    break
+
+                if response.status_code != 200:
+                    if _is_transient_status(response.status_code) and attempt < 2:
+                        reliability_telemetry.increment("llm_retries")
+                        home_log.log_sync(
+                            f"⚠️ LLM transient HTTP {response.status_code} for model `{model_name}` "
+                            f"(attempt {attempt + 1}/3). "
+                            f"{reliability_telemetry.format_snapshot('Counters')}"
+                        )
+                        await asyncio.sleep(1 + attempt)
+                        continue
+                    error_text = (response.text or "")[:140]
+                    error_count = reliability_telemetry.increment("llm_errors")
+                    home_log.log_sync(
+                        f"🔴 LLM HTTP error {response.status_code} for model `{model_name}` "
+                        f"(error #{error_count}): {error_text}"
+                    )
+                    return f"Error {response.status_code}: {error_text}"
+
+                result = response.json()
+                return result.get("message", {}).get("content", "No response.")
+
+            except requests.exceptions.ConnectionError:
+                if attempt < 2:
+                    reliability_telemetry.increment("llm_retries")
+                    home_log.log_sync(
+                        f"⚠️ LLM connection error for model `{model_name}` "
+                        f"(attempt {attempt + 1}/3). "
+                        f"{reliability_telemetry.format_snapshot('Counters')}"
+                    )
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                break
+            except requests.exceptions.Timeout:
+                if attempt < 2:
+                    reliability_telemetry.increment("llm_retries")
+                    home_log.log_sync(
+                        f"⚠️ LLM timeout for model `{model_name}` "
+                        f"(attempt {attempt + 1}/3). "
+                        f"{reliability_telemetry.format_snapshot('Counters')}"
+                    )
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                timeout_count = reliability_telemetry.increment("llm_timeouts")
+                home_log.log_sync(
+                    f"🔴 LLM timeout after retries for model `{model_name}` "
+                    f"(timeout #{timeout_count}). "
+                    f"{reliability_telemetry.format_snapshot('Counters')}"
+                )
+                return "Error: Request timed out"
+            except ValueError:
+                error_count = reliability_telemetry.increment("llm_errors")
+                home_log.log_sync(
+                    f"🔴 LLM returned invalid JSON for model `{model_name}` "
+                    f"(error #{error_count})."
+                )
+                return "Error: Invalid JSON response from Ollama."
+            except Exception as e:
+                if attempt < 2:
+                    reliability_telemetry.increment("llm_retries")
+                    home_log.log_sync(
+                        f"⚠️ LLM unexpected error for model `{model_name}`: {str(e)[:200]} "
+                        f"(attempt {attempt + 1}/3)."
+                    )
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                error_count = reliability_telemetry.increment("llm_errors")
+                home_log.log_sync(
+                    f"🔴 LLM fatal error for model `{model_name}` (error #{error_count}): {str(e)[:300]}"
+                )
+                return f"Error: {str(e)}"
+
+    error_count = reliability_telemetry.increment("llm_errors")
+    home_log.log_sync(
+        f"🔴 LLM connection failed for all Ollama endpoints (error #{error_count}) for model `{model_name}`. "
+        f"{reliability_telemetry.format_snapshot('Counters')}"
+    )
     return "Error: Cannot connect to Ollama server."
 
 async def validate_and_set_model(user_id, provider, model_name):
