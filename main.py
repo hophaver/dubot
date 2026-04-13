@@ -444,54 +444,6 @@ async def _handle_auto_conversation(message: discord.Message) -> None:
     except Exception as e:
         await home_log.log(f"Error sending auto-conversation reply: {e}", also_send=False)
 
-@client.event
-async def on_interaction(interaction: discord.Interaction):
-    """Route persistent button interactions for news feedback."""
-    if interaction.type != discord.InteractionType.component:
-        return
-    custom_id = interaction.data.get("custom_id", "")
-    if not custom_id.startswith("news_"):
-        return
-
-    from services.news_service import record_feedback
-
-    # Extract feedback type and article hash from custom_id
-    # Format: news_{type}_{hash}
-    parts = custom_id.split("_", 2)
-    if len(parts) < 3:
-        return
-    feedback_type_raw = parts[1]
-    article_hash = parts[2]
-
-    feedback_map = {
-        "slop": ("slop", "Got it — I'll send less of this type."),
-        "more": ("more", "Noted — I'll find more content like this!"),
-        "notcrit": ("not_critical", "Understood — shorter summaries for this type going forward."),
-        "crit": ("critical", "Marked as critical — I'll give more detail for news like this."),
-    }
-
-    entry = feedback_map.get(feedback_type_raw)
-    if not entry:
-        return
-
-    feedback_type, response_msg = entry
-
-    # Try to extract topic from embed footer
-    topic = "general"
-    try:
-        if interaction.message and interaction.message.embeds:
-            footer = interaction.message.embeds[0].footer.text or ""
-            for part in footer.split("•"):
-                part = part.strip()
-                if part.lower().startswith("topic:"):
-                    topic = part.split(":", 1)[1].strip().lower()
-    except Exception:
-        pass
-
-    record_feedback(interaction.user.id, article_hash, feedback_type, topic)
-    await interaction.response.send_message(response_msg, ephemeral=True)
-
-
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Handle slash command errors; report to user and to home channel."""

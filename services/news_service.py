@@ -723,59 +723,6 @@ def build_news_embed(article: Dict, summary: str, topic: str) -> discord.Embed:
 
 
 # ---------------------------------------------------------------------------
-# Persistent view re-registration on startup
-# ---------------------------------------------------------------------------
-
-class PersistentNewsFeedbackView(discord.ui.View):
-    """Re-registered on startup so old buttons keep working."""
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Slop", emoji="🗑️", style=discord.ButtonStyle.secondary, custom_id="news_slop_persistent")
-    async def slop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cid = interaction.data.get("custom_id", "")
-        ahash = cid.replace("news_slop_", "")
-        record_feedback(interaction.user.id, ahash, "slop", self._guess_topic(interaction))
-        await interaction.response.send_message("Got it — I'll send less of this type.", ephemeral=True)
-
-    @discord.ui.button(label="More like this", emoji="🔥", style=discord.ButtonStyle.success, custom_id="news_more_persistent")
-    async def more(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cid = interaction.data.get("custom_id", "")
-        ahash = cid.replace("news_more_", "")
-        record_feedback(interaction.user.id, ahash, "more", self._guess_topic(interaction))
-        await interaction.response.send_message("Noted — I'll find more content like this!", ephemeral=True)
-
-    @discord.ui.button(label="Not critical", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="news_notcrit_persistent")
-    async def notcrit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cid = interaction.data.get("custom_id", "")
-        ahash = cid.replace("news_notcrit_", "")
-        record_feedback(interaction.user.id, ahash, "not_critical", self._guess_topic(interaction))
-        await interaction.response.send_message("Understood — shorter summaries for this type going forward.", ephemeral=True)
-
-    @discord.ui.button(label="Critical", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="news_crit_persistent")
-    async def crit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cid = interaction.data.get("custom_id", "")
-        ahash = cid.replace("news_crit_", "")
-        record_feedback(interaction.user.id, ahash, "critical", self._guess_topic(interaction))
-        await interaction.response.send_message("Marked as critical — I'll give more detail for news like this.", ephemeral=True)
-
-    @staticmethod
-    def _guess_topic(interaction: discord.Interaction) -> str:
-        """Try to extract topic from embed footer."""
-        try:
-            if interaction.message and interaction.message.embeds:
-                footer = interaction.message.embeds[0].footer.text or ""
-                for part in footer.split("•"):
-                    part = part.strip()
-                    if part.lower().startswith("topic:"):
-                        return part.split(":", 1)[1].strip().lower()
-        except Exception:
-            pass
-        return "general"
-
-
-# ---------------------------------------------------------------------------
 # Main news manager
 # ---------------------------------------------------------------------------
 
