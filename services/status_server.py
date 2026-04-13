@@ -45,9 +45,16 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         pass  # quiet by default
 
 
+class _ReusableHTTPServer(http.server.HTTPServer):
+    allow_reuse_address = True
+
+
 def start_status_server():
     """Start the status HTTP server in a daemon thread."""
-    server = http.server.HTTPServer(("", PORT), StatusHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    print(f"Status server: http://localhost:{PORT}/status")
+    try:
+        server = _ReusableHTTPServer(("", PORT), StatusHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        print(f"Status server: http://localhost:{PORT}/status")
+    except OSError as e:
+        print(f"⚠️ Status server failed to start (port {PORT} in use?): {e}")

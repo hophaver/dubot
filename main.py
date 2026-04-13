@@ -1,12 +1,14 @@
 import sys
+import os
 
-from utils.bootstrap_deps import ensure_news_dependencies
-
-ensure_news_dependencies()
+try:
+    from utils.bootstrap_deps import ensure_news_dependencies
+    ensure_news_dependencies()
+except Exception as e:
+    print(f"⚠️ bootstrap_deps failed (non-fatal): {e}", flush=True)
 
 import asyncio
 import discord
-import os
 import signal
 import time
 import random
@@ -172,7 +174,11 @@ class BotClient(discord.Client):
         except Exception as e:
             errors.append(f"news: {e}")
 
-        await self.tree.sync()
+        try:
+            await self.tree.sync()
+        except Exception as e:
+            errors.append(f"tree.sync: {e}")
+            print(f"⚠️ tree.sync() failed: {e}", flush=True)
         self._startup_errors = errors
 
 client = BotClient()
@@ -520,29 +526,27 @@ def _ensure_ollama_running():
 
 
 if __name__ == "__main__":
-    # Register signal handlers
+    print(f"[startup] Python {sys.version}", flush=True)
+    print(f"[startup] cwd = {os.getcwd()}", flush=True)
+    print(f"[startup] discord.py {discord.__version__}", flush=True)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Ensure data directory exists
-    os.makedirs("data", exist_ok=True)
-    os.makedirs("data/files", exist_ok=True)
-    os.makedirs("assets", exist_ok=True)
-    os.makedirs("web", exist_ok=True)
+    for d in ("data", "data/files", "assets", "web"):
+        os.makedirs(d, exist_ok=True)
 
-    # Start HTTP server for GET /status (localhost:3000/status)
-    from services.status_server import start_status_server
-    start_status_server()
+    try:
+        from services.status_server import start_status_server
+        start_status_server()
+    except Exception as e:
+        print(f"⚠️ Status server failed: {e}", flush=True)
 
-    # Optionally start Ollama in background so bot doesn't hang waiting for it
     _ensure_ollama_running()
-
-    # Start reminder service
     reminder_manager.start()
-
-    # Start news service
     news_manager.start()
 
+    print("[startup] Connecting to Discord...", flush=True)
     try:
         client.run(DISCORD_BOT_TOKEN)
     except KeyboardInterrupt:
@@ -552,14 +556,16 @@ if __name__ == "__main__":
         news_manager.stop()
         sys.exit(0)
     except discord.errors.LoginFailure:
-        print("❌ Invalid Discord token. Check your DISCORD_BOT_TOKEN in integrations.py")
+        print("❌ Invalid Discord token. Check your DISCORD_BOT_TOKEN in integrations.py",
+              flush=True)
         reminder_manager.stop()
         news_manager.stop()
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Error starting bot: {e}")
+        print(f"❌ Error starting bot: {e}", flush=True)
         import traceback
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
         reminder_manager.stop()
         news_manager.stop()
         sys.exit(1)
