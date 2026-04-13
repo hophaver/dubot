@@ -551,11 +551,117 @@ def get_news_config() -> Dict:
         "model_name": None,
         "cloud_history": [],
         "quiet_times": {},
+        "custom_topic_feeds": {},
     })
 
 
 def save_news_config(data: Dict) -> None:
     _save_json(CONFIG_FILE, data)
+
+
+def _normalize_topic(topic: str) -> str:
+    return (topic or "").strip().lower()
+
+
+def _normalize_feed_source(source: str) -> str:
+    return (source or "").strip() or "Custom Source"
+
+
+def _validate_rss_url(url: str) -> bool:
+    normalized = (url or "").strip().lower()
+    if not (normalized.startswith("http://") or normalized.startswith("https://")):
+        return False
+    return "rss" in normalized or "feed" in normalized or normalized.endswith(".xml")
+
+
+def get_custom_topic_feeds() -> Dict[str, List[Tuple[str, str]]]:
+    cfg = get_news_config()
+    raw = cfg.get("custom_topic_feeds", {})
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: Dict[str, List[Tuple[str, str]]] = {}
+    for topic, entries in raw.items():
+        topic_key = _normalize_topic(str(topic))
+        if not topic_key:
+            continue
+        if not isinstance(entries, list):
+            continue
+        row: List[Tuple[str, str]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            url = (entry.get("url") or "").strip()
+            source = _normalize_feed_source(str(entry.get("source", "")))
+            if not url:
+                continue
+            row.append((url, source))
+        if row:
+            cleaned[topic_key] = row
+    return cleaned
+
+
+def add_custom_topic_feed(topic: str, url: str, source: str) -> Tuple[bool, str]:
+    topic_key = _normalize_topic(topic)
+    url_norm = (url or "").strip()
+    source_norm = _normalize_feed_source(source)
+    if not topic_key:
+        return False, "Topic is required."
+    if not _validate_rss_url(url_norm):
+        return False, "URL must be a valid RSS/feed link (http/https, usually containing rss/feed/xml)."
+
+    cfg = get_news_config()
+    custom = cfg.setdefault("custom_topic_feeds", {})
+    if not isinstance(custom, dict):
+        custom = {}
+        cfg["custom_topic_feeds"] = custom
+    entries = custom.setdefault(topic_key, [])
+    if not isinstance(entries, list):
+        entries = []
+        custom[topic_key] = entries
+
+    for existing in entries:
+        if isinstance(existing, dict) and (existing.get("url") or "").strip().lower() == url_norm.lower():
+            existing["source"] = source_norm
+            existing["url"] = url_norm
+            save_news_config(cfg)
+            return True, "Updated existing source for this topic."
+
+    entries.append({"url": url_norm, "source": source_norm})
+    save_news_config(cfg)
+    return True, "Added source."
+
+
+def remove_custom_topic_feed(topic: str, url: str) -> Tuple[bool, str]:
+    topic_key = _normalize_topic(topic)
+    url_norm = (url or "").strip().lower()
+    cfg = get_news_config()
+    custom = cfg.get("custom_topic_feeds", {})
+    if not isinstance(custom, dict) or topic_key not in custom:
+        return False, "Topic has no custom sources."
+    entries = custom.get(topic_key, [])
+    if not isinstance(entries, list):
+        return False, "Topic has no custom sources."
+
+    filtered = []
+    removed = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_url = (entry.get("url") or "").strip().lower()
+        if entry_url == url_norm:
+            removed = True
+            continue
+        filtered.append(entry)
+
+    if not removed:
+        return False, "Source URL not found for this topic."
+
+    if filtered:
+        custom[topic_key] = filtered
+    else:
+        custom.pop(topic_key, None)
+    save_news_config(cfg)
+    return True, "Removed source."
 
 
 def set_news_model(model_type: str, model_name: str) -> None:
@@ -727,14 +833,36 @@ def migrate_legacy_quiet_entries() -> None:
 def _resolve_feeds_for_topic(topic: str) -> List[Tuple[str, str]]:
     """Return list of (feed_url, source_name) for a user topic string."""
     topic_lower = topic.lower().strip()
+    selected: List[Tuple[str, str]] = []
     if topic_lower in TOPIC_FEEDS:
-        return TOPIC_FEEDS[topic_lower]
-    # Fuzzy match: check if topic is substring of any key or vice-versa
-    for key, feeds in TOPIC_FEEDS.items():
-        if topic_lower in key or key in topic_lower:
-            return feeds
-    # Fallback: use multiple general feeds
-    return TOPIC_FEEDS.get("tech", [])[:2] + TOPIC_FEEDS.get("global politics", [])[:2]
+        selected = list(TOPIC_FEEDS[topic_lower])
+    else:
+        # Fuzzy match: check if topic is substring of any key or vice-versa
+        for key, feeds in TOPIC_FEEDS.items():
+            if topic_lower in key or key in topic_lower:
+                selected = list(feeds)
+                break
+        # Fallback: use multiple general feeds
+        if not selected:
+            selected = TOPIC_FEEDS.get("tech", [])[:2] + TOPIC_FEEDS.get("global politics", [])[:2]
+
+    custom = get_custom_topic_feeds()
+    custom_feeds = custom.get(topic_lower, [])
+    if not custom_feeds:
+        for key, feeds in custom.items():
+            if topic_lower in key or key in topic_lower:
+                custom_feeds.extend(feeds)
+
+    merged = list(selected)
+    seen_urls = {url.strip().lower() for url, _ in merged}
+    for url, source in custom_feeds:
+        key = (url or "").strip().lower()
+        if not key or key in seen_urls:
+            continue
+        merged.append((url, source))
+        seen_urls.add(key)
+
+    return merged
 
 
 def _fetch_feed(url: str, timeout: int = 15) -> List[Dict]:
