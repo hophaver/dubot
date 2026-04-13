@@ -153,7 +153,7 @@ def register(client: discord.Client):
             name="ℹ️ How it works",
             value="• I'll DM you when new articles appear\n"
                   "• Use the buttons on each message to calibrate\n"
-                  "• `/news-time` to pause notifications\n"
+                  "• `/news-time` for daily quiet hours (server local time)\n"
                   "• `/news action:unsubscribe` to remove topics",
             inline=False,
         )

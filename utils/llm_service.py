@@ -251,7 +251,7 @@ def initialize_command_database():
     command_db.add_command("news", "Subscribe to news topics delivered to your DMs", "News")
     command_db.add_command("news-model", "[Admin] Set the LLM model for news summarization", "News")
     command_db.add_command("news-model-info", "Show the current news summarization model", "News")
-    command_db.add_command("news-time", "Pause news notifications for a set time (summary when done)", "News")
+    command_db.add_command("news-time", "Set daily quiet hours for news DMs (server local time; digest when quiet ends)", "News")
     command_db.add_alias("news", "subscribe")
     command_db.add_alias("news", "news feed")
     command_db.add_alias("news-time", "quiet time")

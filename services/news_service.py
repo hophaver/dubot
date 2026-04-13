@@ -8,7 +8,7 @@ import re
 import threading
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import discord
@@ -321,26 +321,83 @@ def get_news_model() -> Tuple[str, Optional[str]]:
     return cfg.get("model_type", "local"), cfg.get("model_name")
 
 
-def set_quiet_time(user_id: int, until: datetime) -> None:
-    cfg = get_news_config()
-    qt = cfg.setdefault("quiet_times", {})
-    qt[str(user_id)] = {"until": until.isoformat(), "articles": []}
-    save_news_config(cfg)
+def _in_quiet_interval(now_minutes: int, pause_min: int, resume_min: int) -> bool:
+    """True if now (minutes since midnight) falls in the daily quiet window [pause, resume).
+
+    pause = when notifications stop, resume = when they start again (server local time).
+    pause < resume: same calendar day (e.g. 1:00–9:00). pause > resume: crosses midnight.
+    """
+    if pause_min == resume_min:
+        return False
+    if pause_min < resume_min:
+        return pause_min <= now_minutes < resume_min
+    return now_minutes >= pause_min or now_minutes < resume_min
 
 
-def get_quiet_time(user_id: int) -> Optional[datetime]:
+def parse_time_of_day(s: str) -> Optional[int]:
+    """Parse '9.00', '9:00', '21:30', '9' into minutes since midnight (0–1439)."""
+    s = (s or "").strip().lower().replace(".", ":")
+    if not s:
+        return None
+    m = re.match(r"^(\d{1,2})\s*:\s*(\d{1,2})$", s)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+    else:
+        m2 = re.match(r"^(\d{1,2})$", s)
+        if not m2:
+            return None
+        h, mi = int(m2.group(1)), 0
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return h * 60 + mi
+
+
+def format_minutes_as_clock(mins: int) -> str:
+    h, m = divmod(int(mins) % 1440, 60)
+    return f"{h}:{m:02d}"
+
+
+def get_daily_quiet_schedule(user_id: int) -> Optional[Tuple[int, int]]:
+    """Return (pause_min, resume_min) if set, else None. Uses server local time."""
     cfg = get_news_config()
     qt = cfg.get("quiet_times", {}).get(str(user_id))
     if not qt:
         return None
     try:
-        return datetime.fromisoformat(qt["until"])
-    except (ValueError, KeyError):
+        p = int(qt["pause_min"])
+        r = int(qt["resume_min"])
+        if not (0 <= p < 1440 and 0 <= r < 1440):
+            return None
+        return (p, r)
+    except (KeyError, TypeError, ValueError):
         return None
+
+
+def user_in_quiet_window(user_id: int, now: Optional[datetime] = None) -> bool:
+    sched = get_daily_quiet_schedule(user_id)
+    if not sched:
+        return False
+    pause_m, resume_m = sched
+    now = now or datetime.now()
+    now_min = now.hour * 60 + now.minute
+    return _in_quiet_interval(now_min, pause_m, resume_m)
+
+
+def set_daily_quiet_schedule(user_id: int, resume_min: int, pause_min: int) -> None:
+    """resume = when notifications turn on again; pause = when they turn off (daily, server local time)."""
+    cfg = get_news_config()
+    qt = cfg.setdefault("quiet_times", {})
+    uid = str(user_id)
+    prev = qt.get(uid) if isinstance(qt.get(uid), dict) else {}
+    articles = prev.get("articles") if isinstance(prev.get("articles"), list) else []
+    qt[uid] = {"pause_min": pause_min, "resume_min": resume_min, "articles": articles}
+    save_news_config(cfg)
 
 
 def add_quiet_time_article(user_id: int, article: Dict) -> None:
     """Queue an article during quiet time for the summary later."""
+    if get_daily_quiet_schedule(user_id) is None:
+        return
     cfg = get_news_config()
     qt = cfg.get("quiet_times", {}).get(str(user_id))
     if qt:
@@ -348,20 +405,36 @@ def add_quiet_time_article(user_id: int, article: Dict) -> None:
         save_news_config(cfg)
 
 
-def pop_quiet_time_articles(user_id: int) -> List[Dict]:
-    """Return queued articles and clear quiet time."""
+def pop_queued_articles_only(user_id: int) -> List[Dict]:
+    """Return queued articles and clear the queue; keep the daily schedule."""
     cfg = get_news_config()
-    qt = cfg.get("quiet_times", {}).pop(str(user_id), None)
+    qt = cfg.get("quiet_times", {}).get(str(user_id))
+    if not qt:
+        return []
+    arts = list(qt.get("articles") or [])
+    qt["articles"] = []
     save_news_config(cfg)
-    if qt:
-        return qt.get("articles", [])
-    return []
+    return arts
 
 
 def clear_quiet_time(user_id: int) -> None:
     cfg = get_news_config()
     cfg.get("quiet_times", {}).pop(str(user_id), None)
     save_news_config(cfg)
+
+
+def migrate_legacy_quiet_entries() -> None:
+    """Drop old duration-based quiet entries (only had 'until', no daily window)."""
+    cfg = get_news_config()
+    qt = cfg.get("quiet_times", {})
+    changed = False
+    for uid, data in list(qt.items()):
+        if isinstance(data, dict) and "until" in data and "pause_min" not in data:
+            qt.pop(uid, None)
+            changed = True
+    if changed:
+        save_news_config(cfg)
+        home_log.log_sync("🗑️ Removed legacy /news-time entries; set daily hours again with /news-time")
 
 
 # ---------------------------------------------------------------------------
@@ -750,8 +823,9 @@ class NewsManager:
         if not subs:
             return
 
-        # Check quiet time expiries first
-        await self._check_quiet_time_expiries()
+        migrate_legacy_quiet_entries()
+        # Flush queued digests when users are outside their daily quiet window
+        await self._flush_daily_quiet_digests()
 
         # Collect all unique topics
         all_topics: Dict[str, List[int]] = {}
@@ -803,9 +877,7 @@ class NewsManager:
         if not self.client:
             return
 
-        # Check quiet time
-        qt = get_quiet_time(user_id)
-        if qt and datetime.now() < qt:
+        if user_in_quiet_window(user_id):
             add_quiet_time_article(user_id, {
                 "title": article["title"],
                 "link": article.get("link", ""),
@@ -842,25 +914,25 @@ class NewsManager:
         except Exception as e:
             home_log.log_sync(f"⚠️ DM send error for user {user_id}: {e}")
 
-    async def _check_quiet_time_expiries(self) -> None:
-        """Check if any user's quiet time has expired and send the summary."""
+    async def _flush_daily_quiet_digests(self) -> None:
+        """If user is outside their daily quiet window but has queued articles, send digest."""
         if not self.client:
             return
         cfg = get_news_config()
         qt_dict = cfg.get("quiet_times", {})
         now = datetime.now()
 
-        expired_users = []
         for uid_str, qt_data in list(qt_dict.items()):
-            try:
-                until = datetime.fromisoformat(qt_data["until"])
-                if now >= until:
-                    expired_users.append(int(uid_str))
-            except (ValueError, KeyError):
-                expired_users.append(int(uid_str))
+            if get_daily_quiet_schedule(int(uid_str)) is None:
+                continue
+            uid = int(uid_str)
+            if user_in_quiet_window(uid, now):
+                continue
+            articles = qt_data.get("articles") or []
+            if not articles:
+                continue
 
-        for uid in expired_users:
-            articles = pop_quiet_time_articles(uid)
+            articles = pop_queued_articles_only(uid)
             if not articles:
                 continue
 
@@ -869,7 +941,7 @@ class NewsManager:
                 summary = f"You had {len(articles)} articles queued. Could not generate summary."
 
             embed = discord.Embed(
-                title="📬 News Briefing — Quiet Time Summary",
+                title="📬 News Briefing — Quiet hours summary",
                 description=summary[:4096],
                 color=0xF39C12,
                 timestamp=datetime.utcnow(),
@@ -890,16 +962,16 @@ class NewsManager:
                     value="\n".join(links[:10])[:1024],
                     inline=False,
                 )
-            embed.set_footer(text=f"{len(articles)} articles during quiet time")
+            embed.set_footer(text=f"{len(articles)} articles during quiet hours")
 
             try:
                 user = await self.client.fetch_user(uid)
                 await user.send(
-                    content="⏰ **Your quiet time has ended!** Here's what you missed:",
+                    content="⏰ **You're outside your daily quiet window** — here's what stacked up:",
                     embed=embed,
                 )
             except Exception as e:
-                home_log.log_sync(f"⚠️ Quiet time summary send error user={uid}: {e}")
+                home_log.log_sync(f"⚠️ Quiet digest send error user={uid}: {e}")
 
 
 # Global instance
