@@ -4,10 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from typing import Any, Dict, Optional
 
 import discord
+from services.profanity_service import contains_profanity
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(_ROOT, "assets")
@@ -15,10 +15,6 @@ STATE_PATH = os.path.join(_ROOT, "data", "clone_state.json")
 
 # One member at a time; space out PATCH /guilds/.../members/... to avoid rate limits.
 SERVER_WIDE_PER_MEMBER_DELAY_SEC = 2.5
-PROFANITY_PATTERN = re.compile(
-    r"\b(?:fuck|fucking|shit|bitch|cunt|asshole|dick|pussy|fag|nigger|retard)\b",
-    re.IGNORECASE,
-)
 
 
 def _extra_backoff_for_http_exception(exc: discord.HTTPException) -> float:
@@ -120,10 +116,6 @@ def _nick_norm(n: Optional[str]) -> str:
 
 def _avatar_key(member: discord.Member) -> str:
     return str(member.display_avatar.key)
-
-
-def _contains_profanity(text: str) -> bool:
-    return bool(PROFANITY_PATTERN.search(text or ""))
 
 
 async def snapshot_baseline_avatar(client: discord.Client) -> None:
@@ -412,7 +404,7 @@ async def mirror_message_if_clone(client: discord.Client, message: discord.Messa
 
     clean_content = (content or "").strip()
     kwargs: Dict[str, Any] = {}
-    if clean_content and _contains_profanity(clean_content):
+    if clean_content and contains_profanity(clean_content):
         sanitized = clean_content.replace('"', '\\"')
         kwargs["content"] = f'{message.author.mention} TRIED TO ABUSE BOT AND SAY "{sanitized}"'
     else:

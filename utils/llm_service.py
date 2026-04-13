@@ -203,6 +203,7 @@ def initialize_command_database():
         "Bot mirror (on/replace) or server-wide nick clone as one user (all); off reverts (permanent admin only)",
         "Admin",
     )
+    command_db.add_command("profanity", "View/edit profanity list used by clone filtering (permanent admin only)", "Admin")
     command_db.add_command("ollama-on", "Start Ollama server (admin only)", "Admin")
     command_db.add_command("ollama-off", "Stop Ollama server (admin only)", "Admin")
 

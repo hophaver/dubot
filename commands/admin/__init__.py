@@ -3,7 +3,7 @@ from commands.base import CommandBase
 
 class AdminCommands(CommandBase):
     def register(self):
-        from . import update, purge, restart, kill, whitelist, setwake, sethome, setstatus, clone
+        from . import update, purge, restart, kill, whitelist, setwake, sethome, setstatus, clone, profanity
         update.register(self.client)
         purge.register(self.client)
         restart.register(self.client)
@@ -13,3 +13,4 @@ class AdminCommands(CommandBase):
         sethome.register(self.client)
         setstatus.register(self.client)
         clone.register(self.client)
+        profanity.register(self.client)
