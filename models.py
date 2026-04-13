@@ -39,18 +39,27 @@ class ModelManager:
             provider = "local"
         key = str(user_id)
         current = self.user_models.get(key, {}) if isinstance(self.user_models.get(key), dict) else {}
+        cloud_history = current.get("cloud_history", [])
+        if not isinstance(cloud_history, list):
+            cloud_history = []
+        cloud_history = [str(m).strip() for m in cloud_history if str(m).strip()]
         entry = {
             "provider": provider,
             "model": model_name,
             "last_local_model": current.get("last_local_model", "qwen2.5:7b"),
+            "cloud_history": cloud_history,
         }
         if provider == "local":
             entry["last_local_model"] = model_name
+        else:
+            history = [m for m in cloud_history if m != model_name]
+            history.insert(0, model_name)
+            entry["cloud_history"] = history[:25]
         self.user_models[key] = entry
         self.save_models()
 
     def get_user_model_info(self, user_id):
-        default = {"provider": "local", "model": "qwen2.5:7b", "last_local_model": "qwen2.5:7b"}
+        default = {"provider": "local", "model": "qwen2.5:7b", "last_local_model": "qwen2.5:7b", "cloud_history": []}
         model_info = self.user_models.get(str(user_id), default)
         if not isinstance(model_info, dict):
             return default
@@ -59,6 +68,13 @@ class ModelManager:
             provider = "local"
         model_name = str(model_info.get("model", default["model"])).strip() or default["model"]
         last_local_model = str(model_info.get("last_local_model", "")).strip()
+        cloud_history = model_info.get("cloud_history", [])
+        if not isinstance(cloud_history, list):
+            cloud_history = []
+        cloud_history = [str(m).strip() for m in cloud_history if str(m).strip()]
+        if provider == "cloud" and model_name and model_name not in cloud_history:
+            cloud_history.insert(0, model_name)
+        cloud_history = cloud_history[:25]
         if not last_local_model:
             last_local_model = model_name if provider == "local" else default["last_local_model"]
         if provider == "local":
@@ -67,14 +83,24 @@ class ModelManager:
             provider != model_info.get("provider")
             or model_name != model_info.get("model")
             or last_local_model != model_info.get("last_local_model")
+            or cloud_history != model_info.get("cloud_history")
         ):
             self.user_models[str(user_id)] = {
                 "provider": provider,
                 "model": model_name,
                 "last_local_model": last_local_model,
+                "cloud_history": cloud_history,
             }
             self.save_models()
-        return {"provider": provider, "model": model_name, "last_local_model": last_local_model}
+        return {"provider": provider, "model": model_name, "last_local_model": last_local_model, "cloud_history": cloud_history}
+
+    def get_recent_cloud_models(self, user_id: int) -> List[str]:
+        info = self.get_user_model_info(user_id)
+        history = info.get("cloud_history", [])
+        if not isinstance(history, list):
+            return []
+        cleaned = [m for m in history if isinstance(m, str) and m.strip()]
+        return list(dict.fromkeys(cleaned))
 
     def get_last_local_model(self, user_id, refresh_local: bool = True) -> str:
         info = self.get_user_model_info(user_id)
