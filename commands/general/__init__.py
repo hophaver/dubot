@@ -1,6 +1,7 @@
 from . import status
 from . import checkwake
 from . import bal
+from . import sleep_mode
 
 
 class GeneralCommands:
@@ -11,3 +12,4 @@ class GeneralCommands:
         status.register(self.client)
         checkwake.register(self.client)
         bal.register(self.client)
+        sleep_mode.register(self.client)

@@ -18,6 +18,7 @@ from config import (
     get_config,
     get_startup_channel_id,
     get_wake_word,
+    is_bot_awake,
     get_current_persona,
     get_conversation_channels,
     get_conversation_frequency,
@@ -183,6 +184,19 @@ class BotClient(discord.Client):
 
 client = BotClient()
 
+
+@client.tree.interaction_check
+async def _awake_interaction_gate(interaction: discord.Interaction) -> bool:
+    """When sleeping, only allow /wake."""
+    command_name = getattr(interaction.command, "name", "")
+    if is_bot_awake() or command_name == "wake":
+        return True
+    if interaction.response.is_done():
+        await interaction.followup.send("😴 I am sleeping. Use `/wake` to bring me online.", ephemeral=True)
+    else:
+        await interaction.response.send_message("😴 I am sleeping. Use `/wake` to bring me online.", ephemeral=True)
+    return False
+
 # In-memory counters for auto-conversation per channel: {channel_id: {"count": int, "next": int}}
 _auto_conversation_state = {}
 
@@ -295,6 +309,9 @@ async def on_message(message):
     # Get permission level
     permission = get_user_permission(message.author.id)
     if permission is None:
+        return
+
+    if not is_bot_awake():
         return
 
     # Check if bot is mentioned and has file attachments

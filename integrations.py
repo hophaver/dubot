@@ -17,6 +17,7 @@ except ImportError:
 
 # Bot credentials and API keys
 DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '').strip()
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
 HA_URL = os.environ.get('HA_URL', 'http://192.168.0.149:8123')
 HA_ACCESS_TOKEN = os.environ.get('HA_ACCESS_TOKEN', '')
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
@@ -40,13 +41,22 @@ COUNTRY = None
 PUBLIC_IP = None
 
 def validate_tokens():
-    """Validate that all required tokens are set"""
+    """Validate bot/API tokens and report startup issues."""
     errors = []
-    
-    if not DISCORD_BOT_TOKEN:
-        errors.append("❌ DISCORD_BOT_TOKEN is not set in environment variables or .env file")
-    elif DISCORD_BOT_TOKEN == 'your_actual_discord_token_here' or 'YOUR_TOKEN' in DISCORD_BOT_TOKEN:
+
+    discord_missing = not DISCORD_BOT_TOKEN
+    telegram_missing = not TELEGRAM_BOT_TOKEN
+
+    if discord_missing and telegram_missing:
+        errors.append("❌ Neither DISCORD_BOT_TOKEN nor TELEGRAM_BOT_TOKEN is set in environment variables or .env file")
+    elif not discord_missing and (
+        DISCORD_BOT_TOKEN == 'your_actual_discord_token_here' or 'YOUR_TOKEN' in DISCORD_BOT_TOKEN
+    ):
         errors.append("❌ DISCORD_BOT_TOKEN is still set to the default/placeholder value")
+    elif not telegram_missing and (
+        TELEGRAM_BOT_TOKEN == 'your_actual_telegram_token_here' or 'YOUR_TOKEN' in TELEGRAM_BOT_TOKEN
+    ):
+        errors.append("❌ TELEGRAM_BOT_TOKEN is still set to the default/placeholder value")
     
     if not HA_ACCESS_TOKEN:
         errors.append("⚠️  HA_ACCESS_TOKEN is not set (Home Assistant commands will not work)")
@@ -127,12 +137,11 @@ if token_errors:
         print(error)
     print("="*50 + "\n")
     
-    # If Discord token is invalid, exit
-    if "DISCORD_BOT_TOKEN" in str(token_errors[0]):
-        print("❌ Cannot start without a valid Discord token")
+    if "Neither DISCORD_BOT_TOKEN nor TELEGRAM_BOT_TOKEN" in str(token_errors[0]):
+        print("❌ Cannot start without at least one valid bot token")
         print("\nTo fix this:")
-        print("1. Get your bot token from: https://discord.com/developers/applications")
-        print("2. Edit your .env file and replace 'your_actual_discord_token_here' with your real token")
+        print("1. For Discord: set DISCORD_BOT_TOKEN in .env")
+        print("2. For Telegram: set TELEGRAM_BOT_TOKEN in .env")
         print("3. Run the bot again")
         sys.exit(1)
 

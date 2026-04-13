@@ -16,6 +16,14 @@ import requests
 
 from utils import home_log
 
+try:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.error import Forbidden as TelegramForbidden
+except ImportError:
+    InlineKeyboardButton = None
+    InlineKeyboardMarkup = None
+    TelegramForbidden = Exception
+
 DATA_DIR = os.path.join("data", "news")
 SUBSCRIPTIONS_FILE = os.path.join(DATA_DIR, "subscriptions.json")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_articles.json")
@@ -725,6 +733,37 @@ def build_news_embed(article: Dict, summary: str, topic: str) -> discord.Embed:
     return embed
 
 
+def build_news_text(article: Dict, summary: str, topic: str) -> str:
+    """Build Telegram-friendly plain text news message."""
+    emoji = CATEGORY_EMOJIS.get(topic.lower(), "📰")
+    source = article.get("source", "Unknown")
+    link = article.get("link", "N/A")
+    return (
+        f"{emoji} {article.get('title', 'Untitled')}\n\n"
+        f"{summary}\n\n"
+        f"Source: {source}\n"
+        f"Topic: {topic}\n"
+        f"Link: {link}"
+    )
+
+
+def build_news_feedback_keyboard(article_hash: str, topic: str):
+    if not InlineKeyboardButton or not InlineKeyboardMarkup:
+        return None
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🗑️ Slop", callback_data=f"news:slop:{article_hash}:{topic}"),
+                InlineKeyboardButton("🔥 More like this", callback_data=f"news:more:{article_hash}:{topic}"),
+            ],
+            [
+                InlineKeyboardButton("📋 Not critical", callback_data=f"news:not_critical:{article_hash}:{topic}"),
+                InlineKeyboardButton("🚨 Critical", callback_data=f"news:critical:{article_hash}:{topic}"),
+            ],
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main news manager
 # ---------------------------------------------------------------------------
@@ -734,12 +773,21 @@ class NewsManager:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.client: Optional[discord.Client] = None
+        self.telegram_bot = None
+        self.platform = "discord"
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         _ensure_data_dir()
 
     def set_client(self, client: discord.Client) -> None:
         self.client = client
+        self.platform = "discord"
         self.loop = client.loop if client else None
+
+    def set_telegram_bot(self, bot) -> None:
+        self.telegram_bot = bot
+        self.platform = "telegram"
+        self.client = None
+        self.loop = None
 
     def start(self) -> None:
         if not self.running:
@@ -759,9 +807,11 @@ class NewsManager:
         time.sleep(30)
         while self.running:
             try:
-                if self.loop and self.client and self.client.is_ready():
+                if self.platform == "discord" and self.loop and self.client and self.client.is_ready():
                     future = asyncio.run_coroutine_threadsafe(self._cycle(), self.loop)
                     future.result(timeout=300)
+                elif self.platform == "telegram" and self.telegram_bot:
+                    asyncio.run(self._cycle())
             except Exception as e:
                 home_log.log_sync(f"⚠️ News cycle error: {e}")
                 traceback.print_exc()
@@ -824,7 +874,9 @@ class NewsManager:
 
     async def _deliver_article(self, user_id: int, article: Dict, topic: str) -> None:
         """Deliver a single article to a user via DM. Respects quiet time and preferences."""
-        if not self.client:
+        if self.platform == "discord" and not self.client:
+            return
+        if self.platform == "telegram" and not self.telegram_bot:
             return
 
         if user_in_quiet_window(user_id):
@@ -857,11 +909,25 @@ class NewsManager:
                 f"**Possible topics to follow:** {topic}, policy changes, market impact"
             )
 
-        # Build embed and view
+        if self.platform == "telegram":
+            text = build_news_text(article, summary, topic)
+            keyboard = build_news_feedback_keyboard(article["hash"], topic)
+            try:
+                await self.telegram_bot.send_message(
+                    chat_id=user_id,
+                    text=text[:4096],
+                    reply_markup=keyboard,
+                    disable_web_page_preview=False,
+                )
+            except TelegramForbidden:
+                home_log.log_sync(f"⚠️ Cannot message Telegram user {user_id} (chat not started or blocked)")
+            except Exception as e:
+                home_log.log_sync(f"⚠️ Telegram send error for user {user_id}: {e}")
+            return
+
+        # Discord path
         embed = build_news_embed(article, summary, topic)
         view = NewsFeedbackView(article["hash"], topic)
-
-        # Send DM
         try:
             user = await self.client.fetch_user(user_id)
             link_text = f"\n🔗 **Source:** {article.get('link', 'N/A')}"
@@ -873,7 +939,9 @@ class NewsManager:
 
     async def _flush_daily_quiet_digests(self) -> None:
         """If user is outside their daily quiet window but has queued articles, send digest."""
-        if not self.client:
+        if self.platform == "discord" and not self.client:
+            return
+        if self.platform == "telegram" and not self.telegram_bot:
             return
         cfg = get_news_config()
         qt_dict = cfg.get("quiet_times", {})
@@ -897,16 +965,40 @@ class NewsManager:
             if not summary:
                 summary = f"You had {len(articles)} articles queued. Could not generate summary."
 
+            sources = set()
+            for a in articles[:15]:
+                sources.add(a.get("source", ""))
+
+            if self.platform == "telegram":
+                links = []
+                for a in articles[:10]:
+                    title = (a.get("title", "Link") or "Link").replace("\n", " ").strip()
+                    links.append(f"- {title[:80]}: {a.get('link', '')}")
+                digest_text = (
+                    "⏰ Quiet hours ended — here is your news briefing:\n\n"
+                    f"{summary}\n\n"
+                    f"Sources: {', '.join(s for s in sources if s) or 'Various'}\n\n"
+                    "Links:\n"
+                    + ("\n".join(links) if links else "- No links")
+                )
+                try:
+                    await self.telegram_bot.send_message(
+                        chat_id=uid,
+                        text=digest_text[:4096],
+                        disable_web_page_preview=True,
+                    )
+                except Exception as e:
+                    home_log.log_sync(f"⚠️ Quiet digest send error user={uid}: {e}")
+                continue
+
             embed = discord.Embed(
                 title="📬 News Briefing — Quiet hours summary",
                 description=summary[:4096],
                 color=0xF39C12,
                 timestamp=datetime.utcnow(),
             )
-            sources = set()
             links = []
             for a in articles[:15]:
-                sources.add(a.get("source", ""))
                 links.append(f"• [{a.get('title', 'Link')[:60]}]({a.get('link', '')})")
             embed.add_field(
                 name="📎 Sources",

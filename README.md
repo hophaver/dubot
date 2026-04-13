@@ -1,11 +1,11 @@
 # Dubot
 
-Discord bot with LLM chat and various features
+Discord/Telegram bot with LLM chat and various features
 
 ## Requirements
 
 - Python 3
-- Discord bot token
+- Discord bot token or Telegram bot token
 - Ollama
 
 ### minimum system requirements
@@ -18,6 +18,13 @@ Discord bot with LLM chat and various features
 4. `source venv/bin/activate`
 5. `pip install -r requirements.txt`
 6. Run: `sh start.sh`
+
+### Telegram mode
+
+- Add `TELEGRAM_BOT_TOKEN` to `.env`
+- Optional: set `BOT_PLATFORM=telegram` to force Telegram entrypoint
+- Optional: set `BOT_PLATFORM=discord` to force Discord entrypoint
+- If only Telegram token is set, `start.sh` auto-selects `main_telegram.py`
 
 ## Config
 

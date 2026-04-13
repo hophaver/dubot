@@ -150,6 +150,8 @@ def initialize_command_database():
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
     command_db.add_command("checkwake", "Check current wake word", "General")
+    command_db.add_command("sleep", "Put bot offline until /wake", "General")
+    command_db.add_command("wake", "Bring bot back online", "General")
     command_db.add_command("bal", "Check OpenRouter account credits (OPENROUTER_API_KEY)", "General")
     command_db.add_command("help", "List all commands", "General")
     

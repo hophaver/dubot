@@ -6,6 +6,7 @@ CONFIG_FILE = "config.json"
 
 DEFAULTS = {
     "wake_word": "robot",
+    "is_awake": True,
     "startup_channel_id": None,
     "download_limit_mb": 100,
     "start_ollama_on_startup": False,
@@ -35,6 +36,16 @@ def save_config(config: Dict[str, Any]) -> None:
 
 def get_wake_word() -> str:
     return get_config().get("wake_word", DEFAULTS["wake_word"])
+
+
+def is_bot_awake() -> bool:
+    return bool(get_config().get("is_awake", DEFAULTS["is_awake"]))
+
+
+def set_bot_awake(is_awake: bool) -> None:
+    cfg = get_config()
+    cfg["is_awake"] = bool(is_awake)
+    save_config(cfg)
 
 
 def get_startup_channel_id():

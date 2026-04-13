@@ -34,7 +34,26 @@ if [ -f ".bot.pid" ]; then
 fi
 
 echo "=== Starting bot in background ==="
-nohup python3 main.py >> "$LOG_FILE" 2>&1 &
+BOT_ENTRY="${BOT_ENTRY:-}"
+if [ -z "$BOT_ENTRY" ]; then
+    BOT_ENTRY="$(python3 - <<'PY'
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+platform = os.environ.get("BOT_PLATFORM", "").strip().lower()
+discord = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+telegram = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+if platform == "telegram" or (telegram and not discord):
+    print("main_telegram.py")
+else:
+    print("main.py")
+PY
+)"
+fi
+nohup python3 "$BOT_ENTRY" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
-echo "  ✓ Bot started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+echo "  ✓ Bot started (PID $(cat "$PID_FILE"), entry: $BOT_ENTRY). Logs: $LOG_FILE"
 echo "  Run ./stop.sh to stop."
