@@ -6,7 +6,7 @@ import base64
 import mimetypes
 import requests
 from typing import Dict, List, Optional, Tuple, Any
-from integrations import OLLAMA_URL, update_system_time_date, get_location_by_ip
+from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
@@ -178,8 +178,8 @@ def initialize_command_database():
     command_db.add_command("persona-create", "[Admin] Create a new persona", "Persona")
     
     # Model Commands
-    command_db.add_command("model", "View and switch Ollama model", "Model")
-    command_db.add_command("pull-model", "Download new Ollama model", "Model")
+    command_db.add_command("model", "View and switch AI model (basic commands always run on local Ollama)", "Model")
+    command_db.add_command("pull-model", "Install local model or validate cloud model", "Model")
     
     # Download Commands
     command_db.add_command("download", "Download media from link or last message and send to chat", "Download")
@@ -337,6 +337,7 @@ async def ask_llm(user_id, channel_id, message_text, username, is_continuation=F
     # Get model
     model_info = model_manager.get_user_model_info(user_id)
     requested_model = model_info.get("model", "llama3.2:1b")
+    provider = model_info.get("provider", "local")
     
     # Check if user is asking for commands or help
     user_message_lower = message_text.lower()
@@ -419,7 +420,12 @@ async def ask_llm(user_id, channel_id, message_text, username, is_continuation=F
         messages.append({"role": "user", "content": formatted_message})
     
     # Try models with fallback
-    final_model, response_text = await _try_models_with_fallback(requested_model, messages, images=bool(images_data))
+    final_model, response_text = await _try_models_with_fallback(
+        requested_model,
+        messages,
+        images=bool(images_data),
+        provider=provider,
+    )
     
     # Clean response
     response_text = _clean_response(response_text)
@@ -454,14 +460,18 @@ def _clean_response(text):
 async def ask_llm_shitpost(user_id: int, word: str) -> str:
     """One-shot LLM reply for shitpost: max 2 words confirming/continuing the word. Returns empty on error."""
     system_prompt = get_enhanced_prompt("shitpost")
-    model_info = model_manager.get_user_model_info(user_id)
-    requested_model = model_info.get("model", "llama3.2:1b")
+    requested_model = model_manager.get_last_local_model(user_id, refresh_local=True)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": word},
     ]
     try:
-        _, response_text = await _try_models_with_fallback(requested_model, messages, images=False)
+        _, response_text = await _try_models_with_fallback(
+            requested_model,
+            messages,
+            images=False,
+            provider="local",
+        )
         cleaned = _clean_response(response_text or "")
         if cleaned.startswith("Error:"):
             return ""
@@ -505,8 +515,8 @@ def _format_vision_help_message() -> str:
     """Build message listing available models with vision-capable marked. Call when image request fails."""
     models = model_manager.list_all_models(refresh_local=True)
     if not models:
-        return "No vision-capable model could process this image. No models are available. Use **/pull-model** to download one (e.g. `llava` or `llama3.2:3b` for vision)."
-    lines = ["No vision-capable model could process this image. Use **/model** to switch or **/pull-model** to install one.", "", "**Available models** (✅ = typically vision-capable):", ""]
+        return "No vision-capable model could process this image. No models are available. Use **/pull-model local model_name** to install one (e.g. `llava` or `llama3.2:3b`)."
+    lines = ["No vision-capable model could process this image. Use **/model** to switch or **/pull-model local model_name** to install one.", "", "**Available models** (✅ = typically vision-capable):", ""]
     for m in models:
         mark = "✅" if _is_vision_capable(m) else "○"
         lines.append(f"{mark} `{m}`")
@@ -531,7 +541,70 @@ async def _resolve_vision_model(requested_model: str, messages: list) -> Optiona
             return model
     return None
 
-async def _try_models_with_fallback(requested_model, messages, images=False):
+def _to_openrouter_messages(messages: list) -> list:
+    converted = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        images = msg.get("images") or []
+        if images:
+            parts = []
+            if content:
+                parts.append({"type": "text", "text": str(content)})
+            for base64_img in images:
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_img}"},
+                    }
+                )
+            converted.append({"role": role, "content": parts})
+        else:
+            converted.append({"role": role, "content": str(content)})
+    return converted
+
+
+async def _make_openrouter_request(model_name: str, messages: list) -> str:
+    if not OPENROUTER_API_KEY:
+        return "Error: OPENROUTER_API_KEY is not configured."
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    payload = {
+        "model": model_name,
+        "messages": _to_openrouter_messages(messages),
+        "temperature": 0.7,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+        if response.status_code != 200:
+            return f"Error {response.status_code}: {(response.text or '')[:180]}"
+        body = response.json()
+        choices = body.get("choices") or []
+        if not choices:
+            return "Error: No choices returned by OpenRouter."
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = message.get("content", "")
+        if isinstance(content, list):
+            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+            content = "".join(text_parts)
+        return str(content).strip() or "No response."
+    except requests.exceptions.Timeout:
+        return "Error: Request timed out"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+async def _try_models_with_fallback(requested_model, messages, images=False, provider="local"):
+    provider = (provider or "local").strip().lower()
+    if provider == "cloud":
+        response = await _make_openrouter_request(requested_model, messages)
+        if response and not response.startswith("Error:"):
+            return requested_model, response
+        return requested_model, f"⚠️ Cloud model unavailable: {response}"
+
     if images:
         vision_model = await _resolve_vision_model(requested_model, messages)
         if vision_model:
@@ -636,11 +709,17 @@ async def _make_ollama_request(model_name, messages):
     return "Error: Cannot connect to Ollama server."
 
 async def validate_and_set_model(user_id, provider, model_name):
+    provider = (provider or "local").strip().lower()
+    if provider not in {"local", "cloud"}:
+        return False, "Provider must be 'local' or 'cloud'."
     test_messages = [{"role": "user", "content": "Test"}]
-    response = await _make_ollama_request(model_name, test_messages)
+    if provider == "cloud":
+        response = await _make_openrouter_request(model_name, test_messages)
+    else:
+        response = await _make_ollama_request(model_name, test_messages)
     if response and not response.startswith("Error:"):
-        model_manager.set_user_model(user_id, model_name)
-        return True, f"Model '{model_name}' set."
+        model_manager.set_user_model(user_id, model_name, provider=provider)
+        return True, f"Model '{model_name}' set ({provider})."
     return False, f"Cannot use model '{model_name}'. {response}"
 
 async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: bytes, user_prompt: str = "", username: str = "", vision_mode: str = "concise", return_only_text: bool = False) -> str:
@@ -652,6 +731,7 @@ async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: 
     system_prompt = persona_manager.get_persona(persona_name)
     model_info = model_manager.get_user_model_info(user_id)
     model_name = model_info.get("model", "llama3.2:3b")
+    provider = model_info.get("provider", "local")
     
     # Determine file type
     file_type = FileProcessor.get_file_type(filename)
@@ -719,13 +799,16 @@ async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: 
     
     # Get response - use same vision fallback as ask_llm (user's model + fallbacks)
     if file_type == "image":
-        model_used, response = await _try_models_with_fallback(model_name, messages, images=True)
+        model_used, response = await _try_models_with_fallback(model_name, messages, images=True, provider=provider)
         if response and response.startswith("⚠️"):
             pass  # keep warning message
         else:
             model_name = model_used
     else:
-        response = await _make_ollama_request(model_name, messages)
+        if provider == "cloud":
+            response = await _make_openrouter_request(model_name, messages)
+        else:
+            response = await _make_ollama_request(model_name, messages)
     
     # Clean and format response
     response = _clean_response(response)
@@ -752,6 +835,7 @@ async def compare_files(user_id: int, channel_id: int, files: List[Dict], user_p
     system_prompt = persona_manager.get_persona(persona_name)
     model_info = model_manager.get_user_model_info(user_id)
     model_name = model_info.get("model", "llama3.2:3b")
+    provider = model_info.get("provider", "local")
     
     # Extract text from all files
     file_contents = []
@@ -792,7 +876,10 @@ async def compare_files(user_id: int, channel_id: int, files: List[Dict], user_p
         {"role": "user", "content": f"{analysis_prompt}\n\nFiles to compare:{file_content_str}"}
     ]
     
-    response = await _make_ollama_request(model_name, messages)
+    if provider == "cloud":
+        response = await _make_openrouter_request(model_name, messages)
+    else:
+        response = await _make_ollama_request(model_name, messages)
     response = _clean_response(response)
     
     # Format response

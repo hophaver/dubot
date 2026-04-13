@@ -13,13 +13,22 @@ STATUS_WEB_DIR = "web"
 STATUS_JSON_PATH = os.path.join(STATUS_WEB_DIR, "status.json")
 
 
-def _write_status_json(sys_status, bot_uptime_sec, bot_uptime, current_model, commands_count, file_types_count):
+def _write_status_json(
+    sys_status,
+    bot_uptime_sec,
+    bot_uptime,
+    current_model,
+    basic_local_model,
+    commands_count,
+    file_types_count,
+):
     os.makedirs(STATUS_WEB_DIR, exist_ok=True)
     payload = {
         "system": sys_status,
         "bot_uptime_sec": round(bot_uptime_sec, 1),
         "bot_uptime": bot_uptime,
         "model": current_model,
+        "basic_local_model": basic_local_model,
         "commands_count": commands_count,
         "file_types_count": file_types_count,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -50,10 +59,23 @@ def register(client):
             bot_uptime = f"{b_days}d {b_hours}h {b_mins}m" if b_days else f"{b_hours}h {b_mins}m"
             model_info = model_manager.get_user_model_info(interaction.user.id)
             current_model = f"{model_info.get('model', 'default')} ({model_info.get('provider', 'local')})"
+            basic_local_model = model_manager.get_last_local_model(interaction.user.id, refresh_local=True)
             commands_count = len(command_db.commands)
             file_types_count = len(SUPPORTED_FILE_TYPES)
-            _write_status_json(sys_status, bot_uptime_sec, bot_uptime, current_model, commands_count, file_types_count)
-            embed = discord.Embed(title="🤖 Status", color=discord.Color.blue())
+            _write_status_json(
+                sys_status,
+                bot_uptime_sec,
+                bot_uptime,
+                current_model,
+                basic_local_model,
+                commands_count,
+                file_types_count,
+            )
+            embed = discord.Embed(
+                title="🤖 System Status",
+                description="Current runtime health and model configuration.",
+                color=discord.Color.blue(),
+            )
             _thumb = bot_embed_thumbnail_url(client.user)
             if _thumb:
                 embed.set_thumbnail(url=_thumb)
@@ -66,10 +88,11 @@ def register(client):
             embed.add_field(name="🎮 GPU", value=f"{sys_status.get('gpu_util', 'N/A')} · {sys_status['gpu_temp']}", inline=True)
             embed.add_field(name="⏱️ Bot uptime", value=bot_uptime, inline=True)
             embed.add_field(name="🔄 System uptime", value=sys_status["uptime"], inline=True)
-            embed.add_field(name="🤖 Model", value=current_model[:100], inline=True)
+            embed.add_field(name="🤖 Active chat model", value=current_model[:100], inline=False)
+            embed.add_field(name="⚙️ Basic command model", value=f"`{basic_local_model}` (always local Ollama)", inline=False)
             embed.add_field(name="📜 Commands", value=str(commands_count), inline=True)
             embed.add_field(name="📁 File types", value=str(file_types_count), inline=True)
-            embed.set_footer(text=f"Python {sys_status['python_version']} · /help")
+            embed.set_footer(text=f"Python {sys_status['python_version']} · /help · local runtime enforced for basic interactions")
             await interaction.followup.send(embed=embed)
         except Exception as e:
             await interaction.followup.send(f"❌ Error getting status: {str(e)}")

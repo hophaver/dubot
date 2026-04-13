@@ -34,6 +34,21 @@ FETCH_INTERVAL_SECONDS = 600  # 10 minutes between fetches
 MAX_SEEN_ARTICLES = 5000
 MAX_ARTICLES_PER_CYCLE = 8  # per topic per cycle
 
+# High-signal filtering: prioritize critical developments, suppress low-value chatter.
+HIGH_IMPORTANCE_PHRASES = {
+    "breakthrough", "major", "critical", "urgent", "warning", "lawsuit", "investigation",
+    "regulation", "ban", "sanctions", "war", "ceasefire", "election", "policy",
+    "acquisition", "merger", "bankruptcy", "layoffs", "breach", "vulnerability",
+    "exploit", "zero-day", "outage", "recall", "approval", "launches", "releases",
+    "earnings", "forecast", "downgrade", "upgrade", "tariff", "agreement",
+}
+
+LOW_SIGNAL_PHRASES = {
+    "rumor", "rumour", "leak", "opinion", "editorial", "hands-on", "first look",
+    "roundup", "recap", "highlights", "watch live", "live blog", "reaction",
+    "best of", "top 10", "what we know", "might", "could", "maybe",
+}
+
 
 def _runtime_platform() -> str:
     platform = os.environ.get("DUBOT_RUNTIME", "discord").strip().lower()
@@ -129,6 +144,46 @@ TOPIC_FEEDS: Dict[str, List[Tuple[str, str]]] = {
         ("https://kotaku.com/rss", "Kotaku"),
         ("https://www.polygon.com/rss/index.xml", "Polygon"),
         ("https://www.ign.com/articles.rss", "IGN"),
+    ],
+    "apple": [
+        ("https://www.macrumors.com/macrumors.xml", "MacRumors"),
+        ("https://9to5mac.com/feed/", "9to5Mac"),
+        ("https://appleinsider.com/rss/news/", "AppleInsider"),
+    ],
+    "ios": [
+        ("https://9to5mac.com/guides/ios/feed/", "9to5Mac iOS"),
+        ("https://www.macrumors.com/roundup/ios/feed/", "MacRumors iOS"),
+        ("https://www.theverge.com/rss/apple/index.xml", "The Verge Apple"),
+    ],
+    "macos": [
+        ("https://9to5mac.com/guides/macos/feed/", "9to5Mac macOS"),
+        ("https://www.macrumors.com/roundup/macos/feed/", "MacRumors macOS"),
+        ("https://www.theverge.com/rss/apple/index.xml", "The Verge Apple"),
+    ],
+    "valve": [
+        ("https://www.gamingonlinux.com/article_rss.php", "GamingOnLinux"),
+        ("https://store.steampowered.com/feeds/news.xml", "Steam News"),
+        ("https://www.pcgamer.com/rss/", "PC Gamer"),
+    ],
+    "hltv": [
+        ("https://www.hltv.org/rss/news", "HLTV"),
+        ("https://www.hltv.org/rss/matches", "HLTV Matches"),
+        ("https://esportsinsider.com/feed", "Esports Insider"),
+    ],
+    "esports": [
+        ("https://esportsinsider.com/feed", "Esports Insider"),
+        ("https://dotesports.com/feed", "Dot Esports"),
+        ("https://www.dexerto.com/feed/", "Dexerto"),
+    ],
+    "startups": [
+        ("https://techcrunch.com/startups/feed/", "TechCrunch Startups"),
+        ("https://www.theverge.com/rss/index.xml", "The Verge"),
+        ("https://www.sifted.eu/feed", "Sifted"),
+    ],
+    "cybersecurity": [
+        ("https://www.darkreading.com/rss.xml", "Dark Reading"),
+        ("https://krebsonsecurity.com/feed/", "Krebs on Security"),
+        ("https://www.bleepingcomputer.com/feed/", "BleepingComputer"),
     ],
     "crypto": [
         ("https://cointelegraph.com/rss", "CoinTelegraph"),
@@ -288,10 +343,13 @@ def record_feedback(user_id: int, article_hash: str, feedback_type: str, topic: 
         "critical_count": 0,
         "keywords_boost": [],
         "keywords_suppress": [],
+        "sources_boost": [],
+        "sources_suppress": [],
     })
     seen = _load_seen()
     article_meta = seen.get("details", {}).get(article_hash, {})
     title_words = _extract_keywords(article_meta.get("title", ""))
+    source_name = (article_meta.get("source", "") or "").strip().lower()
 
     if feedback_type == "slop":
         topic_prefs["slop_count"] = topic_prefs.get("slop_count", 0) + 1
@@ -300,12 +358,18 @@ def record_feedback(user_id: int, article_hash: str, feedback_type: str, topic: 
                 topic_prefs.setdefault("keywords_suppress", []).append(w)
                 # Cap list
                 topic_prefs["keywords_suppress"] = topic_prefs["keywords_suppress"][-50:]
+        if source_name and source_name not in topic_prefs.get("sources_suppress", []):
+            topic_prefs.setdefault("sources_suppress", []).append(source_name)
+            topic_prefs["sources_suppress"] = topic_prefs["sources_suppress"][-20:]
     elif feedback_type == "more":
         topic_prefs["more_count"] = topic_prefs.get("more_count", 0) + 1
         for w in title_words:
             if w not in topic_prefs.get("keywords_boost", []):
                 topic_prefs.setdefault("keywords_boost", []).append(w)
                 topic_prefs["keywords_boost"] = topic_prefs["keywords_boost"][-50:]
+        if source_name and source_name not in topic_prefs.get("sources_boost", []):
+            topic_prefs.setdefault("sources_boost", []).append(source_name)
+            topic_prefs["sources_boost"] = topic_prefs["sources_boost"][-20:]
     elif feedback_type == "not_critical":
         topic_prefs["not_critical_count"] = topic_prefs.get("not_critical_count", 0) + 1
     elif feedback_type == "critical":
@@ -360,6 +424,122 @@ def should_suppress_article(user_id: int, topic: str, title: str) -> bool:
     boost_hits = sum(1 for w in kws if w in boost)
     ratio = suppress_hits / len(kws)
     return ratio > 0.4 and boost_hits == 0
+
+
+def _get_user_topic_prefs(user_id: int, topic: str) -> Dict:
+    prefs = get_preferences()
+    tp = prefs.get(_platform_user_key(user_id), {}).get(topic, {})
+    if not tp and _runtime_platform() == "discord":
+        tp = prefs.get(_legacy_user_key(user_id), {}).get(topic, {})
+    return tp if isinstance(tp, dict) else {}
+
+
+def _article_relevance_score(user_id: int, topic: str, article: Dict) -> float:
+    """Score how relevant an article is for this user/topic based on button feedback."""
+    tp = _get_user_topic_prefs(user_id, topic)
+    if not tp:
+        return 0.0
+
+    title_kws = _extract_keywords(article.get("title", ""))
+    summary_kws = _extract_keywords(article.get("summary", ""))
+    keywords = title_kws + summary_kws
+    if not keywords:
+        keywords = title_kws
+
+    boost = set(tp.get("keywords_boost", []))
+    suppress = set(tp.get("keywords_suppress", []))
+    sources_boost = set((s or "").strip().lower() for s in tp.get("sources_boost", []))
+    sources_suppress = set((s or "").strip().lower() for s in tp.get("sources_suppress", []))
+
+    boost_hits = sum(1 for w in keywords if w in boost)
+    suppress_hits = sum(1 for w in keywords if w in suppress)
+
+    score = 0.0
+    score += boost_hits * 1.6
+    score -= suppress_hits * 2.0
+
+    source_name = (article.get("source", "") or "").strip().lower()
+    if source_name in sources_boost:
+        score += 1.0
+    if source_name in sources_suppress:
+        score -= 1.2
+
+    critical = int(tp.get("critical_count", 0))
+    not_critical = int(tp.get("not_critical_count", 0))
+    more_count = int(tp.get("more_count", 0))
+    slop_count = int(tp.get("slop_count", 0))
+
+    score += min(critical, 12) * 0.08
+    score -= min(not_critical, 12) * 0.06
+    score += min(more_count, 12) * 0.06
+    score -= min(slop_count, 12) * 0.08
+
+    return score
+
+
+def _importance_score(article: Dict) -> float:
+    """Estimate article importance from title+summary signal words."""
+    title = (article.get("title", "") or "").lower()
+    summary = (article.get("summary", "") or "").lower()
+    text = f"{title} {summary}"
+
+    score = 0.0
+    score += sum(1.4 for p in HIGH_IMPORTANCE_PHRASES if p in text)
+    score -= sum(1.0 for p in LOW_SIGNAL_PHRASES if p in text)
+
+    # Hard boosts for very high-impact events.
+    if any(k in text for k in {"breach", "zero-day", "bankruptcy", "war", "sanctions", "recall"}):
+        score += 1.8
+    if any(k in text for k in {"earnings", "regulation", "acquisition", "merger", "layoffs"}):
+        score += 1.0
+
+    # Penalize uncertain/noise framing in titles.
+    if any(k in title for k in {"rumor", "might", "could", "opinion", "recap", "highlights"}):
+        score -= 1.2
+
+    return score
+
+
+def _should_skip_article(user_id: int, topic: str, article: Dict) -> bool:
+    """Use accumulated feedback to suppress low-relevance content."""
+    if should_suppress_article(user_id, topic, article.get("title", "")):
+        return True
+
+    importance = _importance_score(article)
+    if importance < 1.0:
+        return True
+
+    score = _article_relevance_score(user_id, topic, article)
+    tp = _get_user_topic_prefs(user_id, topic)
+    slop_count = int(tp.get("slop_count", 0))
+    more_count = int(tp.get("more_count", 0))
+    critical = int(tp.get("critical_count", 0))
+
+    if score <= -1.0:
+        return True
+    if importance < 1.8 and critical <= 1:
+        return True
+    if slop_count >= 4 and more_count == 0 and score < 0.5:
+        return True
+    return False
+
+
+def _article_quota_for_user(user_id: int, topic: str) -> int:
+    """Dynamic per-cycle article cap based on user feedback profile."""
+    tp = _get_user_topic_prefs(user_id, topic)
+    if not tp:
+        return 1
+
+    critical = int(tp.get("critical_count", 0))
+    not_critical = int(tp.get("not_critical_count", 0))
+    more_count = int(tp.get("more_count", 0))
+    slop_count = int(tp.get("slop_count", 0))
+
+    if critical > not_critical + 3 or more_count > slop_count + 4:
+        return 2
+    if slop_count > more_count + 3 or not_critical > critical + 4:
+        return 1
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -605,11 +785,11 @@ async def _summarize_article(article: Dict, detail_level: str = "normal", topic:
     is_finnish = topic.lower() == "finland"
 
     if detail_level == "detailed":
-        length_instruction = "Provide a thorough but efficient briefing in about 160-220 words."
+        length_instruction = "Keep it concise but complete: around 140-190 words."
     elif detail_level == "brief":
-        length_instruction = "Provide a concise briefing in 60-90 words."
+        length_instruction = "Keep it very concise: around 55-80 words."
     else:
-        length_instruction = "Provide a concise, informative briefing in 100-140 words."
+        length_instruction = "Keep it concise and informative: around 90-130 words."
 
     language_note = ""
     if is_finnish:
@@ -624,11 +804,10 @@ async def _summarize_article(article: Dict, detail_level: str = "normal", topic:
 Write in a professional, coherent style.
 Be factual and objective. Avoid hype, slang, and speculation.
 
-Your response must follow this EXACT structure (use these headers):
-**Summary:** [2-3 concise sentences]
-**Why it matters:** [1-2 sentences]
-**Key implications:** [2-4 bullet points]
-**Possible topics to follow:** [3-5 short topic suggestions, comma-separated]
+Your response must follow this EXACT structure:
+**HEADLINE:** [one-line headline, under 14 words]
+[4-6 short bullet points that include: core facts, why this matters, likely implications, and practical context]
+**Follow topics:** [3-6 short topic suggestions, comma-separated]
 
 Article title: {article['title']}
 Source: {article.get('source', 'Unknown')}
@@ -717,6 +896,8 @@ CATEGORY_EMOJIS = {
     "tech": "💻", "ai": "🤖", "finland": "🇫🇮", "us": "🇺🇸",
     "trade": "📈", "global politics": "🌍", "science": "🔬",
     "gaming": "🎮", "crypto": "₿", "europe": "🇪🇺",
+    "apple": "🍎", "ios": "📱", "macos": "🖥️", "valve": "🕹️",
+    "hltv": "🏆", "esports": "🎯", "startups": "🚀", "cybersecurity": "🛡️",
 }
 
 
@@ -780,6 +961,8 @@ def build_news_embed(article: Dict, summary: str, topic: str) -> discord.Embed:
         "tech": 0x00B4D8, "ai": 0x7B2FF7, "finland": 0x003580, "us": 0xB22234,
         "trade": 0x2E8B57, "global politics": 0xDAA520, "science": 0x20B2AA,
         "gaming": 0x9B59B6, "crypto": 0xF7931A, "europe": 0x003399,
+        "apple": 0x111111, "ios": 0x0A84FF, "macos": 0x6E6E73, "valve": 0x1B2838,
+        "hltv": 0xFF8C00, "esports": 0x8A2BE2, "startups": 0x2ECC71, "cybersecurity": 0x2C3E50,
     }
     color = color_map.get(topic.lower(), 0x5865F2)
 
@@ -942,21 +1125,37 @@ class NewsManager:
                     "sent_at": datetime.now().isoformat(),
                 })
 
-                for uid in sorted(user_ids):
+            for uid in sorted(user_ids):
+                ranked_articles = sorted(
+                    new_articles,
+                    key=lambda a: (
+                        _importance_score(a),
+                        _article_relevance_score(uid, topic, a),
+                    ),
+                    reverse=True,
+                )
+                quota = _article_quota_for_user(uid, topic)
+                sent_count = 0
+
+                for article in ranked_articles:
+                    if sent_count >= quota:
+                        break
                     try:
-                        await self._deliver_article(uid, article, topic)
+                        delivered = await self._deliver_article(uid, article, topic)
+                        if delivered:
+                            sent_count += 1
                     except Exception as e:
                         home_log.log_sync(f"⚠️ Deliver error user={uid} topic={topic}: {e}")
 
-                # Small delay between articles to avoid rate limits
-                await asyncio.sleep(2)
+                # Small delay between users to avoid bursts
+                await asyncio.sleep(1)
 
-    async def _deliver_article(self, user_id: int, article: Dict, topic: str) -> None:
+    async def _deliver_article(self, user_id: int, article: Dict, topic: str) -> bool:
         """Deliver a single article to a user via DM. Respects quiet time and preferences."""
         if self.platform == "discord" and not self.client:
-            return
+            return False
         if self.platform == "telegram" and not self.telegram_bot:
-            return
+            return False
 
         if user_in_quiet_window(user_id):
             add_quiet_time_article(user_id, {
@@ -967,11 +1166,11 @@ class NewsManager:
                 "topic": topic,
                 "hash": article["hash"],
             })
-            return
+            return False
 
         # Check user preferences for suppression
-        if should_suppress_article(user_id, topic, article["title"]):
-            return
+        if _should_skip_article(user_id, topic, article):
+            return False
 
         # Determine detail level
         detail = get_user_detail_level(user_id, topic)
@@ -980,12 +1179,12 @@ class NewsManager:
         summary = await _summarize_article(article, detail_level=detail, topic=topic)
         if not summary:
             summary = (
-                f"**Summary:** {article['title']}\n"
-                f"**Why it matters:** This development may affect decisions in the `{topic}` space.\n"
-                f"**Key implications:**\n"
-                f"• New information is available from {article.get('source', 'the source')}.\n"
-                f"• Review the source article for full details.\n"
-                f"**Possible topics to follow:** {topic}, policy changes, market impact"
+                f"**HEADLINE:** {article['title']}\n"
+                f"• Development reported by {article.get('source', 'the source')} in `{topic}`.\n"
+                "• The update may influence short-term decisions and planning.\n"
+                "• Review the source article for full context and constraints.\n"
+                "• Monitor follow-up announcements for scope and timeline changes.\n"
+                f"**Follow topics:** {topic}, market impact, policy updates, competitor response"
             )
 
         if self.platform == "telegram":
@@ -998,23 +1197,29 @@ class NewsManager:
                     reply_markup=keyboard,
                     disable_web_page_preview=False,
                 )
+                return True
             except TelegramForbidden:
                 home_log.log_sync(f"⚠️ Cannot message Telegram user {user_id} (chat not started or blocked)")
             except Exception as e:
                 home_log.log_sync(f"⚠️ Telegram send error for user {user_id}: {e}")
-            return
+            return False
 
         # Discord path
         embed = build_news_embed(article, summary, topic)
         view = NewsFeedbackView(article["hash"], topic)
         try:
             user = await self.client.fetch_user(user_id)
-            link_text = f"\n🔗 **Source:** {article.get('link', 'N/A')}"
-            await user.send(content=link_text, embed=embed, view=view)
+            source_url = (article.get("link") or "").strip()
+            if source_url:
+                # Plain URL gives Discord a chance to render native preview cards.
+                await user.send(content=source_url, suppress_embeds=False)
+            await user.send(embed=embed, view=view)
+            return True
         except discord.Forbidden:
             home_log.log_sync(f"⚠️ Cannot DM user {user_id} (DMs disabled)")
         except Exception as e:
             home_log.log_sync(f"⚠️ DM send error for user {user_id}: {e}")
+        return False
 
     async def _flush_daily_quiet_digests(self) -> None:
         """If user is outside their daily quiet window but has queued articles, send digest."""

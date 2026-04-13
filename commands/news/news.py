@@ -1,6 +1,6 @@
 """Subscribe to news topics delivered via DM."""
 
-from typing import Optional
+from typing import List, Optional
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
@@ -23,6 +23,29 @@ TOPIC_SUGGESTIONS = {
     "finland": "local policy and business updates",
     "crypto": "digital asset markets and regulation",
     "gaming": "industry releases and platform changes",
+    "apple": "Apple devices, strategy, and ecosystem changes",
+    "ios": "iPhone software releases and app ecosystem news",
+    "macos": "Mac platform updates, tools, and performance changes",
+    "valve": "Steam, platform policy, and Valve product updates",
+    "hltv": "Counter-Strike scene news, rankings, and tournament results",
+    "esports": "major tournaments, teams, and league updates",
+    "startups": "funding rounds and product momentum",
+    "cybersecurity": "threats, vulnerabilities, and incident response",
+}
+
+RELATED_TOPICS = {
+    "ai": ["tech", "science", "startups"],
+    "tech": ["ai", "apple", "cybersecurity"],
+    "apple": ["ios", "macos", "tech"],
+    "ios": ["apple", "macos", "tech"],
+    "macos": ["apple", "ios", "tech"],
+    "gaming": ["valve", "hltv", "esports"],
+    "valve": ["gaming", "hltv", "esports"],
+    "hltv": ["esports", "valve", "gaming"],
+    "esports": ["hltv", "gaming", "valve"],
+    "trade": ["global politics", "us", "europe"],
+    "global politics": ["trade", "europe", "us"],
+    "crypto": ["trade", "tech", "cybersecurity"],
 }
 
 
@@ -33,6 +56,30 @@ def _build_topics_to_follow(limit: int = 8) -> str:
         note = TOPIC_SUGGESTIONS.get(topic, "relevant developments")
         lines.append(f"• `{topic}` - {note}")
     return "\n".join(lines)
+
+
+def _recommend_topics_from_inputs(current_topics: List[str], newly_added_topics: List[str], limit: int = 6) -> str:
+    current_set = {t.lower() for t in current_topics}
+    candidates = []
+
+    for topic in newly_added_topics:
+        key = topic.lower().strip()
+        for related in RELATED_TOPICS.get(key, []):
+            if related in TOPIC_FEEDS and related not in current_set and related not in candidates:
+                candidates.append(related)
+
+    if len(candidates) < limit:
+        for fallback in sorted(TOPIC_FEEDS.keys()):
+            if fallback not in current_set and fallback not in candidates:
+                candidates.append(fallback)
+            if len(candidates) >= limit:
+                break
+
+    lines = []
+    for topic in candidates[:limit]:
+        note = TOPIC_SUGGESTIONS.get(topic, "relevant developments")
+        lines.append(f"• `{topic}` - {note}")
+    return "\n".join(lines) if lines else "• No additional recommendations right now."
 
 
 def register(client: discord.Client):
@@ -183,7 +230,7 @@ def register(client: discord.Client):
         )
         embed.add_field(
             name="Possible topics to follow",
-            value=_build_topics_to_follow(limit=6),
+            value=_recommend_topics_from_inputs(all_topics, topic_list, limit=6),
             inline=False,
         )
         embed.set_footer(text="Feeds are checked about every 10 minutes")
@@ -201,7 +248,7 @@ def register(client: discord.Client):
             )
             test_embed.add_field(
                 name="Possible topics to follow",
-                value=_build_topics_to_follow(limit=5),
+                value=_recommend_topics_from_inputs(all_topics, topic_list, limit=5),
                 inline=False,
             )
             await user.send(embed=test_embed)

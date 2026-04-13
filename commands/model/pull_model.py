@@ -5,6 +5,7 @@ from discord import app_commands
 from whitelist import is_admin
 from integrations import OLLAMA_URL
 from models import model_manager
+from utils.llm_service import validate_and_set_model
 
 
 def _status_line(data: dict) -> str:
@@ -19,14 +20,41 @@ def _status_line(data: dict) -> str:
 
 
 def register(client: discord.Client):
-    @client.tree.command(name="pull-model", description="Download an Ollama model")
-    @app_commands.describe(model="Model name to pull (e.g. llama3.2:3b, llava)")
-    async def pull_model(interaction: discord.Interaction, model: str):
+    @client.tree.command(name="pull-model", description="Install local model or validate cloud model")
+    @app_commands.describe(
+        provider="Model provider: local (Ollama pull) or cloud (OpenRouter validate)",
+        model_name="Model name (e.g. llama3.2:3b, llava, openai/gpt-4o-mini)",
+    )
+    @app_commands.choices(provider=[
+        app_commands.Choice(name="local (Ollama)", value="local"),
+        app_commands.Choice(name="cloud (OpenRouter)", value="cloud"),
+    ])
+    async def pull_model(
+        interaction: discord.Interaction,
+        provider: app_commands.Choice[str],
+        model_name: str,
+    ):
         if not is_admin(interaction.user.id):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
         await interaction.response.defer()
         try:
+            model = model_name.strip()
+            if provider.value == "cloud":
+                success, msg = await validate_and_set_model(interaction.user.id, "cloud", model)
+                if success:
+                    local_runtime = model_manager.get_last_local_model(interaction.user.id, refresh_local=True)
+                    await interaction.edit_original_response(
+                        content=(
+                            f"✅ {msg}\n"
+                            "Cloud models do not need downloading. Access was validated and the active chat model was updated.\n"
+                            f"Basic interactions still run on local Ollama model: `{local_runtime}`."
+                        )
+                    )
+                else:
+                    await interaction.edit_original_response(content=f"❌ {msg}")
+                return
+
             url = f"{OLLAMA_URL}/api/pull"
             response = requests.post(url, json={"name": model}, stream=True, timeout=600)
             if response.status_code != 200:

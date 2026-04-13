@@ -33,13 +33,67 @@ class ModelManager:
         self.available_models = []
         return False
 
-    def set_user_model(self, user_id, model_name: str) -> None:
-        self.user_models[str(user_id)] = {"provider": "local", "model": model_name}
+    def set_user_model(self, user_id, model_name: str, provider: str = "local") -> None:
+        provider = (provider or "local").strip().lower()
+        if provider not in {"local", "cloud"}:
+            provider = "local"
+        key = str(user_id)
+        current = self.user_models.get(key, {}) if isinstance(self.user_models.get(key), dict) else {}
+        entry = {
+            "provider": provider,
+            "model": model_name,
+            "last_local_model": current.get("last_local_model", "qwen2.5:7b"),
+        }
+        if provider == "local":
+            entry["last_local_model"] = model_name
+        self.user_models[key] = entry
         self.save_models()
 
     def get_user_model_info(self, user_id):
-        default = {"provider": "local", "model": "qwen2.5:7b"}
-        return self.user_models.get(str(user_id), default)
+        default = {"provider": "local", "model": "qwen2.5:7b", "last_local_model": "qwen2.5:7b"}
+        model_info = self.user_models.get(str(user_id), default)
+        if not isinstance(model_info, dict):
+            return default
+        provider = str(model_info.get("provider", "local")).strip().lower()
+        if provider not in {"local", "cloud"}:
+            provider = "local"
+        model_name = str(model_info.get("model", default["model"])).strip() or default["model"]
+        last_local_model = str(model_info.get("last_local_model", "")).strip()
+        if not last_local_model:
+            last_local_model = model_name if provider == "local" else default["last_local_model"]
+        if provider == "local":
+            last_local_model = model_name
+        if (
+            provider != model_info.get("provider")
+            or model_name != model_info.get("model")
+            or last_local_model != model_info.get("last_local_model")
+        ):
+            self.user_models[str(user_id)] = {
+                "provider": provider,
+                "model": model_name,
+                "last_local_model": last_local_model,
+            }
+            self.save_models()
+        return {"provider": provider, "model": model_name, "last_local_model": last_local_model}
+
+    def get_last_local_model(self, user_id, refresh_local: bool = True) -> str:
+        info = self.get_user_model_info(user_id)
+        preferred = info.get("last_local_model") or "qwen2.5:7b"
+        if refresh_local:
+            self.refresh_local_models()
+        if preferred in self.available_models:
+            return preferred
+        if self.available_models:
+            fallback = sorted(self.available_models)[0]
+            if fallback != preferred:
+                key = str(user_id)
+                entry = self.user_models.get(key, {})
+                if isinstance(entry, dict):
+                    entry["last_local_model"] = fallback
+                    self.user_models[key] = entry
+                    self.save_models()
+            return fallback
+        return preferred
 
     def list_all_models(self, refresh_local: bool = False) -> List[str]:
         if refresh_local:

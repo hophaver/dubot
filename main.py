@@ -214,6 +214,9 @@ async def _run_startup_checks(client):
     from models import model_manager
     model_info = model_manager.get_user_model_info(0)
     model_status = f"{model_info.get('model', 'qwen2.5:7b')} ({model_info.get('provider', 'local')})"
+    basic_local_model = model_manager.get_last_local_model(0, refresh_local=True)
+    local_models = model_manager.list_all_models(refresh_local=True)
+    local_status = f"{len(local_models)} available" if local_models else "0 available"
 
     # Persona
     persona_status = get_current_persona()
@@ -247,6 +250,12 @@ async def _run_startup_checks(client):
     # Status API (started before client.run)
     from services.status_server import PORT as STATUS_PORT
     status_api = f"http://localhost:{STATUS_PORT}/status"
+    services_status = "✅ reminder, news, status API"
+
+    # Provider/API keys
+    from integrations import OPENROUTER_API_KEY, OLLAMA_URL
+    cloud_status = "✅ key set" if OPENROUTER_API_KEY else "○ key missing"
+    ollama_status = f"{OLLAMA_URL} ({local_status})"
 
     # Admin (global ping)
     admin_status = f"<@{PERMANENT_ADMIN}>"
@@ -254,11 +263,15 @@ async def _run_startup_checks(client):
     return errors, {
         "Commands": cmd_status,
         "Model": model_status,
+        "Basic command model": f"{basic_local_model} (local Ollama)",
         "Persona": persona_status,
         "Home Assistant": ha_status,
         "Location": location_status,
         "Wake word": wake_status,
         "Home channel": home_status,
+        "Ollama": ollama_status,
+        "OpenRouter": cloud_status,
+        "Services": services_status,
         "Status API": status_api,
         "Admin": admin_status,
     }

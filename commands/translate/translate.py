@@ -7,12 +7,11 @@ from commands.shared import send_long_message
 
 
 async def do_translate(user_id: int, text: str, target_language: str = "English") -> str:
-    model_info = model_manager.get_user_model_info(user_id)
-    model_name = model_info.get("model", "llama3.2:3b")
+    model_name = model_manager.get_last_local_model(user_id, refresh_local=True)
     system = "You are a translator. Translate the user's message into the requested language. Output only the translation, no explanations or quotes. If the text is already in that language, return it unchanged or lightly normalized."
     messages = [{"role": "system", "content": system}, {"role": "user", "content": f"Translate the following into {target_language}:\n\n{text}"}]
     try:
-        _, out = await _try_models_with_fallback(model_name, messages, images=False)
+        _, out = await _try_models_with_fallback(model_name, messages, images=False, provider="local")
         return (out or "").strip()
     except Exception:
         return ""

@@ -290,8 +290,7 @@ class HomeAssistantManager:
                 if friendly_name:
                     entity_context.append(f"{friendly_name} -> {entity_id}")
 
-            model_info = model_manager.get_user_model_info(user_id)
-            model_name = model_info.get("model", "llama3.2:3b")
+            model_name = model_manager.get_last_local_model(user_id, refresh_local=True)
             base_url = (OLLAMA_URL or "http://localhost:11434").rstrip("/")
 
             extra = ""

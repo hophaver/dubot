@@ -1,6 +1,7 @@
 import requests
 from typing import Optional, List
 import discord
+from discord import app_commands
 from discord.ui import View, Select, Button
 from whitelist import get_user_permission
 from models import model_manager
@@ -9,11 +10,15 @@ from integrations import OLLAMA_URL
 
 
 def _model_embed(current: str, selected: Optional[str]) -> discord.Embed:
-    embed = discord.Embed(title="🤖 Model", color=discord.Color.blue())
-    embed.add_field(name="Current", value=f"`{current}`", inline=True)
+    embed = discord.Embed(
+        title="🤖 Model Configuration",
+        description="Basic interactions (e.g. shitpost, Home Assistant parsing, translate) always run on the local Ollama model shown below.",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Local runtime model", value=f"`{current}`", inline=True)
     if selected:
         embed.add_field(name="Selected (confirm to switch)", value=f"`{selected}`", inline=True)
-    embed.set_footer(text="Select model → Confirm to switch · Remove to delete from disk")
+    embed.set_footer(text="Select a local model, then confirm. Use /model cloud <name> for OpenRouter chat models.")
     return embed
 
 
@@ -90,19 +95,62 @@ class ModelSelectView(View):
 
 
 def register(client: discord.Client):
-    @client.tree.command(name="model", description="View and switch Ollama model")
-    async def model(interaction: discord.Interaction):
+    @client.tree.command(name="model", description="View or switch model (local Ollama or cloud OpenRouter)")
+    @app_commands.describe(
+        provider="Model provider: local (Ollama) or cloud (OpenRouter)",
+        model_name="Model to switch to (required when provider is set)",
+    )
+    @app_commands.choices(provider=[
+        app_commands.Choice(name="local (Ollama)", value="local"),
+        app_commands.Choice(name="cloud (OpenRouter)", value="cloud"),
+    ])
+    async def model(
+        interaction: discord.Interaction,
+        provider: Optional[app_commands.Choice[str]] = None,
+        model_name: Optional[str] = None,
+    ):
         if not get_user_permission(interaction.user.id):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=False)
         try:
+            if provider:
+                if not model_name or not model_name.strip():
+                    await interaction.followup.send("Usage: `/model local|cloud model_name`")
+                    return
+                success, msg = await validate_and_set_model(
+                    interaction.user.id,
+                    provider.value,
+                    model_name.strip(),
+                )
+                if success:
+                    local_runtime = model_manager.get_last_local_model(interaction.user.id, refresh_local=True)
+                    await interaction.followup.send(
+                        f"✅ {msg}\n"
+                        f"Active chat model updated.\n"
+                        f"Basic interactions continue using local runtime model: `{local_runtime}`."
+                    )
+                else:
+                    await interaction.followup.send(f"❌ {msg}")
+                return
+
             models = model_manager.list_all_models(refresh_local=True)
             info = model_manager.get_user_model_info(interaction.user.id)
+            current_provider = info.get("provider", "local")
             current = info.get("model", "qwen2.5:7b")
+            if current_provider == "cloud":
+                local_runtime = model_manager.get_last_local_model(interaction.user.id, refresh_local=True)
+                await interaction.followup.send(
+                    f"**Current chat model:** `{current}` (`cloud`)\n"
+                    f"**Basic local runtime model:** `{local_runtime}` (`local`)\n\n"
+                    "Use `/model cloud model_name` to switch cloud chat model or "
+                    "`/model local model_name` to switch back fully to local."
+                )
+                return
             if not models:
                 await interaction.followup.send(
-                    "No models found. Use **/pull-model** to download one (e.g. `/pull-model llama3.2:3b` or `/pull-model llava` for vision).",
+                    "No local models found. Use **/pull-model local model_name** "
+                    "(example: `/pull-model local llama3.2:3b`).",
                     ephemeral=False,
                 )
                 return
