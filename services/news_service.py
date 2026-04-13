@@ -550,6 +550,7 @@ def get_news_config() -> Dict:
     return _load_json(CONFIG_FILE, {
         "model_type": "local",
         "model_name": None,
+        "cloud_history": [],
         "quiet_times": {},
     })
 
@@ -560,14 +561,36 @@ def save_news_config(data: Dict) -> None:
 
 def set_news_model(model_type: str, model_name: str) -> None:
     cfg = get_news_config()
-    cfg["model_type"] = model_type
-    cfg["model_name"] = model_name
+    normalized_type = (model_type or "local").strip().lower()
+    if normalized_type not in {"local", "cloud"}:
+        normalized_type = "local"
+    normalized_name = (model_name or "").strip()
+    cloud_history = cfg.get("cloud_history", [])
+    if not isinstance(cloud_history, list):
+        cloud_history = []
+    cloud_history = [str(m).strip() for m in cloud_history if str(m).strip()]
+    if normalized_type == "cloud" and normalized_name:
+        cloud_history = [m for m in cloud_history if m != normalized_name]
+        cloud_history.insert(0, normalized_name)
+        cloud_history = cloud_history[:25]
+    cfg["model_type"] = normalized_type
+    cfg["model_name"] = normalized_name or None
+    cfg["cloud_history"] = cloud_history
     save_news_config(cfg)
 
 
 def get_news_model() -> Tuple[str, Optional[str]]:
     cfg = get_news_config()
     return cfg.get("model_type", "local"), cfg.get("model_name")
+
+
+def get_news_recent_cloud_models() -> List[str]:
+    cfg = get_news_config()
+    history = cfg.get("cloud_history", [])
+    if not isinstance(history, list):
+        return []
+    cleaned = [str(m).strip() for m in history if str(m).strip()]
+    return list(dict.fromkeys(cleaned))
 
 
 def _in_quiet_interval(now_minutes: int, pause_min: int, resume_min: int) -> bool:
@@ -774,10 +797,12 @@ async def _summarize_article(article: Dict, detail_level: str = "normal", topic:
     """Summarize an article using the configured LLM."""
     from integrations import OLLAMA_URL
     from models import model_manager
+    from utils.llm_service import _make_openrouter_request
 
     model_type, model_name = get_news_model()
     if not model_name:
         info = model_manager.get_user_model_info(0)
+        model_type = info.get("provider", "local")
         model_name = info.get("model", "qwen2.5:7b")
 
     from utils.llm_service import get_enhanced_prompt
@@ -821,6 +846,13 @@ Do NOT add any introduction or conclusion outside the structure above."""
     ]
 
     try:
+        if (model_type or "local").strip().lower() == "cloud":
+            response = await _make_openrouter_request(model_name, messages)
+            if response and not response.startswith("Error:"):
+                return response.strip()
+            home_log.log_sync(f"⚠️ News cloud summarization failed: {response}")
+            return None
+
         url = f"{OLLAMA_URL}/api/chat"
         data = {
             "model": model_name,
@@ -841,6 +873,7 @@ async def _summarize_quiet_time_batch(articles: List[Dict]) -> Optional[str]:
     """Produce a combined summary of articles queued during quiet time."""
     from integrations import OLLAMA_URL
     from models import model_manager
+    from utils.llm_service import _make_openrouter_request
 
     if not articles:
         return None
@@ -848,6 +881,7 @@ async def _summarize_quiet_time_batch(articles: List[Dict]) -> Optional[str]:
     model_type, model_name = get_news_model()
     if not model_name:
         info = model_manager.get_user_model_info(0)
+        model_type = info.get("provider", "local")
         model_name = info.get("model", "qwen2.5:7b")
 
     article_list = ""
@@ -872,6 +906,13 @@ Keep the total summary concise but comprehensive. Use bullet points. End with a 
     ]
 
     try:
+        if (model_type or "local").strip().lower() == "cloud":
+            response = await _make_openrouter_request(model_name, messages)
+            if response and not response.startswith("Error:"):
+                return response.strip()
+            home_log.log_sync(f"⚠️ News cloud quiet-time summary failed: {response}")
+            return None
+
         url = f"{OLLAMA_URL}/api/chat"
         data = {
             "model": model_name,
