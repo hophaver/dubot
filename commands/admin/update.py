@@ -13,6 +13,33 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 _REQUIREMENTS = os.path.join(_PROJECT_ROOT, "requirements.txt")
 
 
+def _format_requirements_status(pip_res: Optional[subprocess.CompletedProcess]) -> str:
+    """Create a clean requirements section for update output."""
+    section = ["### Requirements"]
+    if pip_res is None:
+        section.append("○ No `requirements.txt` found, skipped dependency upgrade.")
+        return "\n".join(section)
+
+    if pip_res.returncode == 0:
+        combined = ((pip_res.stdout or "") + "\n" + (pip_res.stderr or "")).strip()
+        if not combined:
+            combined = "(pip finished with no output)"
+        section.append("✅ Dependency upgrade finished.")
+        section.append("```")
+        section.append(combined[:1200])
+        section.append("```")
+        return "\n".join(section)
+
+    err_text = (pip_res.stderr or pip_res.stdout or "").strip()
+    if not err_text:
+        err_text = "(no error output)"
+    section.append(f"⚠️ Dependency upgrade failed (exit code {pip_res.returncode}).")
+    section.append("```")
+    section.append(err_text[:1000])
+    section.append("```")
+    return "\n".join(section)
+
+
 def _pip_upgrade_dependencies() -> Optional[subprocess.CompletedProcess]:
     """Run pip install -r requirements.txt --upgrade. Returns None if requirements.txt is missing."""
     if not os.path.isfile(_REQUIREMENTS):
@@ -59,28 +86,16 @@ def register(client: discord.Client):
                 cwd=_PROJECT_ROOT,
             )
             if result.returncode == 0:
-                msg = f"✅ Git pull successful:\n```\n{(result.stdout or '')[:1000]}"
+                msg = f"### Git\n✅ Git pull successful:\n```\n{(result.stdout or '')[:1000]}"
                 if result.stderr:
                     msg += f"\nStderr:\n{result.stderr[:500]}"
                 msg += "\n```"
 
                 pip_res = _pip_upgrade_dependencies()
-                if pip_res is None:
-                    msg += "\n○ No `requirements.txt` found; skipped pip."
-                elif pip_res.returncode == 0:
-                    combined = ((pip_res.stdout or "") + "\n" + (pip_res.stderr or "")).strip()
-                    if not combined:
-                        combined = "(pip finished with no output)"
-                    msg += (
-                        "\n✅ Dependencies updated (`pip install -r requirements.txt --upgrade`):\n```\n"
-                        f"{combined[:1200]}\n```"
-                    )
-                else:
-                    err_text = (pip_res.stderr or pip_res.stdout or "").strip()
-                    msg += f"\n⚠️ Pip upgrade failed (code {pip_res.returncode}):\n```\n{err_text[:1000]}\n```"
-                msg += "\n**Restart the bot to apply changes.**"
+                msg += "\n\n" + _format_requirements_status(pip_res)
+                msg += "\n\n### Next step\n**Restart the bot to apply changes.**"
             else:
-                msg = f"❌ Git pull failed:\n```\n{(result.stderr or '')[:1000]}\n```"
+                msg = f"### Git\n❌ Git pull failed:\n```\n{(result.stderr or '')[:1000]}\n```"
             view = _restart_button()
             sent = await home_log.send_to_home(content=msg, view=view)
             if sent:

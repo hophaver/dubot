@@ -577,11 +577,48 @@ async def _make_openrouter_request(model_name: str, messages: list) -> str:
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
+    def _extract_openrouter_error(status_code: int, body: dict, raw_text: str) -> str:
+        error_obj = body.get("error") if isinstance(body, dict) else {}
+        if not isinstance(error_obj, dict):
+            error_obj = {}
+        message = str(error_obj.get("message", "")).strip()
+        metadata = error_obj.get("metadata") if isinstance(error_obj.get("metadata"), dict) else {}
+        raw_meta = str(metadata.get("raw", "")).strip()
+        detail = raw_meta or message or raw_text
+
+        if status_code == 429:
+            return (
+                f"Rate limited for `{model_name}` on OpenRouter. "
+                "Retry in a moment, switch to another cloud model, or use a local model."
+            )
+        if status_code == 401:
+            return "OpenRouter authentication failed. Check OPENROUTER_API_KEY."
+        if status_code == 402:
+            return "OpenRouter credits required for this request. Top up credits or choose another model."
+        if detail:
+            return f"OpenRouter request failed ({status_code}): {detail[:220]}"
+        return f"OpenRouter request failed ({status_code})."
+
     try:
         response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+        body = {}
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+
+        # One automatic retry for temporary rate limits
+        if response.status_code == 429:
+            await asyncio.sleep(2)
+            response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+
         if response.status_code != 200:
-            return f"Error {response.status_code}: {(response.text or '')[:180]}"
-        body = response.json()
+            return f"Error: {_extract_openrouter_error(response.status_code, body, response.text or '')}"
+
         choices = body.get("choices") or []
         if not choices:
             return "Error: No choices returned by OpenRouter."
