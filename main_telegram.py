@@ -20,7 +20,7 @@ from telegram.ext import (
 from commands.shared import _chunk_message
 from config import get_config, get_wake_word, is_bot_awake, set_bot_awake
 from conversations import conversation_manager
-from integrations import TELEGRAM_BOT_TOKEN
+from integrations import TELEGRAM_BOT_TOKEN, PERMANENT_ADMIN
 from services.news_service import (
     CATEGORY_EMOJIS,
     clear_quiet_time,
@@ -44,6 +44,67 @@ initialize_command_database()
 
 BOT_ID: Optional[int] = None
 BOT_USERNAME: str = ""
+
+ADMIN_BANG_USAGE = {
+    "start": "!start",
+    "sleep": "!sleep",
+    "wake": "!wake",
+    "news": "!news subscribe <topic1,topic2> | !news unsubscribe <topic1,topic2> | !news unsubscribe_all",
+    "news_time": "!news_time resume=<HH:MM> pause=<HH:MM> | !news_time cancel",
+}
+
+
+def _format_admin_bang_help() -> str:
+    lines = ["Global admin bang commands:"]
+    for key in ("start", "sleep", "wake", "news", "news_time"):
+        lines.append(f"- `{ADMIN_BANG_USAGE[key]}`")
+    return "\n".join(lines)
+
+
+async def _dispatch_admin_bang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Allow permanent admin to run Telegram commands with ! prefix."""
+    message = update.message
+    user = update.effective_user
+    if not message or not user or not message.text:
+        return False
+    if user.id != PERMANENT_ADMIN:
+        return False
+
+    text = message.text.strip()
+    if not text.startswith("!"):
+        return False
+
+    payload = text[1:].strip()
+    if not payload:
+        await message.reply_text("❌ Missing command after `!`.\n" + _format_admin_bang_help())
+        return True
+
+    parts = payload.split()
+    raw_command = parts[0].lower()
+    args = parts[1:]
+    command = raw_command.replace("-", "_")
+
+    command_handlers = {
+        "start": start_command,
+        "sleep": sleep_command,
+        "wake": wake_command,
+        "news": news_command,
+        "news_time": news_time_command,
+    }
+    handler = command_handlers.get(command)
+    if not handler:
+        await message.reply_text(
+            f"❌ Unknown command `!{raw_command}`.\nUse one of these formats:\n{_format_admin_bang_help()}"
+        )
+        return True
+
+    previous_args = getattr(context, "args", None)
+    context.args = args
+    try:
+        await handler(update, context)
+    finally:
+        context.args = previous_args if previous_args is not None else []
+    return True
 
 
 def _parse_news_action(text: str) -> Tuple[str, str]:
@@ -132,6 +193,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         "DuBot Telegram mode is online.\n"
         "Use /news to manage subscriptions and /news_time to manage quiet hours.\n"
+        "Global admin can also use !news / !news_time.\n"
         "In groups, mention me or use the wake word to chat."
     )
 
@@ -173,7 +235,8 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             known = ", ".join(sorted(CATEGORY_EMOJIS.keys()))
             await update.message.reply_text(
                 "You are not following any topics yet.\n"
-                f"Try /news subscribe tech, ai, finland\n"
+                f"Format: `{ADMIN_BANG_USAGE['news']}`\n"
+                f"Example: `!news subscribe tech,ai,finland` (or `/news subscribe tech, ai, finland`)\n"
                 f"Known topics: {known}"
             )
             return
@@ -192,7 +255,10 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     topics = _parse_topics(raw_topics)
     if not topics:
-        await update.message.reply_text("Please provide at least one topic (comma-separated).")
+        await update.message.reply_text(
+            "❌ Invalid syntax.\n"
+            f"Format: `{ADMIN_BANG_USAGE['news']}`"
+        )
         return
 
     if action == "unsubscribe":
@@ -232,7 +298,8 @@ async def news_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         sched = get_daily_quiet_schedule(user_id)
         if not sched:
             await update.message.reply_text(
-                "No quiet hours set.\nUse /news_time resume=9.00 pause=1.00"
+                "No quiet hours set.\n"
+                f"Format: `{ADMIN_BANG_USAGE['news_time']}`"
             )
             return
         pause_m, resume_m = sched
@@ -245,13 +312,19 @@ async def news_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if not resume or not pause:
-        await update.message.reply_text("Set both values, e.g. /news_time resume=9.00 pause=1.00")
+        await update.message.reply_text(
+            "❌ Invalid syntax.\n"
+            f"Format: `{ADMIN_BANG_USAGE['news_time']}`"
+        )
         return
 
     resume_min = parse_time_of_day(resume)
     pause_min = parse_time_of_day(pause)
     if resume_min is None or pause_min is None:
-        await update.message.reply_text("Invalid time format. Use 9.00, 9:00, 21:30, etc.")
+        await update.message.reply_text(
+            "❌ Invalid time format. Use 9.00, 9:00, 21:30, etc.\n"
+            f"Format: `{ADMIN_BANG_USAGE['news_time']}`"
+        )
         return
     if resume_min == pause_min:
         await update.message.reply_text("resume and pause must be different.")
@@ -296,6 +369,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if get_user_permission(user.id) is None:
         return
+
+    if await _dispatch_admin_bang_command(update, context):
+        return
+
     if not is_bot_awake():
         return
 
