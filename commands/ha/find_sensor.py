@@ -24,9 +24,11 @@ def register(client: discord.Client):
             if search:
                 entities = [e for e in entities if search.lower() in e["entity_id"].lower()]
             if not entities:
-                await interaction.followup.send(f"🔍 No entities found{(' matching \"' + search + '\"') if search else ''}.")
+                suffix = f' matching "{search}"' if search else ""
+                await interaction.followup.send(f"🔍 No entities found{suffix}.")
                 return
-            embed = discord.Embed(title=f"🔍 Sensors{' matching \"' + search + '\"' if search else ''}", color=discord.Color.blue())
+            title_suffix = f' matching "{search}"' if search else ""
+            embed = discord.Embed(title=f"🔍 Sensors{title_suffix}", color=discord.Color.blue())
             for entity in entities[:10]:
                 state = entity.get("state", "unknown")
                 friendly_name = entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
