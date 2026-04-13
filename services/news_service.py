@@ -167,7 +167,6 @@ TOPIC_FEEDS: Dict[str, List[Tuple[str, str]]] = {
     ],
     "hltv": [
         ("https://www.hltv.org/rss/news", "HLTV"),
-        ("https://www.hltv.org/rss/matches", "HLTV Matches"),
         ("https://esportsinsider.com/feed", "Esports Insider"),
     ],
     "esports": [

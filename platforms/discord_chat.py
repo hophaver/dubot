@@ -453,7 +453,6 @@ async def process_discord_message(client, message, permission, conversation_mana
             return True
         
         from commands.shared import _chunk_message, MAX_MESSAGE_LENGTH
-        import asyncio
         chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
         response = None
         for i, chunk in enumerate(chunks):
