@@ -8,10 +8,31 @@ from services.news_service import (
     subscribe_user,
     unsubscribe_user,
     get_user_topics,
-    get_subscriptions,
     TOPIC_FEEDS,
     CATEGORY_EMOJIS,
 )
+
+TOPIC_SUGGESTIONS = {
+    "ai": "models, regulation, and practical adoption",
+    "tech": "product launches and platform updates",
+    "science": "research and major discoveries",
+    "trade": "markets, policy, and business shifts",
+    "global politics": "geopolitical developments",
+    "europe": "regional policy and economy",
+    "us": "national policy and industry news",
+    "finland": "local policy and business updates",
+    "crypto": "digital asset markets and regulation",
+    "gaming": "industry releases and platform changes",
+}
+
+
+def _build_topics_to_follow(limit: int = 8) -> str:
+    topics = sorted(TOPIC_FEEDS.keys())[:limit]
+    lines = []
+    for topic in topics:
+        note = TOPIC_SUGGESTIONS.get(topic, "relevant developments")
+        lines.append(f"• `{topic}` - {note}")
+    return "\n".join(lines)
 
 
 def register(client: discord.Client):
@@ -43,22 +64,20 @@ def register(client: discord.Client):
         if not topics and action_val == "subscribe":
             current = get_user_topics(interaction.user.id)
             if not current:
-                available = sorted(TOPIC_FEEDS.keys())
-                avail_str = ", ".join(f"`{t}`" for t in available)
                 embed = discord.Embed(
-                    title="📰 News Subscriptions",
-                    description="You have no active subscriptions.",
+                    title="📰 News Preferences",
+                    description="You are not following any topics yet.",
                     color=0x5865F2,
                 )
                 embed.add_field(
-                    name="Available topics",
-                    value=avail_str,
+                    name="Topics you can follow",
+                    value=_build_topics_to_follow(),
                     inline=False,
                 )
                 embed.add_field(
-                    name="How to subscribe",
-                    value="Use `/news topics:tech, AI, finland` to subscribe.\n"
-                          "You can use any topic — the bot will find the best sources automatically.",
+                    name="How to start",
+                    value="Use `/news topics:ai, tech, finland` to subscribe.\n"
+                          "You can also add custom topics and I will match them to relevant sources.",
                     inline=False,
                 )
                 await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -70,14 +89,19 @@ def register(client: discord.Client):
                 topic_lines.append(f"{emoji} **{t.capitalize()}**")
 
             embed = discord.Embed(
-                title="📰 Your News Subscriptions",
+                title="📰 Your Followed Topics",
                 description="\n".join(topic_lines),
                 color=0x2ECC71,
             )
             embed.add_field(
-                name="Manage",
-                value="`/news topics:tech action:unsubscribe` to remove a topic\n"
-                      "`/news action:unsubscribe all` to clear everything",
+                name="Manage subscriptions",
+                value="`/news topics:tech action:unsubscribe` to remove one topic\n"
+                      "`/news action:unsubscribe all` to clear all topics",
+                inline=False,
+            )
+            embed.add_field(
+                name="Possible topics to follow",
+                value=_build_topics_to_follow(limit=6),
                 inline=False,
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -132,8 +156,8 @@ def register(client: discord.Client):
         new_topics = ", ".join(f"`{t}`" for t in topic_list)
 
         embed = discord.Embed(
-            title="📰 Subscribed to News",
-            description=f"Added: {new_topics}",
+            title="📰 News Subscriptions Updated",
+            description=f"Added topics: {new_topics}",
             color=0x2ECC71,
         )
 
@@ -145,19 +169,24 @@ def register(client: discord.Client):
             topic_lines.append(f"{emoji} **{t.capitalize()}** — {status}")
 
         embed.add_field(
-            name="All your topics",
+            name="Your current topics",
             value="\n".join(topic_lines) if topic_lines else "None",
             inline=False,
         )
         embed.add_field(
-            name="ℹ️ How it works",
-            value="• I'll DM you when new articles appear\n"
-                  "• Use the buttons on each message to calibrate\n"
-                  "• `/news-time` for daily quiet hours (server local time)\n"
-                  "• `/news action:unsubscribe` to remove topics",
+            name="How delivery works",
+            value="• You receive DMs when new articles are found\n"
+                  "• Use feedback buttons to tune relevance\n"
+                  "• Set quiet hours with `/news-time`\n"
+                  "• Remove topics anytime with `/news` and `action:unsubscribe`",
             inline=False,
         )
-        embed.set_footer(text="News is checked every ~10 minutes")
+        embed.add_field(
+            name="Possible topics to follow",
+            value=_build_topics_to_follow(limit=6),
+            inline=False,
+        )
+        embed.set_footer(text="Feeds are checked about every 10 minutes")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -166,10 +195,14 @@ def register(client: discord.Client):
             user = await client.fetch_user(interaction.user.id)
             test_embed = discord.Embed(
                 title="📰 News Subscription Active",
-                description=f"You're now subscribed to: {', '.join(f'**{t}**' for t in topic_list)}\n\n"
-                            "I'll send you news updates here. Make sure your DMs are open!\n\n"
-                            "Use the buttons on each news message to fine-tune what you receive.",
+                description=f"Now following: {', '.join(f'**{t}**' for t in topic_list)}\n\n"
+                            "News updates will be delivered here. Keep your DMs enabled to receive them.",
                 color=0x2ECC71,
+            )
+            test_embed.add_field(
+                name="Possible topics to follow",
+                value=_build_topics_to_follow(limit=5),
+                inline=False,
             )
             await user.send(embed=test_embed)
         except discord.Forbidden:

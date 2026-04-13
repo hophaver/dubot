@@ -524,11 +524,11 @@ async def _summarize_article(article: Dict, detail_level: str = "normal", topic:
     is_finnish = topic.lower() == "finland"
 
     if detail_level == "detailed":
-        length_instruction = "Provide a comprehensive and detailed summary (200-300 words). Include extensive context, background, and analysis."
+        length_instruction = "Provide a thorough but efficient briefing in about 160-220 words."
     elif detail_level == "brief":
-        length_instruction = "Provide a very brief summary (2-3 sentences max). Just the key facts."
+        length_instruction = "Provide a concise briefing in 60-90 words."
     else:
-        length_instruction = "Provide a clear summary (100-150 words). Cover the essentials without being too verbose."
+        length_instruction = "Provide a concise, informative briefing in 100-140 words."
 
     language_note = ""
     if is_finnish:
@@ -540,17 +540,20 @@ async def _summarize_article(article: Dict, detail_level: str = "normal", topic:
 
 {language_note}
 
+Write in a professional, coherent style.
+Be factual and objective. Avoid hype, slang, and speculation.
+
 Your response must follow this EXACT structure (use these headers):
-**📰 What:** [One-sentence description of the news]
-**❗ Why it matters:** [Why this is significant]
-**🔗 Impact:** [What this could affect - markets, people, industries, etc.]
-**💡 Key takeaway:** [The most important thing to remember]
+**Summary:** [2-3 concise sentences]
+**Why it matters:** [1-2 sentences]
+**Key implications:** [2-4 bullet points]
+**Possible topics to follow:** [3-5 short topic suggestions, comma-separated]
 
 Article title: {article['title']}
 Source: {article.get('source', 'Unknown')}
 Content: {article.get('summary', 'No content preview available.')}
 
-Do NOT add any introduction or conclusion outside the structure above. Be factual and objective."""
+Do NOT add any introduction or conclusion outside the structure above."""
 
     messages = [
         {"role": "system", "content": "You are a professional news analyst. Summarize news articles clearly and objectively. Always follow the exact output format requested."},
@@ -845,7 +848,14 @@ class NewsManager:
         # Summarize
         summary = await _summarize_article(article, detail_level=detail, topic=topic)
         if not summary:
-            summary = f"**📰 What:** {article['title']}\n\n*Could not generate AI summary. See the source link for details.*"
+            summary = (
+                f"**Summary:** {article['title']}\n"
+                f"**Why it matters:** This development may affect decisions in the `{topic}` space.\n"
+                f"**Key implications:**\n"
+                f"• New information is available from {article.get('source', 'the source')}.\n"
+                f"• Review the source article for full details.\n"
+                f"**Possible topics to follow:** {topic}, policy changes, market impact"
+            )
 
         # Build embed and view
         embed = build_news_embed(article, summary, topic)
