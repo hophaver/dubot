@@ -152,7 +152,7 @@ def register(client):
         if not keys:
             await interaction.followup.send(
                 "❌ No OpenRouter keys detected.\n"
-                "Set at least one of: `OPENROUTER_API_KEY`, `OPENROUTER_CHAT_API_KEY`, `OPENROUTER_MANAGEMENT_API_KEY`.",
+                "Set `OPENROUTER_API_KEY` in `.env` (override vars are optional).",
                 ephemeral=True,
             )
             return
@@ -173,11 +173,11 @@ def register(client):
         if chat_ok and credits_ok:
             lines.append("✅ Chat and credits both have at least one working key.")
         elif credits_ok and not chat_ok:
-            lines.append("⚠️ Credits key works, but no key passed chat auth.")
-            lines.append("Set `OPENROUTER_CHAT_API_KEY` to a chat/completions-capable key.")
+            lines.append("⚠️ Credits check works, but no key passed chat auth.")
+            lines.append("Use a valid OpenRouter API key in `OPENROUTER_API_KEY`.")
         elif chat_ok and not credits_ok:
             lines.append("⚠️ Chat works, credits endpoint failed for all keys.")
-            lines.append("Set `OPENROUTER_MANAGEMENT_API_KEY` for `/bal`.")
+            lines.append("`/bal` may require account permissions; key itself can still be valid for chat.")
         else:
             lines.append("❌ No candidate key worked for chat or credits.")
 

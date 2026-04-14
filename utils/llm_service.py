@@ -890,7 +890,7 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
 
     candidate_keys = _candidate_openrouter_keys()
     if not candidate_keys:
-        return "Error: OPENROUTER_CHAT_API_KEY is not configured."
+        return "Error: OpenRouter API key is not configured (set OPENROUTER_API_KEY in .env)."
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
         "model": model_name,
@@ -916,8 +916,8 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         if status_code == 401:
             return (
                 "OpenRouter authentication failed. "
-                "Check OPENROUTER_CHAT_API_KEY (chat key). "
-                "If /bal works but chat fails, you likely set only a management key."
+                "Check OPENROUTER_API_KEY in .env (or optional override vars). "
+                "Details can indicate key scope, account, or key ownership mismatch."
                 f"{(' Details: ' + detail[:180]) if detail else ''}"
             )
         if status_code == 402:

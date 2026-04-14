@@ -281,11 +281,11 @@ async def _run_startup_checks(client):
     # Provider/API keys
     from integrations import OPENROUTER_CHAT_API_KEY, OPENROUTER_MANAGEMENT_API_KEY, OLLAMA_URL
     if OPENROUTER_CHAT_API_KEY and OPENROUTER_MANAGEMENT_API_KEY:
-        cloud_status = "✅ chat + management keys set"
+        cloud_status = "✅ key set (+ optional overrides)"
     elif OPENROUTER_CHAT_API_KEY:
-        cloud_status = "✅ chat key set (management missing)"
+        cloud_status = "✅ key set"
     elif OPENROUTER_MANAGEMENT_API_KEY:
-        cloud_status = "⚠️ management key only (cloud chat may fail)"
+        cloud_status = "✅ key set (override)"
     else:
         cloud_status = "○ keys missing"
     ollama_status = f"{OLLAMA_URL}\n{local_status}"
