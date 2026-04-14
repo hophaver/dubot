@@ -48,6 +48,20 @@ def _normalize_secret(value: str) -> str:
     v = str(value or "").strip().strip('"').strip("'")
     if v.lower() in {"none", "null"}:
         return ""
+    upper = v.upper()
+    # Treat common template placeholders as unset so fallback keys can be used.
+    if upper in {
+        "TOKEN",
+        "YOUR_TOKEN",
+        "YOUR_API_KEY",
+        "API_KEY",
+        "CHANGE_ME",
+        "REPLACE_ME",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_CHAT_API_KEY",
+        "OPENROUTER_MANAGEMENT_API_KEY",
+    }:
+        return ""
     return v
 
 
