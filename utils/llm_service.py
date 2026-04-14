@@ -541,8 +541,14 @@ async def ask_llm(
         if jarvis_profile_prompt:
             enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{jarvis_profile_prompt}"
         enhanced_system_prompt += (
-            "\n\nJarvis mode is ON for this DM. Behave like a smart personal assistant: "
-            "be proactive, maintain continuity, and adapt to the user's communication style."
+            "\n\nJarvis mode is ON for this DM. Keep your tone natural and conversational. "
+            "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
+            "Be proactive, keep continuity, and match the user's style."
+        )
+    elif is_dm:
+        enhanced_system_prompt += (
+            "\n\nThis is a direct DM chat. Use a relaxed, natural tone. "
+            "Keep it human and concise, and avoid overly formal phrasing."
         )
     
     # Prepare conversation history (channel-based: one thread per channel, last 5 turns)

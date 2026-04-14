@@ -28,6 +28,7 @@ class JarvisManager:
                     "dislikes": [],
                     "tone_notes": [],
                 },
+                "trusted_commands_no_confirm": [],
                 "pending_confirmation": None,
             }
         return self.state[key]
@@ -123,6 +124,33 @@ class JarvisManager:
 
     def clear_pending_confirmation(self, user_id: int) -> None:
         self.set_pending_confirmation(user_id, None)
+
+    def add_trusted_command(self, user_id: int, command_name: str) -> None:
+        if not command_name:
+            return
+        user_state = self._get_user_state(user_id)
+        trusted = list(user_state.get("trusted_commands_no_confirm", []) or [])
+        name = str(command_name).strip().lower()
+        if name not in trusted:
+            trusted.append(name)
+        user_state["trusted_commands_no_confirm"] = trusted[-40:]
+        self.save()
+
+    def remove_trusted_command(self, user_id: int, command_name: str) -> None:
+        if not command_name:
+            return
+        user_state = self._get_user_state(user_id)
+        name = str(command_name).strip().lower()
+        trusted = [c for c in (user_state.get("trusted_commands_no_confirm", []) or []) if str(c).lower() != name]
+        user_state["trusted_commands_no_confirm"] = trusted
+        self.save()
+
+    def is_trusted_no_confirm(self, user_id: int, command_name: str) -> bool:
+        if not command_name:
+            return False
+        trusted = self._get_user_state(user_id).get("trusted_commands_no_confirm", []) or []
+        name = str(command_name).strip().lower()
+        return name in {str(c).strip().lower() for c in trusted}
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.save_file), exist_ok=True)

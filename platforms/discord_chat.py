@@ -192,6 +192,55 @@ def _looks_like_command_request(text: str) -> bool:
     return any(cue in t for cue in cue_words)
 
 
+def _looks_like_himas_request(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if any(word in t for word in ["light", "lamp", "kitchen", "bedroom", "living room", "thermostat", "temperature", "switch", "fan"]):
+        return any(verb in t for verb in ["turn on", "turn off", "set", "dim", "toggle", "what is", "status"])
+    return False
+
+
+def _normalize_command_name(name: str) -> str:
+    n = (name or "").strip().lower().replace("/", "")
+    if n in {"ha", "home", "homeassistant", "home-assistant"}:
+        return "himas"
+    return n
+
+
+def _extract_no_confirm_preference(text: str):
+    """Return (command_name, enabled) when user asks to toggle confirmations for a command."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+
+    disable_patterns = [
+        r"(?:no need|dont|don't|stop|skip)\s+(?:for\s+)?(?:the\s+)?confirm(?:ation)?\s+(?:for\s+)?/?([a-z0-9\-]+)",
+        r"(?:always|just)\s+run\s+/?([a-z0-9\-]+)\s+(?:without|w/o)\s+confirm(?:ation)?",
+        r"/?([a-z0-9\-]+)\s+(?:doesn't|doesnt|does not|shouldn't|shouldnt|should not)\s+need\s+confirm(?:ation)?",
+    ]
+    enable_patterns = [
+        r"(?:ask|require|need)\s+confirm(?:ation)?\s+(?:for\s+)?/?([a-z0-9\-]+)",
+        r"(?:enable|turn on)\s+confirm(?:ation)?\s+(?:for\s+)?/?([a-z0-9\-]+)",
+    ]
+
+    for pat in disable_patterns:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            return _normalize_command_name(m.group(1)), True
+
+    for pat in enable_patterns:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            return _normalize_command_name(m.group(1)), False
+
+    if "this command" in t and ("without confirmation" in t or "no confirmation" in t):
+        return "__PENDING__", True
+    if "this command" in t and ("ask confirmation" in t or "with confirmation" in t):
+        return "__PENDING__", False
+    return None
+
+
 def _build_command_schema(client: discord.Client):
     schema = []
     for cmd in client.tree.get_commands():
@@ -456,6 +505,21 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
 async def _handle_jarvis_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
     """DM-only natural-language command routing with explicit confirmation."""
     user_id = message.author.id
+    pref_update = _extract_no_confirm_preference(clean_content)
+    if pref_update:
+        cmd_name, enabled = pref_update
+        if cmd_name == "__PENDING__":
+            pending_ref = jarvis_manager.get_pending_confirmation(user_id) or {}
+            cmd_name = _normalize_command_name(str(pending_ref.get("command", "") or ""))
+        if cmd_name:
+            if enabled:
+                jarvis_manager.add_trusted_command(user_id, cmd_name)
+                await _send_chat_output(message, f"Cool, I will run `/{cmd_name}` without asking next time.")
+            else:
+                jarvis_manager.remove_trusted_command(user_id, cmd_name)
+                await _send_chat_output(message, f"Got it, I will ask before running `/{cmd_name}`.")
+            return True
+
     pending = jarvis_manager.get_pending_confirmation(user_id)
     if pending:
         if _is_positive_confirmation(clean_content):
@@ -476,12 +540,51 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
                     f"❌ I couldn't run `/{command_obj.name}` from that request: {str(exc)[:200]}"
                 )
             return True
+        if "without confirmation" in clean_content.lower() or "no confirmation" in clean_content.lower():
+            command_name = str(pending.get("command", "")).strip().lower()
+            if command_name:
+                jarvis_manager.add_trusted_command(user_id, command_name)
+            command_obj = client.tree.get_command(command_name)
+            args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
+            jarvis_manager.clear_pending_confirmation(user_id)
+            if command_obj is None:
+                await _send_chat_output(message, f"❌ I can no longer find `/{command_name}`.")
+                return True
+            try:
+                kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
+                interaction = _MessageInteractionProxy(client, message, command_obj.name)
+                await command_obj.callback(interaction, **kwargs)
+            except Exception as exc:
+                await _send_chat_output(message, f"❌ Couldn't run `/{command_obj.name}`: {str(exc)[:200]}")
+            return True
         if _is_negative_confirmation(clean_content):
             jarvis_manager.clear_pending_confirmation(user_id)
-            await _send_chat_output(message, "✅ Cancelled. I will not run that command.")
+            await _send_chat_output(message, "No worries, cancelled.")
             return True
-        await _send_chat_output(message, "I still need confirmation. Reply `yes` to run it, or `no` to cancel.")
+        await _send_chat_output(message, "Quick yes/no: should I run it?")
         return True
+
+    if _looks_like_himas_request(clean_content):
+        command_obj = client.tree.get_command("himas")
+        if command_obj is not None:
+            args = {"command": clean_content}
+            if jarvis_manager.is_trusted_no_confirm(user_id, "himas"):
+                try:
+                    kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
+                    interaction = _MessageInteractionProxy(client, message, command_obj.name)
+                    await command_obj.callback(interaction, **kwargs)
+                except Exception as exc:
+                    await _send_chat_output(message, f"❌ Couldn't run `/himas`: {str(exc)[:200]}")
+                return True
+            jarvis_manager.set_pending_confirmation(
+                user_id,
+                {"command": "himas", "arguments": args, "risk": "safe"},
+            )
+            await _send_chat_output(
+                message,
+                f"Want me to do this via Home Assistant?\n`/himas command:{clean_content}`\nReply `yes` or `no`.",
+            )
+            return True
 
     if not _looks_like_command_request(clean_content):
         return False
@@ -497,21 +600,27 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
     args = plan.get("arguments", {}) if isinstance(plan.get("arguments"), dict) else {}
     risk = str(plan.get("risk", "safe")).strip().lower()
     reason = str(plan.get("reason", "")).strip()
+    if jarvis_manager.is_trusted_no_confirm(user_id, command_obj.name):
+        try:
+            kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
+            interaction = _MessageInteractionProxy(client, message, command_obj.name)
+            await command_obj.callback(interaction, **kwargs)
+        except Exception as exc:
+            await _send_chat_output(message, f"❌ Couldn't run `/{command_obj.name}`: {str(exc)[:200]}")
+        return True
+
     jarvis_manager.set_pending_confirmation(
         user_id,
-        {
-            "command": command_obj.name,
-            "arguments": args,
-            "risk": risk,
-        },
+        {"command": command_obj.name, "arguments": args, "risk": risk},
     )
     pretty_args = ", ".join(f"{k}={v}" for k, v in args.items()) if args else "no arguments"
-    risk_note = "⚠️ Potentially sensitive command. " if risk in {"risky", "dangerous"} else ""
+    risk_note = "Heads up, this one can be sensitive. " if risk in {"risky", "dangerous"} else ""
     await _send_chat_output(
         message,
-        f"{risk_note}Jarvis detected command intent: `/{command_obj.name}` ({pretty_args}).\n"
-        f"{('Reason: ' + reason + chr(10)) if reason else ''}"
-        "Reply `yes` to execute, or `no` to cancel."
+        f"{risk_note}Looks like you want `/{command_obj.name}` ({pretty_args}).\n"
+        f"{(reason + chr(10)) if reason else ''}"
+        "Say `yes` to run it, `no` to skip.\n"
+        f"If you want me to stop asking for this command, say: `no confirmation for /{command_obj.name}`."
     )
     return True
 
