@@ -10,6 +10,7 @@ from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
+from jarvis import jarvis_manager
 from utils import home_log
 from utils import reliability_telemetry
 
@@ -147,6 +148,8 @@ def initialize_command_database():
     command_db.add_command("chat", "Chat with AI (starts new chat)", "General")
     command_db.add_command("forget", "Clear chat history (admin only)", "General")
     command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
+    command_db.add_command("dm-history", "DM only: view/set history cutoff for rolling summarization", "General")
+    command_db.add_command("jarvis", "DM only: toggle adaptive Jarvis mode", "General")
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
@@ -328,7 +331,141 @@ class FileProcessor:
         else:
             return f"Analyze this file '{filename}'. Provide information about what type of file it appears to be and any observations."
 
-async def ask_llm(user_id, channel_id, message_text, username, is_continuation=False, platform="discord", chat_context=None, attachments=None):
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    if not text:
+        return {}
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+async def compact_dm_history_for_channel(user_id: int, channel_id: int, username: str, force: bool = False) -> Dict[str, Any]:
+    """Summarize old DM messages and trim in-memory history to reduce token usage."""
+    conversation = conversation_manager.get_conversation(channel_id)
+    cutoff = conversation_manager.get_dm_history_cutoff(channel_id, default_cutoff=16)
+    max_messages = max(8, cutoff * 2)
+    if not force and len(conversation) <= max_messages:
+        return {"compacted": False, "reason": "under-cutoff", "cutoff": cutoff}
+    if len(conversation) <= 4:
+        return {"compacted": False, "reason": "not-enough-messages", "cutoff": cutoff}
+
+    old_messages = conversation[:-max_messages] if len(conversation) > max_messages else conversation[:-2]
+    recent_messages = conversation[-max_messages:] if len(conversation) > max_messages else conversation[-2:]
+    if not old_messages:
+        return {"compacted": False, "reason": "nothing-to-compact", "cutoff": cutoff}
+
+    previous_summary = conversation_manager.get_dm_summary_text(channel_id)
+    old_text = []
+    for item in old_messages[-80:]:
+        role = item.get("role", "user")
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        old_text.append(f"{role}: {content[:500]}")
+    joined = "\n".join(old_text)
+    if not joined.strip():
+        return {"compacted": False, "reason": "empty-source", "cutoff": cutoff}
+
+    summary_prompt = (
+        "You are maintaining compact long-term memory for a Discord DM assistant.\n"
+        "Create a concise summary that preserves:\n"
+        "1) user preferences and dislikes,\n"
+        "2) key ongoing tasks or commitments,\n"
+        "3) important context/events that future replies need.\n"
+        "Output plain text bullets only, max 180 words.\n\n"
+        f"Existing memory summary:\n{previous_summary or '(none)'}\n\n"
+        f"New older messages to merge:\n{joined}"
+    )
+    messages = [{"role": "user", "content": summary_prompt}]
+    model_info = model_manager.get_user_model_info(user_id)
+    requested_model = model_info.get("model", "qwen2.5:7b")
+    provider = model_info.get("provider", "local")
+    _, summary = await _try_models_with_fallback(
+        requested_model=requested_model,
+        messages=messages,
+        images=False,
+        provider=provider,
+    )
+    summary = _clean_response(summary or "")
+    if not summary or summary.startswith("Error:") or summary.startswith("⚠️"):
+        return {"compacted": False, "reason": "summary-failed", "cutoff": cutoff}
+
+    conversation_manager.append_dm_summary(channel_id, summary, merged_messages=len(old_messages))
+    conversation_manager.replace_conversation(channel_id, recent_messages)
+    conversation_manager.save()
+    return {
+        "compacted": True,
+        "cutoff": cutoff,
+        "merged_messages": len(old_messages),
+        "remaining_messages": len(recent_messages),
+    }
+
+
+async def plan_command_from_text(user_id: int, message_text: str, command_schema: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Infer a slash command plan from natural language in DMs."""
+    if not message_text or not command_schema:
+        return {"should_execute": False}
+    schema_json = json.dumps(command_schema, ensure_ascii=True)
+    planner_prompt = (
+        "Convert the user's natural language into a bot command plan.\n"
+        "Return strict JSON only with keys:\n"
+        "should_execute (bool), command (string), arguments (object), reason (string), risk (safe|risky|dangerous).\n"
+        "Rules:\n"
+        "- should_execute=false when the message is general chat, question, or unclear.\n"
+        "- Use only command names from schema.\n"
+        "- Fill only known argument names for that command.\n"
+        "- Keep arguments as plain strings/numbers/booleans.\n"
+        "- risk must be dangerous for restart/kill/update/purge/clone/run/profanity/setwake/sethome/setstatus/whitelist.\n\n"
+        f"Command schema:\n{schema_json}\n\n"
+        f"User message:\n{message_text}"
+    )
+    model_info = model_manager.get_user_model_info(user_id)
+    requested_model = model_info.get("model", "qwen2.5:7b")
+    provider = model_info.get("provider", "local")
+    _, raw = await _try_models_with_fallback(
+        requested_model=requested_model,
+        messages=[{"role": "user", "content": planner_prompt}],
+        images=False,
+        provider=provider,
+    )
+    parsed = _extract_json_object(raw or "")
+    if not parsed:
+        return {"should_execute": False}
+    plan = {
+        "should_execute": bool(parsed.get("should_execute", False)),
+        "command": str(parsed.get("command", "") or "").strip().lower(),
+        "arguments": parsed.get("arguments", {}) if isinstance(parsed.get("arguments", {}), dict) else {},
+        "reason": str(parsed.get("reason", "") or "").strip(),
+        "risk": str(parsed.get("risk", "safe") or "safe").strip().lower(),
+    }
+    return plan
+
+async def ask_llm(
+    user_id,
+    channel_id,
+    message_text,
+    username,
+    is_continuation=False,
+    platform="discord",
+    chat_context=None,
+    attachments=None,
+    is_dm=False,
+):
     """Main LLM interface for all platforms with file support"""
     # Get system info
     date, time = update_system_time_date()
@@ -399,9 +536,22 @@ async def ask_llm(user_id, channel_id, message_text, username, is_continuation=F
         command_suggestions=command_suggestions or "",
     )
     enhanced_system_prompt = f"{system_prompt}\n\n{enhanced}"
+    if is_dm and jarvis_manager.is_enabled(user_id):
+        jarvis_profile_prompt = jarvis_manager.get_profile_prompt(user_id)
+        if jarvis_profile_prompt:
+            enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{jarvis_profile_prompt}"
+        enhanced_system_prompt += (
+            "\n\nJarvis mode is ON for this DM. Behave like a smart personal assistant: "
+            "be proactive, maintain continuity, and adapt to the user's communication style."
+        )
     
     # Prepare conversation history (channel-based: one thread per channel, last 5 turns)
     if is_continuation:
+        if is_dm:
+            try:
+                await compact_dm_history_for_channel(user_id, channel_id, username, force=False)
+            except Exception:
+                pass
         history = conversation_manager.get_conversation(channel_id)
         if not history:
             history = [{"role": "system", "content": enhanced_system_prompt}]
@@ -411,6 +561,19 @@ async def ask_llm(user_id, channel_id, message_text, username, is_continuation=F
     
     # Build messages
     messages = history.copy()
+    if is_dm and is_continuation:
+        dm_summary = conversation_manager.get_dm_summary_text(channel_id)
+        if dm_summary:
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": (
+                        "Long-term memory summary from older DM messages:\n"
+                        f"{dm_summary}"
+                    ),
+                },
+            )
     
     # If we have images, always attach them so fallback can use a vision model
     if images_data:
@@ -436,6 +599,11 @@ async def ask_llm(user_id, channel_id, message_text, username, is_continuation=F
     
     # Store conversation if successful (channel-based; user identity is in formatted_message)
     if response_text and not response_text.startswith("Error:"):
+        if is_dm and jarvis_manager.is_enabled(user_id):
+            try:
+                jarvis_manager.update_profile_from_message(user_id, message_text)
+            except Exception:
+                pass
         conversation_manager.add_message(channel_id, "user", formatted_message)
         conversation_manager.add_message(channel_id, "assistant", response_text)
         conversation_manager.save()

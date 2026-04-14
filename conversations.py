@@ -13,6 +13,8 @@ class ConversationManager:
         self.conversations = defaultdict(list)
         self.last_bot_message = {}
         self.recent_bot_message_ids = defaultdict(list)  # per channel, last 10 bot message ids (in-memory only)
+        self.dm_history_cutoff = {}
+        self.dm_summaries = defaultdict(list)
         self._load()
 
     def set_max_history(self, n: int):
@@ -40,16 +42,60 @@ class ConversationManager:
     def get_conversation(self, channel_id):
         return self.conversations.get(self._key(channel_id), [])
 
+    def replace_conversation(self, channel_id, messages):
+        key = self._key(channel_id)
+        self.conversations[key] = list(messages or [])
+
     def clear_conversation(self, channel_id=None, user_id=None):
         if channel_id is not None:
             key = self._key(channel_id)
             self.conversations.pop(key, None)
             self.last_bot_message.pop(key, None)
             self.recent_bot_message_ids.pop(key, None)
+            self.dm_summaries.pop(key, None)
         elif user_id is not None:
             self.conversations.clear()
             self.last_bot_message.clear()
             self.recent_bot_message_ids.clear()
+            self.dm_summaries.clear()
+            self.dm_history_cutoff.clear()
+
+    def get_dm_history_cutoff(self, channel_id, default_cutoff=16):
+        key = self._key(channel_id)
+        raw = self.dm_history_cutoff.get(key, default_cutoff)
+        try:
+            return max(4, min(80, int(raw)))
+        except (TypeError, ValueError):
+            return default_cutoff
+
+    def set_dm_history_cutoff(self, channel_id, cutoff):
+        key = self._key(channel_id)
+        self.dm_history_cutoff[key] = max(4, min(80, int(cutoff)))
+
+    def append_dm_summary(self, channel_id, summary_text, merged_messages=0):
+        key = self._key(channel_id)
+        entries = self.dm_summaries[key]
+        entries.append(
+            {
+                "summary": str(summary_text or "").strip(),
+                "merged_messages": int(merged_messages or 0),
+            }
+        )
+        self.dm_summaries[key] = entries[-8:]
+
+    def get_dm_summaries(self, channel_id):
+        return self.dm_summaries.get(self._key(channel_id), [])
+
+    def get_dm_summary_text(self, channel_id):
+        items = self.get_dm_summaries(channel_id)
+        if not items:
+            return ""
+        lines = []
+        for idx, item in enumerate(items[-3:], start=1):
+            text = str(item.get("summary", "")).strip()
+            if text:
+                lines.append(f"{idx}. {text}")
+        return "\n".join(lines)
 
     def set_last_bot_message(self, channel_id, message_id):
         key = self._key(channel_id)
@@ -62,7 +108,12 @@ class ConversationManager:
     def save(self):
         with open(self.save_file, "w") as f:
             json.dump(
-                {"conversations": dict(self.conversations), "last_bot_message": self.last_bot_message},
+                {
+                    "conversations": dict(self.conversations),
+                    "last_bot_message": self.last_bot_message,
+                    "dm_history_cutoff": self.dm_history_cutoff,
+                    "dm_summaries": dict(self.dm_summaries),
+                },
                 f,
                 indent=2,
             )
@@ -73,6 +124,8 @@ class ConversationManager:
                 data = json.load(f)
                 self.conversations = defaultdict(list, data.get("conversations", {}))
                 self.last_bot_message = data.get("last_bot_message", {})
+                self.dm_history_cutoff = data.get("dm_history_cutoff", {})
+                self.dm_summaries = defaultdict(list, data.get("dm_summaries", {}))
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 

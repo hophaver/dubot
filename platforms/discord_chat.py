@@ -11,11 +11,12 @@ from discord import app_commands
 from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
-from utils.llm_service import ask_llm
+from utils.llm_service import ask_llm, plan_command_from_text
 from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
+from jarvis import jarvis_manager
 
 
 def _is_transient_http_error(exc: Exception) -> bool:
@@ -129,6 +130,116 @@ def _build_command_usage(command_obj) -> str:
     parts = [_parameter_usage(command_obj.name, p) for p in command_obj.parameters]
     suffix = (" " + " ".join(parts)) if parts else ""
     return f"!{command_obj.name}{suffix}"
+
+
+def _is_positive_confirmation(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in {"yes", "y", "confirm", "do it", "run it", "ok", "okay", "proceed"}
+
+
+def _is_negative_confirmation(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in {"no", "n", "cancel", "stop", "don't", "dont", "never mind", "nevermind"}
+
+
+def _looks_like_download_request(text: str) -> bool:
+    t = (text or "").lower()
+    if not t:
+        return False
+    if "http://" in t or "https://" in t:
+        return any(k in t for k in ["download", "save", "grab", "fetch", "media", "video", "audio", "image", "file"])
+    return any(
+        phrase in t
+        for phrase in [
+            "download this",
+            "download that",
+            "save this",
+            "grab this link",
+            "get this video",
+            "get this file",
+        ]
+    )
+
+
+def _looks_like_command_request(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if t.startswith("/"):
+        return True
+    cue_words = [
+        "run ",
+        "execute ",
+        "set ",
+        "change ",
+        "switch ",
+        "download ",
+        "remind ",
+        "restart",
+        "kill ",
+        "update ",
+        "status",
+        "help",
+        "list ",
+    ]
+    return any(cue in t for cue in cue_words)
+
+
+def _build_command_schema(client: discord.Client):
+    schema = []
+    for cmd in client.tree.get_commands():
+        params = []
+        for p in cmd.parameters:
+            params.append(
+                {
+                    "name": p.name,
+                    "required": bool(getattr(p, "required", False)),
+                    "type": str(getattr(p, "type", "")).split(".")[-1],
+                    "choices": [str(c.value) for c in (getattr(p, "choices", None) or [])],
+                }
+            )
+        schema.append({"name": cmd.name, "description": cmd.description or "", "parameters": params})
+    return schema
+
+
+def _build_kwargs_from_plan(client: discord.Client, message: discord.Message, command_obj, arguments: dict):
+    kwargs = {}
+    attachments = list(getattr(message, "attachments", []) or [])
+    attach_idx = 0
+    arguments = arguments or {}
+    for p in command_obj.parameters:
+        pname = p.name
+        raw = arguments.get(pname)
+        if raw is None:
+            display_name = getattr(p, "display_name", None)
+            if display_name:
+                raw = arguments.get(display_name)
+        ptype = str(getattr(p, "type", "")).split(".")[-1]
+        if raw is None and ptype == "attachment" and attach_idx < len(attachments):
+            raw = attachments[attach_idx]
+            attach_idx += 1
+        if raw is None:
+            if getattr(p, "required", False):
+                raise ValueError(f"missing required argument `{pname}`")
+            continue
+
+        if ptype == "integer":
+            kwargs[pname] = int(raw)
+        elif ptype == "number":
+            kwargs[pname] = float(raw)
+        elif ptype == "boolean":
+            kwargs[pname] = _parse_bool(str(raw))
+        elif ptype == "channel":
+            kwargs[pname] = _coerce_channel(message.guild, str(raw))
+        elif ptype == "user":
+            kwargs[pname] = _coerce_user(client, message.guild, str(raw))
+        elif ptype == "attachment":
+            if not isinstance(raw, discord.Attachment):
+                raise ValueError(f"`{pname}` requires an attached file")
+            kwargs[pname] = raw
+        else:
+            kwargs[pname] = str(raw)
+    return kwargs
 
 
 class _MessageResponseProxy:
@@ -330,11 +441,72 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
         )
     return True
 
+
+async def _handle_jarvis_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
+    """DM-only natural-language command routing with explicit confirmation."""
+    user_id = message.author.id
+    pending = jarvis_manager.get_pending_confirmation(user_id)
+    if pending:
+        if _is_positive_confirmation(clean_content):
+            command_name = str(pending.get("command", "")).strip().lower()
+            args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
+            command_obj = client.tree.get_command(command_name)
+            jarvis_manager.clear_pending_confirmation(user_id)
+            if command_obj is None:
+                await message.reply(f"❌ I can no longer find `/{command_name}`.")
+                return True
+            try:
+                kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
+                interaction = _MessageInteractionProxy(client, message, command_obj.name)
+                await command_obj.callback(interaction, **kwargs)
+            except Exception as exc:
+                await message.reply(
+                    f"❌ I couldn't run `/{command_obj.name}` from that request: {str(exc)[:200]}"
+                )
+            return True
+        if _is_negative_confirmation(clean_content):
+            jarvis_manager.clear_pending_confirmation(user_id)
+            await message.reply("✅ Cancelled. I will not run that command.")
+            return True
+        await message.reply("I still need confirmation. Reply `yes` to run it, or `no` to cancel.")
+        return True
+
+    if not _looks_like_command_request(clean_content):
+        return False
+    schema = _build_command_schema(client)
+    plan = await plan_command_from_text(user_id, clean_content, schema)
+    if not plan.get("should_execute"):
+        return False
+
+    command_name = str(plan.get("command", "")).strip().lower()
+    command_obj = client.tree.get_command(command_name)
+    if command_obj is None:
+        return False
+    args = plan.get("arguments", {}) if isinstance(plan.get("arguments"), dict) else {}
+    risk = str(plan.get("risk", "safe")).strip().lower()
+    reason = str(plan.get("reason", "")).strip()
+    jarvis_manager.set_pending_confirmation(
+        user_id,
+        {
+            "command": command_obj.name,
+            "arguments": args,
+            "risk": risk,
+        },
+    )
+    pretty_args = ", ".join(f"{k}={v}" for k, v in args.items()) if args else "no arguments"
+    risk_note = "⚠️ Potentially sensitive command. " if risk in {"risky", "dangerous"} else ""
+    await message.reply(
+        f"{risk_note}Jarvis detected command intent: `/{command_obj.name}` ({pretty_args}).\n"
+        f"{('Reason: ' + reason + chr(10)) if reason else ''}"
+        "Reply `yes` to execute, or `no` to cancel."
+    )
+    return True
+
 async def process_discord_message(client, message, permission, conversation_manager) -> bool:
     """Process Discord messages with group chat awareness. Return True if handled."""
     config = get_config()
     wake_word = config.get("wake_word", "robot").lower()
-    message_lower = message.content.lower()
+    message_lower = (message.content or "").lower()
     
     # Check activation methods
     raw_content = (message.content or "").strip()
@@ -357,7 +529,8 @@ async def process_discord_message(client, message, permission, conversation_mana
         clean_content = raw_content[1:].strip()
     else:
         clean_content = message.content.replace(f'<@{client.user.id}>', '').strip()
-    
+    if not clean_content and message.attachments:
+        clean_content = "Please analyze this file and use it as context for our conversation."
     if not clean_content:
         return True
     
@@ -384,9 +557,21 @@ async def process_discord_message(client, message, permission, conversation_mana
             if processed:
                 return True
 
+    if is_dm and _looks_like_download_request(clean_content):
+        if await process_wakeword_download(client, message, clean_content):
+            return True
+
+    if is_dm and jarvis_manager.is_enabled(message.author.id):
+        try:
+            if await _handle_jarvis_command_flow(client, message, clean_content):
+                return True
+        except Exception:
+            # If Jarvis planner fails, fall back to normal chat flow.
+            pass
+
     async with message.channel.typing():
         # Determine if this is a continuation
-        is_continuation = is_reply_to_bot
+        is_continuation = is_reply_to_bot or is_dm
         
         # Build attachments list (for files/images with wake word or mentions)
         attachments = []
@@ -398,11 +583,11 @@ async def process_discord_message(client, message, permission, conversation_mana
                 except Exception:
                     pass
         
-        # Only pass channel context when continuing a chat (reply to bot). Wake word = fresh chat, no prior context.
+        # Include recent channel context for continuity and non-LLM bot messages (e.g. news posts).
         context = None
-        if is_continuation and not is_dm and message.channel and hasattr(message.channel, 'history'):
+        if is_continuation and message.channel and hasattr(message.channel, 'history'):
             try:
-                context = await get_chat_context(message.channel, limit=5)
+                context = await get_chat_context(message.channel, limit=8, include_bots=is_dm)
             except Exception:
                 context = None
 
@@ -416,7 +601,8 @@ async def process_discord_message(client, message, permission, conversation_mana
                     is_continuation=is_continuation,
                     platform="discord",
                     chat_context=context,
-                    attachments=attachments if attachments else None
+                    attachments=attachments if attachments else None,
+                    is_dm=is_dm,
                 ),
                 timeout=150,
             )
@@ -471,14 +657,14 @@ async def process_discord_message(client, message, permission, conversation_mana
 async def process_wakeword_download(client, message, link_or_empty):
     """Download media from link or last message with media, send to chat. Files not stored."""
     from config import get_download_limit_mb
-    from commands.download import _extract_urls, _download_url_sync, DOWNLOAD_EXTENSIONS
+    from commands.download._helpers import extract_urls, download_url_sync, DOWNLOAD_EXTENSIONS
     import os
     channel = message.channel
     max_bytes = get_download_limit_mb() * 1024 * 1024
     target_url = None
     target_attachment = None
     if link_or_empty and link_or_empty.strip():
-        urls = _extract_urls(link_or_empty)
+        urls = extract_urls(link_or_empty)
         if urls:
             target_url = urls[0]
     if not target_url:
@@ -486,7 +672,7 @@ async def process_wakeword_download(client, message, link_or_empty):
             async for msg in channel.history(limit=20):
                 if msg.author.bot:
                     continue
-                urls = _extract_urls(msg.content or "")
+                urls = extract_urls(msg.content or "")
                 if urls:
                     target_url = urls[0]
                     break
@@ -515,7 +701,7 @@ async def process_wakeword_download(client, message, link_or_empty):
             return True
     elif target_url:
         import asyncio
-        data, filename = await asyncio.to_thread(_download_url_sync, target_url, max_bytes)
+        data, filename = await asyncio.to_thread(download_url_sync, target_url, max_bytes)
         if data is None:
             await message.reply(f"❌ Download failed: {filename}")
             return True
@@ -584,16 +770,23 @@ async def process_wakeword_admin_command(client, message, command, content, perm
         return True
     return False
 
-async def get_chat_context(channel, limit=5):
+async def get_chat_context(channel, limit=5, include_bots=False):
     """Get recent messages for group chat context"""
     messages = []
     try:
         async for msg in channel.history(limit=limit):
-            if msg.author.bot:
+            if msg.author.bot and not include_bots:
                 continue
+            text = msg.content or ""
+            if not text.strip() and not msg.attachments:
+                continue
+            if msg.attachments:
+                attachment_names = ", ".join(a.filename for a in msg.attachments[:3] if a.filename)
+                if attachment_names:
+                    text = f"{text}\n[attachments: {attachment_names}]".strip()
             messages.append({
                 "author": msg.author.name,
-                "content": msg.content,
+                "content": text,
                 "timestamp": msg.created_at.isoformat()
             })
     except Exception:
