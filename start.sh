@@ -82,29 +82,57 @@ fi
 echo "=== Starting bot in background ==="
 PLATFORM_DECISION="$("$PYTHON_BIN" - <<'PY'
 import os
+import re
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
+
+def _parse_env_file(path: str):
+    out = {}
+    if not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[7:].strip()
+                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+                if not m:
+                    continue
+                key, val = m.group(1), m.group(2).strip()
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                out[key] = val
+    except Exception:
+        return {}
+    return out
+
 platform = os.environ.get("BOT_PLATFORM", "").strip().lower()
-discord = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
-telegram = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+dotenv_vals = _parse_env_file(".env")
+discord = (os.environ.get("DISCORD_BOT_TOKEN", "") or dotenv_vals.get("DISCORD_BOT_TOKEN", "")).strip()
+telegram = (os.environ.get("TELEGRAM_BOT_TOKEN", "") or dotenv_vals.get("TELEGRAM_BOT_TOKEN", "")).strip()
 if platform in {"discord", "telegram", "both"}:
     print(platform)
 elif discord and telegram:
     print("both")
 elif telegram:
     print("telegram")
+elif discord:
+    print("discord")
 else:
     print("none")
 PY
 )"
 
 if [ "$PLATFORM_DECISION" = "none" ]; then
-    echo "  ❌ No bot token found."
-    echo "  Set DISCORD_BOT_TOKEN and/or TELEGRAM_BOT_TOKEN in .env, then retry."
-    exit 1
+    echo "  ⚠ Could not detect bot token in preflight."
+    echo "  Attempting Discord startup anyway (check bot.log if it fails)."
+    PLATFORM_DECISION="discord"
 fi
 
 if [ "$PLATFORM_DECISION" = "both" ]; then
