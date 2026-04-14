@@ -6,6 +6,8 @@ cd "$SCRIPT_DIR"
 PID_FILE="${SCRIPT_DIR}/.bot.pid"
 PIDS_FILE="${SCRIPT_DIR}/.bot.pids"
 LOG_FILE="${SCRIPT_DIR}/bot.log"
+DISCORD_LOG_FILE="${SCRIPT_DIR}/bot-discord.log"
+TELEGRAM_LOG_FILE="${SCRIPT_DIR}/bot-telegram.log"
 
 print_recent_log() {
     if [ -f "$LOG_FILE" ]; then
@@ -118,6 +120,8 @@ def _parse_env_file(path: str):
 
 platform = os.environ.get("BOT_PLATFORM", "").strip().lower()
 dotenv_vals = _parse_env_file(".env")
+if not platform:
+    platform = str(dotenv_vals.get("BOT_PLATFORM", "")).strip().lower()
 discord = (os.environ.get("DISCORD_BOT_TOKEN", "") or dotenv_vals.get("DISCORD_BOT_TOKEN", "")).strip()
 telegram = (os.environ.get("TELEGRAM_BOT_TOKEN", "") or dotenv_vals.get("TELEGRAM_BOT_TOKEN", "")).strip()
 if platform in {"discord", "telegram", "both"}:
@@ -140,11 +144,11 @@ if [ "$PLATFORM_DECISION" = "none" ]; then
 fi
 
 if [ "$PLATFORM_DECISION" = "both" ]; then
-    nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$LOG_FILE" 2>&1 &
+    nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$DISCORD_LOG_FILE" 2>&1 &
     DISCORD_PID=$!
-    nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$LOG_FILE" 2>&1 &
+    nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$TELEGRAM_LOG_FILE" 2>&1 &
     TELEGRAM_PID=$!
-    sleep 2
+    sleep 4
     DISCORD_OK=0
     TELEGRAM_OK=0
     if kill -0 "$DISCORD_PID" 2>/dev/null; then DISCORD_OK=1; fi
@@ -154,50 +158,50 @@ if [ "$PLATFORM_DECISION" = "both" ]; then
         : > "$PIDS_FILE"
         if [ "$DISCORD_OK" -eq 1 ]; then
             printf "discord:%s\n" "$DISCORD_PID" >> "$PIDS_FILE"
-            echo "  ✓ Discord started (PID $DISCORD_PID)"
+            echo "  ✓ Discord started (PID $DISCORD_PID) · Log: $DISCORD_LOG_FILE"
         else
             echo "  ⚠ Discord failed to start."
+            DUBOT_LOG_PATH="$DISCORD_LOG_FILE" print_recent_log
         fi
         if [ "$TELEGRAM_OK" -eq 1 ]; then
             printf "telegram:%s\n" "$TELEGRAM_PID" >> "$PIDS_FILE"
-            echo "  ✓ Telegram started (PID $TELEGRAM_PID)"
+            echo "  ✓ Telegram started (PID $TELEGRAM_PID) · Log: $TELEGRAM_LOG_FILE"
         else
             echo "  ⚠ Telegram failed to start."
+            DUBOT_LOG_PATH="$TELEGRAM_LOG_FILE" print_recent_log
         fi
-        echo "  ✓ Startup completed with available runtime(s). Logs: $LOG_FILE"
-        if [ "$DISCORD_OK" -eq 0 ] || [ "$TELEGRAM_OK" -eq 0 ]; then
-            DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
-        fi
+        echo "  ✓ Startup completed with available runtime(s)."
     else
         rm -f "$PIDS_FILE"
-        echo "  ❌ Both Discord and Telegram failed to start. Check logs: $LOG_FILE"
-        DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
+        echo "  ❌ Both Discord and Telegram failed to start."
+        DUBOT_LOG_PATH="$DISCORD_LOG_FILE" print_recent_log
+        DUBOT_LOG_PATH="$TELEGRAM_LOG_FILE" print_recent_log
         exit 1
     fi
 elif [ "$PLATFORM_DECISION" = "telegram" ]; then
-    nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$LOG_FILE" 2>&1 &
+    nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$TELEGRAM_LOG_FILE" 2>&1 &
     NEW_PID=$!
     echo "$NEW_PID" > "$PID_FILE"
-    sleep 2
+    sleep 4
     if kill -0 "$NEW_PID" 2>/dev/null; then
-        echo "  ✓ Telegram started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+        echo "  ✓ Telegram started (PID $(cat "$PID_FILE")). Log: $TELEGRAM_LOG_FILE"
     else
         rm -f "$PID_FILE"
-        echo "  ❌ Telegram failed to start. Check logs: $LOG_FILE"
-        DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
+        echo "  ❌ Telegram failed to start. Check log: $TELEGRAM_LOG_FILE"
+        DUBOT_LOG_PATH="$TELEGRAM_LOG_FILE" print_recent_log
         exit 1
     fi
 else
-    nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$LOG_FILE" 2>&1 &
+    nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$DISCORD_LOG_FILE" 2>&1 &
     NEW_PID=$!
     echo "$NEW_PID" > "$PID_FILE"
-    sleep 2
+    sleep 4
     if kill -0 "$NEW_PID" 2>/dev/null; then
-        echo "  ✓ Discord started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+        echo "  ✓ Discord started (PID $(cat "$PID_FILE")). Log: $DISCORD_LOG_FILE"
     else
         rm -f "$PID_FILE"
-        echo "  ❌ Discord failed to start. Check logs: $LOG_FILE"
-        DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
+        echo "  ❌ Discord failed to start. Check log: $DISCORD_LOG_FILE"
+        DUBOT_LOG_PATH="$DISCORD_LOG_FILE" print_recent_log
         exit 1
     fi
 fi

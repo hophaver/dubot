@@ -6,6 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 PID_FILE="${SCRIPT_DIR}/.bot.pid"
 PIDS_FILE="${SCRIPT_DIR}/.bot.pids"
+DISCORD_LOG_FILE="${SCRIPT_DIR}/bot-discord.log"
+TELEGRAM_LOG_FILE="${SCRIPT_DIR}/bot-telegram.log"
+COMBINED_LOG_FILE="${SCRIPT_DIR}/bot.log"
 
 stop_one() {
     NAME="$1"
@@ -34,11 +37,21 @@ stop_one() {
 }
 
 if [ -f "$PIDS_FILE" ]; then
+    STOPPED_ANY=0
     while IFS=: read -r NAME PID; do
+        [ -n "$PID" ] || continue
+        STOPPED_ANY=1
         stop_one "${NAME:-bot}" "$PID"
     done < "$PIDS_FILE"
     rm -f "$PIDS_FILE"
     rm -f "$PID_FILE"
+    if [ "$STOPPED_ANY" -eq 0 ]; then
+        echo "No active runtime entries found in .bot.pids."
+    fi
+    echo "Logs are at:"
+    echo "  - $DISCORD_LOG_FILE"
+    echo "  - $TELEGRAM_LOG_FILE"
+    echo "  - $COMBINED_LOG_FILE (legacy)"
     exit 0
 fi
 
@@ -50,3 +63,7 @@ fi
 PID=$(cat "$PID_FILE")
 rm -f "$PID_FILE"
 stop_one "bot" "$PID"
+echo "Logs are at:"
+echo "  - $DISCORD_LOG_FILE"
+echo "  - $TELEGRAM_LOG_FILE"
+echo "  - $COMBINED_LOG_FILE (legacy)"
