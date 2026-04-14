@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-from integrations import OPENROUTER_API_KEY
+from integrations import OPENROUTER_MANAGEMENT_API_KEY
 
 CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 
@@ -15,9 +15,9 @@ def fetch_credits() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     payload keys: total_credits, total_usage, remaining (computed).
     On failure returns (None, user-facing error message).
     """
-    if not OPENROUTER_API_KEY:
+    if not OPENROUTER_MANAGEMENT_API_KEY:
         return None, (
-            "**OPENROUTER_API_KEY** is not set. Add it to `.env` on the bot host.\n"
+            "**OPENROUTER_MANAGEMENT_API_KEY** is not set. Add it to `.env` on the bot host.\n"
             "Use an OpenRouter management API key for credits: "
             "https://openrouter.ai/docs/guides/overview/auth/management-api-keys"
         )
@@ -25,7 +25,7 @@ def fetch_credits() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     try:
         r = requests.get(
             CREDITS_URL,
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            headers={"Authorization": f"Bearer {OPENROUTER_MANAGEMENT_API_KEY}"},
             timeout=20,
         )
     except requests.RequestException as e:

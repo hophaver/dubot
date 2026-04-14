@@ -70,8 +70,24 @@ TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
 HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or 'http://192.168.0.149:8123'
 HA_ACCESS_TOKEN = _get_secret("HA_ACCESS_TOKEN")
 OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.environ.get("OLLAMA_URL", "")) or 'http://localhost:11434'
-# OpenRouter management key (for /bal credits); optional
-OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "OPENROUTER_KEY", "OPENROUTER_APIKEY")
+# OpenRouter keys (optional):
+# - OPENROUTER_CHAT_API_KEY is used for cloud LLM chat/completions
+# - OPENROUTER_MANAGEMENT_API_KEY is used for /bal credits endpoint
+# Backward compatibility: OPENROUTER_API_KEY works for both when dedicated vars are not set.
+OPENROUTER_CHAT_API_KEY = _get_secret(
+    "OPENROUTER_CHAT_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_KEY",
+    "OPENROUTER_APIKEY",
+)
+OPENROUTER_MANAGEMENT_API_KEY = _get_secret(
+    "OPENROUTER_MANAGEMENT_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_KEY",
+    "OPENROUTER_APIKEY",
+)
+# Backward-compatible symbol used by older imports.
+OPENROUTER_API_KEY = OPENROUTER_CHAT_API_KEY
 # Cursor user key (preferred var for /cursor spend check attempts)
 CURSOR_USER_API_KEY = _get_secret("CURSOR_USER_API_KEY")
 # Backward-compatible alias for older env setups

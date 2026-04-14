@@ -279,8 +279,15 @@ async def _run_startup_checks(client):
     services_status = "✅ reminder, news, status API"
 
     # Provider/API keys
-    from integrations import OPENROUTER_API_KEY, OLLAMA_URL
-    cloud_status = "✅ key set" if OPENROUTER_API_KEY else "○ key missing"
+    from integrations import OPENROUTER_CHAT_API_KEY, OPENROUTER_MANAGEMENT_API_KEY, OLLAMA_URL
+    if OPENROUTER_CHAT_API_KEY and OPENROUTER_MANAGEMENT_API_KEY:
+        cloud_status = "✅ chat + management keys set"
+    elif OPENROUTER_CHAT_API_KEY:
+        cloud_status = "✅ chat key set (management missing)"
+    elif OPENROUTER_MANAGEMENT_API_KEY:
+        cloud_status = "⚠️ management key only (cloud chat may fail)"
+    else:
+        cloud_status = "○ keys missing"
     ollama_status = f"{OLLAMA_URL}\n{local_status}"
 
     # Admin (global ping)

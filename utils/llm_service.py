@@ -8,7 +8,7 @@ import time
 import requests
 from typing import Dict, List, Optional, Tuple, Any
 import integrations
-from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
+from integrations import OLLAMA_URL, OPENROUTER_CHAT_API_KEY, update_system_time_date, get_location_by_ip
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
@@ -831,8 +831,8 @@ def _to_openrouter_messages(messages: list) -> list:
 
 
 async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
-    if not OPENROUTER_API_KEY:
-        return "Error: OPENROUTER_API_KEY is not configured."
+    if not OPENROUTER_CHAT_API_KEY:
+        return "Error: OPENROUTER_CHAT_API_KEY is not configured."
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
         "model": model_name,
@@ -842,7 +842,7 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
     if max_tokens is not None:
         payload["max_tokens"] = int(max(64, min(1024, max_tokens)))
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {OPENROUTER_CHAT_API_KEY}",
         "Content-Type": "application/json",
     }
     def _extract_openrouter_error(status_code: int, body: dict, raw_text: str) -> str:
@@ -860,7 +860,11 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
                 "Retry in a moment, switch to another cloud model, or use a local model."
             )
         if status_code == 401:
-            return "OpenRouter authentication failed. Check OPENROUTER_API_KEY."
+            return (
+                "OpenRouter authentication failed. "
+                "Check OPENROUTER_CHAT_API_KEY (chat key). "
+                "If /bal works but chat fails, you likely set only a management key."
+            )
         if status_code == 402:
             return "OpenRouter credits required for this request. Top up credits or choose another model."
         if detail:

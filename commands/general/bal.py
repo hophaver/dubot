@@ -15,7 +15,7 @@ def _fmt_money(n: float) -> str:
 def register(client):
     @client.tree.command(
         name="bal",
-        description="Check OpenRouter account credits (requires management API key in .env)",
+        description="Check OpenRouter account credits (uses OPENROUTER_MANAGEMENT_API_KEY)",
     )
     async def bal(interaction: discord.Interaction):
         if not get_user_permission(interaction.user.id):
