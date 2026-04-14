@@ -5,11 +5,27 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-# Appended to the system prompt when Jarvis is ON in DMs (single source of truth).
-JARVIS_SYSTEM_SUFFIX = (
-    "\n\nJarvis mode is ON for this DM. Keep your tone natural and conversational. "
+# Minimal base instructions when adaptive DM assistant is on (replaces global persona for that DM).
+ADAPTIVE_DM_BASE_PERSONA = (
+    "You are the user's private DM assistant. "
+    "Follow the user-specific context and behaviour instructions supplied below. "
+    "Be accurate and helpful; use command and capability details from the system prompt when relevant."
+)
+
+# Appended to the system prompt when adaptive DM assistant is enabled (single source of truth).
+ADAPTIVE_DM_SYSTEM_SUFFIX = (
+    "\n\nFor this direct message conversation, keep your tone natural and conversational. "
     "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
     "Be proactive, keep continuity, and match the user's style."
+)
+
+_MANUAL_CONTEXT_MAX_LEN = 12000
+
+# Lines at the start of exported status files to strip when pasting back.
+_MANUAL_PASTE_HEADER_PREFIXES = (
+    "this is the dm-specific",
+    "adaptive assistant is currently off",
+    "the following is what would be appended",
 )
 
 
@@ -41,6 +57,8 @@ class JarvisManager:
                 "tone_tuning_queue": [],
                 "last_tone_tuning_ts": 0.0,
                 "tone_tuning_updates": 0,
+                "profile_manual_override": "",
+                "status_reply_anchor": None,
             }
         return self.state[key]
 
@@ -55,9 +73,71 @@ class JarvisManager:
     def get_profile(self, user_id: int) -> Dict[str, Any]:
         return self._get_user_state(user_id).get("profile", {})
 
+    def set_status_reply_anchor(self, user_id: int, channel_id: int, message_id: int) -> None:
+        user_state = self._get_user_state(user_id)
+        user_state["status_reply_anchor"] = {"channel_id": int(channel_id), "message_id": int(message_id)}
+        self.save()
+
+    def get_status_reply_anchor(self, user_id: int) -> Optional[Dict[str, int]]:
+        raw = self._get_user_state(user_id).get("status_reply_anchor")
+        if not raw or not isinstance(raw, dict):
+            return None
+        try:
+            cid = int(raw.get("channel_id", 0))
+            mid = int(raw.get("message_id", 0))
+        except (TypeError, ValueError):
+            return None
+        if cid <= 0 or mid <= 0:
+            return None
+        return {"channel_id": cid, "message_id": mid}
+
+    def get_profile_manual_override(self, user_id: int) -> str:
+        return str(self._get_user_state(user_id).get("profile_manual_override", "") or "").strip()
+
+    def set_profile_manual_override(self, user_id: int, text: str) -> None:
+        user_state = self._get_user_state(user_id)
+        cleaned = (text or "").strip()
+        if len(cleaned) > _MANUAL_CONTEXT_MAX_LEN:
+            cleaned = cleaned[:_MANUAL_CONTEXT_MAX_LEN]
+        user_state["profile_manual_override"] = cleaned
+        self.save()
+
+    def clear_profile_manual_override(self, user_id: int) -> None:
+        user_state = self._get_user_state(user_id)
+        user_state["profile_manual_override"] = ""
+        self.save()
+
+    @staticmethod
+    def normalize_pasted_manual_context(text: str) -> str:
+        """Strip export headers and fixed behaviour suffix from a pasted status attachment."""
+        t = (text or "").replace("\r\n", "\n").strip()
+        low = t.lower()
+        marker = "user-specific context"
+        idx = low.find(marker)
+        if idx != -1:
+            t = t[idx:].lstrip()
+        else:
+            lines = t.split("\n")
+            while lines:
+                low0 = lines[0].lower().strip()
+                if not low0:
+                    lines.pop(0)
+                    continue
+                if any(low0.startswith(p) for p in _MANUAL_PASTE_HEADER_PREFIXES):
+                    lines.pop(0)
+                    continue
+                break
+            t = "\n".join(lines).strip()
+        suffix = ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
+        if suffix and t.endswith(suffix):
+            t = t[: -len(suffix)].rstrip()
+        return t.strip()
+
     def update_profile_from_message(self, user_id: int, text: str) -> None:
         """Lightweight preference/tone extraction from DM user text."""
         if not text:
+            return
+        if self.get_profile_manual_override(user_id):
             return
         user_state = self._get_user_state(user_id)
         profile = user_state.setdefault("profile", {})
@@ -104,10 +184,17 @@ class JarvisManager:
         self.save()
 
     def get_profile_prompt(self, user_id: int) -> str:
+        manual = self.get_profile_manual_override(user_id)
+        if manual:
+            low_start = manual.lstrip().lower()
+            if low_start.startswith("user-specific context"):
+                return manual
+            return "User-specific context (manual):\n" + manual
+
         profile = self.get_profile(user_id)
         if not profile:
             return ""
-        lines = ["Jarvis DM profile (learned from this user):"]
+        lines = ["User-specific context (learned from this user):"]
         preferred_name = str(profile.get("preferred_name", "") or "").strip()
         if preferred_name:
             lines.append(f"- Preferred name: {preferred_name}")
@@ -126,16 +213,16 @@ class JarvisManager:
         return "\n".join(lines)
 
     def get_full_jarvis_system_addition(self, user_id: int) -> str:
-        """Text appended to the base persona+chat system prompt when Jarvis is enabled (learned + fixed behavior)."""
+        """Text appended to the base persona+chat system prompt when adaptive DM assistant is on (learned + fixed behaviour)."""
         parts = []
         profile = self.get_profile_prompt(user_id)
         if profile:
             parts.append(profile)
-        parts.append(JARVIS_SYSTEM_SUFFIX.strip())
+        parts.append(ADAPTIVE_DM_SYSTEM_SUFFIX.strip())
         return "\n\n".join(parts)
 
     def get_status_snapshot(self, user_id: int) -> Dict[str, Any]:
-        """Read-only snapshot for /jarvis-status."""
+        """Read-only snapshot for the DM assistant status command."""
         st = self._get_user_state(user_id)
         return {
             "enabled": bool(st.get("enabled", False)),
@@ -145,6 +232,7 @@ class JarvisManager:
             "tone_queue_len": len(st.get("tone_tuning_queue", []) or []),
             "tone_tuning_updates": int(st.get("tone_tuning_updates", 0) or 0),
             "last_tone_tuning_ts": float(st.get("last_tone_tuning_ts", 0.0) or 0.0),
+            "has_manual_override": bool(self.get_profile_manual_override(user_id)),
         }
 
     def set_pending_confirmation(self, user_id: int, payload: Optional[Dict[str, Any]]) -> None:
@@ -189,6 +277,8 @@ class JarvisManager:
         """Queue user-only samples for periodic tone tuning."""
         if not text:
             return
+        if self.get_profile_manual_override(user_id):
+            return
         user_state = self._get_user_state(user_id)
         queue = list(user_state.get("tone_tuning_queue", []) or [])
         cleaned = str(text).strip()
@@ -208,6 +298,8 @@ class JarvisManager:
 
     def run_tone_tuning_now(self, user_id: int, force: bool = False) -> bool:
         """Apply queued user samples to profile. Returns True when profile updated."""
+        if self.get_profile_manual_override(user_id):
+            return False
         user_state = self._get_user_state(user_id)
         queue = list(user_state.get("tone_tuning_queue", []) or [])
         if not queue:

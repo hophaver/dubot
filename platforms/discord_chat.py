@@ -53,7 +53,7 @@ async def _send_with_retry(send_coro_factory, retries: int = 3):
 
 
 def _schedule_jarvis_post_reply_calibration(message: discord.Message, message_text: str):
-    """Queue user-only samples and periodically update Jarvis tone after replying."""
+    """Queue user-only samples and periodically update adaptive DM tone after replying."""
     user_id = getattr(message.author, "id", None)
     if user_id is None:
         return
@@ -309,7 +309,6 @@ def _looks_like_disable_confirmation_phrase(text: str) -> bool:
 
 def _normalize_himas_command_text(text: str) -> str:
     t = (text or "").strip()
-    t = re.sub(r"^(jarvis[,:\s]+)?", "", t, flags=re.IGNORECASE).strip()
     t = re.sub(
         r"^(can you|could you|would you|please|hey|yo|hi|hello)\s+",
         "",
@@ -648,6 +647,54 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
     return True
 
 
+async def _try_handle_dm_status_reply(client: discord.Client, message: discord.Message) -> bool:
+    """Apply manual user context when the user replies to the latest /jarvis-status message."""
+    if not isinstance(message.channel, discord.DMChannel):
+        return False
+    ref = message.reference
+    if not ref or not ref.message_id:
+        return False
+    uid = message.author.id
+    anchor = jarvis_manager.get_status_reply_anchor(uid)
+    if not anchor:
+        return False
+    if message.channel.id != anchor["channel_id"] or ref.message_id != anchor["message_id"]:
+        return False
+    try:
+        ref_msg = ref.resolved
+        if ref_msg is None:
+            ref_msg = await message.channel.fetch_message(ref.message_id)
+        if ref_msg.author.id != client.user.id:
+            return False
+    except Exception:
+        return False
+
+    text = (message.content or "").strip()
+    if not text:
+        return False
+
+    low = text.lower()
+    if low in ("reset", "reset manual", "clear", "clear manual"):
+        jarvis_manager.clear_profile_manual_override(uid)
+        await _send_chat_output(message, "✅ Manual context cleared. Using automatic profile again.")
+        return True
+
+    normalized = jarvis_manager.normalize_pasted_manual_context(text)
+    if not normalized:
+        await _send_chat_output(
+            message,
+            "Send your edited context text, or **`reset manual`** to clear manual overrides.",
+        )
+        return True
+
+    jarvis_manager.set_profile_manual_override(uid, normalized)
+    await _send_chat_output(
+        message,
+        "✅ Manual user context updated. It overrides auto-learned bullets until you send **reset manual** as a reply here.",
+    )
+    return True
+
+
 async def _handle_jarvis_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
     """DM-only natural-language command routing with explicit confirmation."""
     user_id = message.author.id
@@ -840,12 +887,15 @@ async def process_discord_message(client, message, permission, conversation_mana
         if await process_wakeword_download(client, message, clean_content):
             return True
 
+    if is_dm and await _try_handle_dm_status_reply(client, message):
+        return True
+
     if is_dm and jarvis_manager.is_enabled(message.author.id):
         try:
             if await _handle_jarvis_command_flow(client, message, clean_content):
                 return True
         except Exception:
-            # If Jarvis planner fails, fall back to normal chat flow.
+            # If adaptive command routing fails, fall back to normal chat flow.
             pass
 
     async with message.channel.typing():
@@ -998,6 +1048,7 @@ async def process_wakeword_download(client, message, link_or_empty):
                 is_continuation=False,
                 platform="discord",
                 attachments=attachments,
+                is_dm=isinstance(channel, discord.DMChannel),
             )
             await _send_chat_output(message, reply)
         else:
