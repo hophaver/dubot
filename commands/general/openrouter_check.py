@@ -135,6 +135,21 @@ def _test_chat(key: str, model_name: str) -> Tuple[bool, str]:
     return False, f"{r.status_code}: {_extract_error_message(r)}"
 
 
+def _test_management_key_endpoint(key: str) -> Tuple[bool, str]:
+    """Check whether key works against management keys API (typically management-only keys)."""
+    try:
+        r = requests.get(
+            "https://openrouter.ai/api/v1/keys",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            timeout=20,
+        )
+    except Exception as exc:
+        return False, f"request error: {str(exc)[:160]}"
+    if r.status_code == 200:
+        return True, "OK"
+    return False, f"{r.status_code}: {_extract_error_message(r)}"
+
+
 def register(client):
     @client.tree.command(name="openrouter-check", description="Diagnose OpenRouter keys for chat and credits")
     async def openrouter_check(interaction: discord.Interaction):
@@ -160,14 +175,18 @@ def register(client):
         lines = [f"Testing {len(keys)} unique key(s). Chat probe model: `{model_name}`", ""]
         chat_ok = False
         credits_ok = False
+        mgmt_api_ok = False
         for source, key in keys:
             c_ok, c_msg = _test_credits(key)
             m_ok, m_msg = _test_chat(key, model_name)
+            g_ok, g_msg = _test_management_key_endpoint(key)
             credits_ok = credits_ok or c_ok
             chat_ok = chat_ok or m_ok
+            mgmt_api_ok = mgmt_api_ok or g_ok
             lines.append(f"- `{source}` `{_mask_key(key)}`")
             lines.append(f"  credits: {'OK' if c_ok else 'FAIL'} ({c_msg})")
             lines.append(f"  chat: {'OK' if m_ok else 'FAIL'} ({m_msg})")
+            lines.append(f"  management-api (/keys): {'OK' if g_ok else 'FAIL'} ({g_msg})")
 
         lines.append("")
         if chat_ok and credits_ok:
@@ -175,6 +194,11 @@ def register(client):
         elif credits_ok and not chat_ok:
             lines.append("⚠️ Credits check works, but no key passed chat auth.")
             lines.append("Use a valid OpenRouter API key in `OPENROUTER_API_KEY`.")
+            if mgmt_api_ok:
+                lines.append(
+                    "This key appears to be a Management API key. "
+                    "Create a normal API key at https://openrouter.ai/settings/keys for chat completions."
+                )
         elif chat_ok and not credits_ok:
             lines.append("⚠️ Chat works, credits endpoint failed for all keys.")
             lines.append("`/bal` may require account permissions; key itself can still be valid for chat.")
