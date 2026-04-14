@@ -831,7 +831,21 @@ def _to_openrouter_messages(messages: list) -> list:
 
 
 async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
-    if not OPENROUTER_CHAT_API_KEY:
+    def _candidate_openrouter_keys() -> List[str]:
+        keys: List[str] = []
+        for k in [
+            OPENROUTER_CHAT_API_KEY,
+            getattr(integrations, "OPENROUTER_API_KEY", ""),
+            getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", ""),
+            getattr(integrations, "OPENROUTER_LEGACY_API_KEY", ""),
+        ]:
+            val = str(k or "").strip()
+            if val and val not in keys:
+                keys.append(val)
+        return keys
+
+    candidate_keys = _candidate_openrouter_keys()
+    if not candidate_keys:
         return "Error: OPENROUTER_CHAT_API_KEY is not configured."
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
@@ -841,10 +855,6 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
     }
     if max_tokens is not None:
         payload["max_tokens"] = int(max(64, min(1024, max_tokens)))
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_CHAT_API_KEY}",
-        "Content-Type": "application/json",
-    }
     def _extract_openrouter_error(status_code: int, body: dict, raw_text: str) -> str:
         error_obj = body.get("error") if isinstance(body, dict) else {}
         if not isinstance(error_obj, dict):
@@ -871,39 +881,55 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
             return f"OpenRouter request failed ({status_code}): {detail[:220]}"
         return f"OpenRouter request failed ({status_code})."
 
-    try:
-        response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
-        body = {}
+    last_auth_error = ""
+    for idx, key in enumerate(candidate_keys):
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
         try:
-            body = response.json()
-        except ValueError:
-            body = {}
-
-        # One automatic retry for temporary rate limits
-        if response.status_code == 429:
-            await asyncio.sleep(2)
             response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+            body = {}
             try:
                 body = response.json()
             except ValueError:
                 body = {}
 
-        if response.status_code != 200:
-            return f"Error: {_extract_openrouter_error(response.status_code, body, response.text or '')}"
+            # One automatic retry for temporary rate limits
+            if response.status_code == 429:
+                await asyncio.sleep(2)
+                response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = {}
 
-        choices = body.get("choices") or []
-        if not choices:
-            return "Error: No choices returned by OpenRouter."
-        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-        content = message.get("content", "")
-        if isinstance(content, list):
-            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-            content = "".join(text_parts)
-        return str(content).strip() or "No response."
-    except requests.exceptions.Timeout:
-        return "Error: Request timed out"
-    except Exception as e:
-        return f"Error: {str(e)}"
+            if response.status_code == 401:
+                last_auth_error = _extract_openrouter_error(response.status_code, body, response.text or "")
+                # Retry with next candidate key if available.
+                if idx < len(candidate_keys) - 1:
+                    continue
+                return f"Error: {last_auth_error}"
+
+            if response.status_code != 200:
+                return f"Error: {_extract_openrouter_error(response.status_code, body, response.text or '')}"
+
+            choices = body.get("choices") or []
+            if not choices:
+                return "Error: No choices returned by OpenRouter."
+            message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+            content = message.get("content", "")
+            if isinstance(content, list):
+                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+                content = "".join(text_parts)
+            return str(content).strip() or "No response."
+        except requests.exceptions.Timeout:
+            return "Error: Request timed out"
+        except Exception as e:
+            return f"Error: {str(e)}"
+    if last_auth_error:
+        return f"Error: {last_auth_error}"
+    return "Error: OpenRouter request failed."
 
 
 async def _try_models_with_fallback(requested_model, messages, images=False, provider="local", request_options: Optional[Dict[str, Any]] = None):

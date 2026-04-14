@@ -88,20 +88,15 @@ OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.enviro
 # - OPENROUTER_CHAT_API_KEY is used for cloud LLM chat/completions
 # - OPENROUTER_MANAGEMENT_API_KEY is used for /bal credits endpoint
 # Backward compatibility: OPENROUTER_API_KEY works for both when dedicated vars are not set.
-OPENROUTER_CHAT_API_KEY = _get_secret(
-    "OPENROUTER_CHAT_API_KEY",
+OPENROUTER_LEGACY_API_KEY = _get_secret(
     "OPENROUTER_API_KEY",
     "OPENROUTER_KEY",
     "OPENROUTER_APIKEY",
 )
-OPENROUTER_MANAGEMENT_API_KEY = _get_secret(
-    "OPENROUTER_MANAGEMENT_API_KEY",
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_KEY",
-    "OPENROUTER_APIKEY",
-)
-# Backward-compatible symbol used by older imports.
-OPENROUTER_API_KEY = OPENROUTER_CHAT_API_KEY
+OPENROUTER_CHAT_API_KEY = _get_secret("OPENROUTER_CHAT_API_KEY") or OPENROUTER_LEGACY_API_KEY
+OPENROUTER_MANAGEMENT_API_KEY = _get_secret("OPENROUTER_MANAGEMENT_API_KEY") or OPENROUTER_LEGACY_API_KEY
+# Backward-compatible symbol used by older imports (legacy first).
+OPENROUTER_API_KEY = OPENROUTER_LEGACY_API_KEY or OPENROUTER_CHAT_API_KEY
 # Cursor user key (preferred var for /cursor spend check attempts)
 CURSOR_USER_API_KEY = _get_secret("CURSOR_USER_API_KEY")
 # Backward-compatible alias for older env setups
