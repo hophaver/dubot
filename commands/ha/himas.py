@@ -12,14 +12,12 @@ def register(client: discord.Client):
             return
         await interaction.response.defer()
         try:
-            from utils.ha_integration import ask_home_assistant
-            from models import model_manager
-            response = await ask_home_assistant(command, interaction.user.id)
+            from utils.ha_integration import ask_home_assistant_meta
+            response, parse_footer = await ask_home_assistant_meta(command, interaction.user.id)
             if not response or not response.strip():
                 response = "No response. Check your command or use /listentities to see available devices."
-            local_runtime = model_manager.get_last_local_model(interaction.user.id, refresh_local=False)
             embed = discord.Embed(title="🏠 Home Assistant", description=response[:4096], color=discord.Color.blue())
-            embed.set_footer(text=f"LLM parsing model: local `{local_runtime}`")
+            embed.set_footer(text=f"Control: {parse_footer}"[:2048])
             await interaction.followup.send(embed=embed)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)[:200]}")

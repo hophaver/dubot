@@ -1,10 +1,19 @@
 import re
-import requests
 import json
 import asyncio
 import aiohttp
 from typing import Dict, List, Optional, Tuple, Any
-from integrations import HA_URL, HA_ACCESS_TOKEN
+from integrations import (
+    HA_URL,
+    HA_ACCESS_TOKEN,
+    HIMAS_ASSIST_ENABLED,
+    HIMAS_ASSIST_LANGUAGE,
+    HIMAS_ASSIST_AGENT_ID,
+    HIMAS_PARSE_PROVIDER,
+    HIMAS_PARSE_MODEL,
+    OLLAMA_URL,
+    OPENROUTER_API_KEY,
+)
 import sys
 import os
 
@@ -45,6 +54,25 @@ COLOR_MAP = {
     "cool white": [230, 230, 255]
 }
 
+def _extract_conversation_assist_result(payload: Any) -> Tuple[str, str]:
+    """Parse HA /api/conversation/process JSON -> (speech_text, response_type)."""
+    if not isinstance(payload, dict):
+        return "", ""
+    inner = payload.get("response")
+    if not isinstance(inner, dict):
+        return "", ""
+    rt = str(inner.get("response_type") or "").strip()
+    speech = inner.get("speech") or {}
+    text = ""
+    if isinstance(speech, dict):
+        plain = speech.get("plain")
+        if isinstance(plain, dict):
+            text = str(plain.get("speech") or plain.get("text") or "").strip()
+        elif isinstance(plain, str):
+            text = plain.strip()
+    return text, rt
+
+
 class HomeAssistantManager:
     def __init__(self):
         self.headers = {
@@ -54,6 +82,7 @@ class HomeAssistantManager:
         self.entities_cache = {}
         self.last_update = 0
         self.session = None
+        self._himas_llm_label = ""
     
     async def get_session(self):
         """Get or create aiohttp session"""
@@ -66,6 +95,126 @@ class HomeAssistantManager:
         if self.session:
             await self.session.close()
             self.session = None
+
+    def _resolve_himas_parse_model(self, user_id: int) -> Tuple[str, str]:
+        """Return (backend, model) for LLM JSON parsing fallback: ollama or openrouter."""
+        from models import model_manager
+
+        p = (HIMAS_PARSE_PROVIDER or "auto").strip().lower()
+        if p not in ("auto", "ollama", "openrouter"):
+            p = "auto"
+        fixed = (HIMAS_PARSE_MODEL or "").strip()
+
+        if p == "openrouter":
+            if fixed:
+                return "openrouter", fixed
+            info = model_manager.get_user_model_info(user_id)
+            cm = str(info.get("model") or "").strip() if info.get("provider") == "cloud" else ""
+            if cm:
+                return "openrouter", cm
+            return "ollama", model_manager.get_last_local_model(user_id, refresh_local=True)
+
+        if p == "ollama":
+            if fixed:
+                return "ollama", fixed
+            return "ollama", model_manager.get_last_local_model(user_id, refresh_local=True)
+
+        # auto
+        if fixed:
+            if "/" in fixed:
+                return "openrouter", fixed
+            return "ollama", fixed
+        info = model_manager.get_user_model_info(user_id)
+        if info.get("provider") == "cloud" and str(info.get("model") or "").strip():
+            return "openrouter", str(info.get("model")).strip()
+        return "ollama", model_manager.get_last_local_model(user_id, refresh_local=True)
+
+    async def _process_with_assist(self, text: str) -> Optional[Dict[str, str]]:
+        """Run Home Assistant Assist via REST. HA executes intents; returns user-facing reply or None to fall back."""
+        if not HIMAS_ASSIST_ENABLED or not (text or "").strip():
+            return None
+        body: Dict[str, Any] = {"text": text.strip(), "language": HIMAS_ASSIST_LANGUAGE or "en"}
+        if HIMAS_ASSIST_AGENT_ID:
+            body["agent_id"] = HIMAS_ASSIST_AGENT_ID
+        try:
+            session = await self.get_session()
+            async with session.post(
+                f"{HA_URL.rstrip('/')}/api/conversation/process",
+                headers=self.headers,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=90),
+            ) as response:
+                raw_text = await response.text()
+                if response.status != 200:
+                    home_log.log_sync(f"Assist conversation HTTP {response.status}: {raw_text[:300]}")
+                    return None
+                try:
+                    data = json.loads(raw_text) if raw_text else {}
+                except json.JSONDecodeError:
+                    return None
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+            home_log.log_sync(f"Assist request failed: {e}")
+            return None
+        except Exception as e:
+            home_log.log_sync(f"Assist error: {e}")
+            return None
+
+        if not isinstance(data, dict) or "response" not in data:
+            return None
+        speech, rt = _extract_conversation_assist_result(data)
+        if rt == "error":
+            return None
+        if not speech:
+            speech = "OK."
+        return {"message": speech[:4096]}
+
+    async def _openrouter_parse_json(self, system_prompt: str, user_tail: str, model_name: str) -> str:
+        if not OPENROUTER_API_KEY:
+            return ""
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_tail},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 400,
+        }
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        try:
+            session = await self.get_session()
+            async with session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as response:
+                body = await response.json(content_type=None)
+                if response.status != 200:
+                    err = body.get("error", {}) if isinstance(body, dict) else {}
+                    msg = err.get("message", str(body)[:200]) if isinstance(err, dict) else str(body)[:200]
+                    home_log.log_sync(f"OpenRouter himas parse HTTP {response.status}: {msg}")
+                    return ""
+                choices = body.get("choices") or []
+                if not choices:
+                    return ""
+                message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    text_parts = [
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    ]
+                    content = "".join(text_parts)
+                return str(content).strip()
+        except Exception as e:
+            home_log.log_sync(f"OpenRouter himas parse error: {e}")
+            return ""
     
     def _get_entity_allowlist(self) -> Optional[List[str]]:
         """Return list of allowed entity_ids from data/ha_entities_allowlist.json, or None if not used."""
@@ -279,19 +428,16 @@ class HomeAssistantManager:
 
     async def _parse_with_llm(self, user_command: str, user_id: int, error_context: Optional[str] = None) -> Dict:
         """Parse a single command with LLM; optional error_context when a previous attempt failed."""
-        try:
-            from models import model_manager
-            from integrations import OLLAMA_URL
+        backend, model_name = self._resolve_himas_parse_model(user_id)
+        self._himas_llm_label = f"OpenRouter `{model_name}`" if backend == "openrouter" else f"Ollama `{model_name}`"
 
+        try:
             entities = await self.get_all_entities()
             entity_context = []
             for entity_id, entity in list(entities.items())[:80]:
                 friendly_name = entity.get('attributes', {}).get('friendly_name', '')
                 if friendly_name:
                     entity_context.append(f"{friendly_name} -> {entity_id}")
-
-            model_name = model_manager.get_last_local_model(user_id, refresh_local=True)
-            base_url = (OLLAMA_URL or "http://localhost:11434").rstrip("/")
 
             extra = ""
             if error_context:
@@ -311,9 +457,15 @@ Use entity_name from the list above. Only valid JSON.{extra}
 
 User command: "{user_command}"
 """
+            user_tail = f'Convert to HA command: {user_command}'
 
-            prompt = f"### System:\n{system_prompt}\n\n### User:\nConvert to HA command: {user_command}\n\n### Assistant:\n"
-            async with aiohttp.ClientSession() as session:
+            response_text = ""
+            if backend == "openrouter":
+                response_text = await self._openrouter_parse_json(system_prompt, user_tail, model_name)
+            else:
+                base_url = (OLLAMA_URL or "http://localhost:11434").rstrip("/")
+                prompt = f"### System:\n{system_prompt}\n\n### User:\n{user_tail}\n\n### Assistant:\n"
+                session = await self.get_session()
                 async with session.post(
                     f"{base_url}/api/generate",
                     json={
@@ -327,12 +479,14 @@ User command: "{user_command}"
                     if response.status == 200:
                         result = await response.json()
                         response_text = result.get("response", "").strip()
-                        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                        if json_match:
-                            try:
-                                return json.loads(json_match.group())
-                            except json.JSONDecodeError:
-                                pass
+
+            if response_text:
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
         except Exception as e:
             home_log.log_sync(f"LLM parse error: {e}")
         return {"type": "error", "message": f"Could not parse: {user_command}"}
@@ -521,11 +675,24 @@ User command: "{user_command}"
             
             return f"❌ {message}{suggestions}"
     
-    async def process_natural_command(self, user_command: str, user_id: int) -> str:
-        """Process natural language: split by 'and'/,/then, parse each part (basic then LLM), execute; retry with LLM on failure."""
+    async def process_natural_command(self, user_command: str, user_id: int) -> Tuple[str, str]:
+        """Process natural language. Tries Assist first; then split/parse/execute with optional LLM fallback."""
+        self._himas_llm_label = ""
         clean_command = re.sub(r'\[.*?says:\]\s*', '', user_command).strip()
+
+        if HIMAS_ASSIST_ENABLED and clean_command:
+            ar = await self._process_with_assist(clean_command)
+            if ar and ar.get("message"):
+                footer = "Home Assistant Assist"
+                if HIMAS_ASSIST_AGENT_ID:
+                    footer += f" · `{HIMAS_ASSIST_AGENT_ID}`"
+                return ar["message"], footer
+
         parts = self._split_multi_command(clean_command)
         results = []
+        assist_fallback_prefix = (
+            "Assist did not handle · " if (HIMAS_ASSIST_ENABLED and clean_command) else ""
+        )
 
         for part in parts:
             command_data = await self.parse_natural_language(part, user_id)
@@ -544,14 +711,26 @@ User command: "{user_command}"
             resp = await self.format_response(success, message, part, executed_data, extra_data)
             results.append(resp)
 
-        return "\n\n".join(results)
+        out = "\n\n".join(results)
+        if self._himas_llm_label:
+            footer = f"{assist_fallback_prefix}{self._himas_llm_label}"
+        else:
+            footer = f"{assist_fallback_prefix}Pattern match" if assist_fallback_prefix else "Pattern match"
+        return out, footer
 
 ha_manager = HomeAssistantManager()
+
+
+async def ask_home_assistant_meta(user_command: str, user_id: int = None) -> Tuple[str, str]:
+    """Returns (reply_text, footer_line) for /himas attribution (Assist vs LLM)."""
+    if user_id is None:
+        user_id = 0
+    return await ha_manager.process_natural_command(user_command, user_id)
 
 
 async def ask_home_assistant(user_command: str, user_id: int = None) -> str:
     """Main function for Home Assistant commands"""
     if user_id is None:
-        user_id = 0  # Default user
-    
-    return await ha_manager.process_natural_command(user_command, user_id)
+        user_id = 0
+    text, _ = await ask_home_assistant_meta(user_command, user_id)
+    return text

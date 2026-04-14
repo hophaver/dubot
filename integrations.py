@@ -77,6 +77,29 @@ def _normalize_secret(value: str) -> str:
     return v
 
 
+def _env_bool(key: str, default: bool = True) -> bool:
+    raw = _DOTENV_VALUES.get(key)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get(key, "")
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _env_raw(key: str) -> str:
+    """Single env value for non-secret strings (e.g. model names); strip quotes only, keep spaces/slashes."""
+    if key in _DOTENV_VALUES:
+        raw = _DOTENV_VALUES.get(key, "")
+    else:
+        raw = os.environ.get(key, "")
+    s = str(raw or "").strip()
+    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        s = s[1:-1].strip()
+    if s.lower() in ("none", "null"):
+        return ""
+    return s
+
+
 def _get_secret(*keys: str) -> str:
     # Prefer .env values on host to avoid stale shell env values.
     for key in keys:
@@ -96,6 +119,21 @@ TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
 HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or 'http://192.168.0.149:8123'
 HA_ACCESS_TOKEN = _get_secret("HA_ACCESS_TOKEN")
 OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.environ.get("OLLAMA_URL", "")) or 'http://localhost:11434'
+
+# /himas: try Home Assistant Assist (conversation API) first; LLM fallback uses HIMAS_PARSE_* below.
+HIMAS_ASSIST_ENABLED = _env_bool("HIMAS_ASSIST_ENABLED", True)
+HIMAS_ASSIST_LANGUAGE = (
+    _normalize_secret(_DOTENV_VALUES.get("HIMAS_ASSIST_LANGUAGE", "") or os.environ.get("HIMAS_ASSIST_LANGUAGE", ""))
+    or "en"
+)
+HIMAS_ASSIST_AGENT_ID = _env_raw("HIMAS_ASSIST_AGENT_ID")
+# auto = same as today (user's preferred Ollama model from data/models.json); ollama | openrouter = fixed backend.
+HIMAS_PARSE_PROVIDER = (
+    (_DOTENV_VALUES.get("HIMAS_PARSE_PROVIDER") or os.environ.get("HIMAS_PARSE_PROVIDER") or "auto")
+    .strip()
+    .lower()
+)
+HIMAS_PARSE_MODEL = _env_raw("HIMAS_PARSE_MODEL")
 # OpenRouter keys:
 # - OPENROUTER_API_KEY is the primary key for chat/completions.
 # - OPENROUTER_CHAT_API_KEY and OPENROUTER_MANAGEMENT_API_KEY are optional aliases.
