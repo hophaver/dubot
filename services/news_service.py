@@ -1241,6 +1241,12 @@ class NewsCompactView(discord.ui.View):
         slop_text = f"~~{self.compact_text}~~\n\n**SLOP**"
         await interaction.response.edit_message(content=slop_text, view=None)
 
+    @discord.ui.button(label="Delete", emoji="❌", style=discord.ButtonStyle.danger)
+    async def delete_message(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Delete should not affect personalization/curation signals.
+        await interaction.response.defer()
+        await interaction.message.delete()
+
 
 def build_news_embed(article: Dict, summary: str, topic: str) -> discord.Embed:
     """Build a nicely formatted embed for a news article."""
