@@ -1,4 +1,5 @@
 import json
+import time
 from collections import defaultdict
 
 from config import get_chat_history
@@ -15,6 +16,7 @@ class ConversationManager:
         self.recent_bot_message_ids = defaultdict(list)  # per channel, last 10 bot message ids (in-memory only)
         self.dm_history_cutoff = {}
         self.dm_summaries = defaultdict(list)
+        self.dm_fast_reply_until = {}
         self._load()
 
     def set_max_history(self, n: int):
@@ -53,12 +55,14 @@ class ConversationManager:
             self.last_bot_message.pop(key, None)
             self.recent_bot_message_ids.pop(key, None)
             self.dm_summaries.pop(key, None)
+            self.dm_fast_reply_until.pop(key, None)
         elif user_id is not None:
             self.conversations.clear()
             self.last_bot_message.clear()
             self.recent_bot_message_ids.clear()
             self.dm_summaries.clear()
             self.dm_history_cutoff.clear()
+            self.dm_fast_reply_until.clear()
 
     def get_dm_history_cutoff(self, channel_id, default_cutoff=16):
         key = self._key(channel_id)
@@ -97,6 +101,28 @@ class ConversationManager:
                 lines.append(f"{idx}. {text}")
         return "\n".join(lines)
 
+    def set_dm_fast_reply_window(self, channel_id, minutes: int):
+        key = self._key(channel_id)
+        mins = max(1, min(240, int(minutes)))
+        self.dm_fast_reply_until[key] = time.time() + (mins * 60)
+
+    def clear_dm_fast_reply_window(self, channel_id):
+        self.dm_fast_reply_until.pop(self._key(channel_id), None)
+
+    def get_dm_fast_reply_remaining_seconds(self, channel_id) -> int:
+        key = self._key(channel_id)
+        until = self.dm_fast_reply_until.get(key)
+        if until is None:
+            return 0
+        remaining = int(until - time.time())
+        if remaining <= 0:
+            self.dm_fast_reply_until.pop(key, None)
+            return 0
+        return remaining
+
+    def is_dm_fast_reply_active(self, channel_id) -> bool:
+        return self.get_dm_fast_reply_remaining_seconds(channel_id) > 0
+
     def set_last_bot_message(self, channel_id, message_id):
         key = self._key(channel_id)
         self.last_bot_message[key] = message_id
@@ -113,6 +139,7 @@ class ConversationManager:
                     "last_bot_message": self.last_bot_message,
                     "dm_history_cutoff": self.dm_history_cutoff,
                     "dm_summaries": dict(self.dm_summaries),
+                    "dm_fast_reply_until": self.dm_fast_reply_until,
                 },
                 f,
                 indent=2,
@@ -126,6 +153,7 @@ class ConversationManager:
                 self.last_bot_message = data.get("last_bot_message", {})
                 self.dm_history_cutoff = data.get("dm_history_cutoff", {})
                 self.dm_summaries = defaultdict(list, data.get("dm_summaries", {}))
+                self.dm_fast_reply_until = data.get("dm_fast_reply_until", {})
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 

@@ -1,67 +1,15 @@
-import os
-import subprocess
-import sys
-from typing import Optional
-
 import discord
-from discord.ui import View, Button
 from whitelist import is_admin
 from utils import home_log
-
-# Project root: commands/admin/update.py -> admin -> commands -> root
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_REQUIREMENTS = os.path.join(_PROJECT_ROOT, "requirements.txt")
-
-
-def _format_requirements_status(pip_res: Optional[subprocess.CompletedProcess]) -> str:
-    """Create a compact requirements section for update output."""
-    section = ["### Requirements"]
-    if pip_res is None:
-        section.append("○ No `requirements.txt` found.")
-        return "\n".join(section)
-
-    combined = ((pip_res.stdout or "") + "\n" + (pip_res.stderr or "")).strip()
-    lower = combined.lower()
-
-    if pip_res.returncode != 0:
-        first_line = (pip_res.stderr or pip_res.stdout or "unknown pip error").strip().splitlines()[0][:220]
-        section.append(f"❌ Dependency check failed: {first_line}")
-        return "\n".join(section)
-
-    if "successfully installed" in lower or "uninstalling " in lower:
-        section.append("✅ Dependencies updated.")
-        return "\n".join(section)
-
-    section.append("○ No dependency updates.")
-    return "\n".join(section)
-
-
-def _pip_upgrade_dependencies() -> Optional[subprocess.CompletedProcess]:
-    """Run pip install -r requirements.txt --upgrade. Returns None if requirements.txt is missing."""
-    if not os.path.isfile(_REQUIREMENTS):
-        return None
-    return subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", _REQUIREMENTS, "--upgrade"],
-        capture_output=True,
-        text=True,
-        cwd=_PROJECT_ROOT,
-    )
-
-
-def _restart_button():
-    """Return a View with a Restart button (admin only)."""
-    async def restart_callback(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-            return
-        await interaction.response.send_message("🔄 Restarting bot...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    view = View(timeout=None)
-    btn = Button(label="Restart bot", style=discord.ButtonStyle.primary, custom_id="update_restart")
-    btn.callback = restart_callback
-    view.add_item(btn)
-    return view
+from commands.admin.update_shared import (
+    build_update_action_view,
+    format_requirements_status,
+    get_current_commit,
+    pip_upgrade_dependencies,
+    run_git,
+    short_sha,
+)
+from utils.update_state import update_state_manager
 
 
 def register(client: discord.Client):
@@ -75,24 +23,35 @@ def register(client: discord.Client):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            result = subprocess.run(
-                ["git", "pull"],
-                capture_output=True,
-                text=True,
-                cwd=_PROJECT_ROOT,
-            )
+            before_commit = get_current_commit()
+            result = run_git(["pull"])
+            after_commit = get_current_commit()
+            update_state_manager.record_update(before_commit, after_commit)
+
+            state = update_state_manager.get_state()
+            safe_commit = str(state.get("safe_commit", "") or "").strip()
             if result.returncode == 0:
                 msg = f"### Git\n✅ Git pull successful:\n```\n{(result.stdout or '')[:1000]}"
                 if result.stderr:
                     msg += f"\nStderr:\n{result.stderr[:500]}"
                 msg += "\n```"
+                msg += (
+                    "\n\n### Version tracking\n"
+                    f"- Before update: `{short_sha(before_commit)}`\n"
+                    f"- After update: `{short_sha(after_commit)}`\n"
+                    f"- Safe rollback target: `{short_sha(safe_commit)}`"
+                )
 
-                pip_res = _pip_upgrade_dependencies()
-                msg += "\n\n" + _format_requirements_status(pip_res)
-                msg += "\n\n### Next step\n**Restart the bot to apply changes.**"
+                pip_res = pip_upgrade_dependencies()
+                msg += "\n\n" + format_requirements_status(pip_res)
+                msg += (
+                    "\n\n### Next step\n"
+                    "**Restart the bot to apply changes.**\n"
+                    "If this update looks stable, click **Mark as safe** to make it the preferred rollback version."
+                )
             else:
                 msg = f"### Git\n❌ Git pull failed:\n```\n{(result.stderr or '')[:1000]}\n```"
-            view = _restart_button()
+            view = build_update_action_view()
             sent = await home_log.send_to_home(content=msg, view=view)
             if sent:
                 await interaction.followup.send("✅ Update Downloaded", ephemeral=True)

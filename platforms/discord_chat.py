@@ -141,12 +141,20 @@ def _build_command_usage(command_obj) -> str:
 
 def _is_positive_confirmation(text: str) -> bool:
     t = (text or "").strip().lower()
-    return t in {"yes", "y", "confirm", "do it", "run it", "ok", "okay", "proceed"}
+    if not t:
+        return False
+    if t in {"yes", "y", "confirm", "do it", "run it", "ok", "okay", "proceed", "sure"}:
+        return True
+    return bool(re.match(r"^(yes|yep|yeah|ok|okay|sure)\b", t))
 
 
 def _is_negative_confirmation(text: str) -> bool:
     t = (text or "").strip().lower()
-    return t in {"no", "n", "cancel", "stop", "don't", "dont", "never mind", "nevermind"}
+    if not t:
+        return False
+    if t in {"no", "n", "cancel", "stop", "don't", "dont", "never mind", "nevermind"}:
+        return True
+    return bool(re.match(r"^(no|nah|cancel|stop)\b", t))
 
 
 def _looks_like_download_request(text: str) -> bool:
@@ -196,7 +204,7 @@ def _looks_like_himas_request(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
         return False
-    if any(word in t for word in ["light", "lamp", "kitchen", "bedroom", "living room", "thermostat", "temperature", "switch", "fan"]):
+    if any(word in t for word in ["light", "lamp", "kitchen", "bedroom", "living room", "thermostat", "temperature", "switch", "fan", "ceiling", "heater", "ac"]):
         return any(verb in t for verb in ["turn on", "turn off", "set", "dim", "toggle", "what is", "status"])
     return False
 
@@ -206,6 +214,45 @@ def _normalize_command_name(name: str) -> str:
     if n in {"ha", "home", "homeassistant", "home-assistant"}:
         return "himas"
     return n
+
+
+_INVALID_PREFERENCE_TOKENS = {
+    "anymore", "again", "this", "that", "it", "command", "confirmation",
+    "confirm", "yes", "no", "please", "one", "same",
+}
+
+
+def _is_valid_preference_command(name: str) -> bool:
+    n = _normalize_command_name(name)
+    return bool(n) and n not in _INVALID_PREFERENCE_TOKENS
+
+
+def _looks_like_disable_confirmation_phrase(text: str) -> bool:
+    t = (text or "").lower()
+    if not t:
+        return False
+    if "without confirmation" in t or "no confirmation" in t:
+        return True
+    return bool(
+        re.search(
+            r"(?:wont|won't|will not|doesnt|doesn't|dont|don't)\s+need\s+(?:a\s+)?confirm(?:ation)?",
+            t,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_himas_command_text(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"^(jarvis[,:\s]+)?", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(
+        r"^(can you|could you|would you|please|hey|yo|hi|hello)\s+",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    ).strip()
+    t = re.sub(r"\s+(please|thanks|thank you)\s*$", "", t, flags=re.IGNORECASE).strip()
+    return t or (text or "").strip()
 
 
 def _extract_no_confirm_preference(text: str):
@@ -227,14 +274,22 @@ def _extract_no_confirm_preference(text: str):
     for pat in disable_patterns:
         m = re.search(pat, t, flags=re.IGNORECASE)
         if m:
-            return _normalize_command_name(m.group(1)), True
+            cmd = _normalize_command_name(m.group(1))
+            if _is_valid_preference_command(cmd):
+                return cmd, True
+            return "__PENDING__", True
 
     for pat in enable_patterns:
         m = re.search(pat, t, flags=re.IGNORECASE)
         if m:
-            return _normalize_command_name(m.group(1)), False
+            cmd = _normalize_command_name(m.group(1))
+            if _is_valid_preference_command(cmd):
+                return cmd, False
+            return "__PENDING__", False
 
     if "this command" in t and ("without confirmation" in t or "no confirmation" in t):
+        return "__PENDING__", True
+    if "this" in t and _looks_like_disable_confirmation_phrase(t):
         return "__PENDING__", True
     if "this command" in t and ("ask confirmation" in t or "with confirmation" in t):
         return "__PENDING__", False
@@ -505,11 +560,13 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
 async def _handle_jarvis_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
     """DM-only natural-language command routing with explicit confirmation."""
     user_id = message.author.id
+    pending = jarvis_manager.get_pending_confirmation(user_id)
     pref_update = _extract_no_confirm_preference(clean_content)
     if pref_update:
         cmd_name, enabled = pref_update
+        is_pending_target = cmd_name == "__PENDING__"
         if cmd_name == "__PENDING__":
-            pending_ref = jarvis_manager.get_pending_confirmation(user_id) or {}
+            pending_ref = pending or {}
             cmd_name = _normalize_command_name(str(pending_ref.get("command", "") or ""))
         if cmd_name:
             if enabled:
@@ -518,9 +575,26 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
             else:
                 jarvis_manager.remove_trusted_command(user_id, cmd_name)
                 await _send_chat_output(message, f"Got it, I will ask before running `/{cmd_name}`.")
+            # If user also confirmed in the same message, run pending command right away.
+            if pending and _is_positive_confirmation(clean_content):
+                command_name = str(pending.get("command", "")).strip().lower()
+                args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
+                command_obj = client.tree.get_command(command_name)
+                jarvis_manager.clear_pending_confirmation(user_id)
+                if command_obj is None:
+                    await _send_chat_output(message, f"❌ I can no longer find `/{command_name}`.")
+                    return True
+                try:
+                    kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
+                    interaction = _MessageInteractionProxy(client, message, command_obj.name)
+                    await command_obj.callback(interaction, **kwargs)
+                except Exception as exc:
+                    await _send_chat_output(message, f"❌ Couldn't run `/{command_obj.name}`: {str(exc)[:200]}")
+            return True
+        if is_pending_target:
+            await _send_chat_output(message, "I can apply that once there is a pending command to confirm.")
             return True
 
-    pending = jarvis_manager.get_pending_confirmation(user_id)
     if pending:
         if _is_positive_confirmation(clean_content):
             command_name = str(pending.get("command", "")).strip().lower()
@@ -540,7 +614,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
                     f"❌ I couldn't run `/{command_obj.name}` from that request: {str(exc)[:200]}"
                 )
             return True
-        if "without confirmation" in clean_content.lower() or "no confirmation" in clean_content.lower():
+        if _looks_like_disable_confirmation_phrase(clean_content):
             command_name = str(pending.get("command", "")).strip().lower()
             if command_name:
                 jarvis_manager.add_trusted_command(user_id, command_name)
@@ -567,7 +641,8 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
     if _looks_like_himas_request(clean_content):
         command_obj = client.tree.get_command("himas")
         if command_obj is not None:
-            args = {"command": clean_content}
+            himas_text = _normalize_himas_command_text(clean_content)
+            args = {"command": himas_text}
             if jarvis_manager.is_trusted_no_confirm(user_id, "himas"):
                 try:
                     kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
@@ -582,7 +657,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
             )
             await _send_chat_output(
                 message,
-                f"Want me to do this via Home Assistant?\n`/himas command:{clean_content}`\nReply `yes` or `no`.",
+                f"Want me to do this via Home Assistant?\n`/himas command:{himas_text}`\nReply `yes` or `no`.",
             )
             return True
 
@@ -709,11 +784,12 @@ async def process_discord_message(client, message, permission, conversation_mana
         context = None
         if is_continuation and message.channel and hasattr(message.channel, 'history'):
             try:
-                context = await get_chat_context(message.channel, limit=8, include_bots=is_dm)
+                context = await get_chat_context(message.channel, limit=6, include_bots=is_dm)
             except Exception:
                 context = None
 
         try:
+            fast_reply_enabled = (not is_dm) or conversation_manager.is_dm_fast_reply_active(message.channel.id)
             answer = await asyncio.wait_for(
                 ask_llm(
                     message.author.id,
@@ -725,6 +801,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                     chat_context=context,
                     attachments=attachments if attachments else None,
                     is_dm=is_dm,
+                    fast_reply=fast_reply_enabled,
                 ),
                 timeout=150,
             )

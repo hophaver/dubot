@@ -4,8 +4,10 @@ import os
 import asyncio
 import base64
 import mimetypes
+import time
 import requests
 from typing import Dict, List, Optional, Tuple, Any
+import integrations
 from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
 from conversations import conversation_manager
 from personas import persona_manager
@@ -138,6 +140,44 @@ class CommandDatabase:
         return formatted
 
 command_db = CommandDatabase()
+_location_cache = {"value": "Unknown", "city": "Unknown", "country": "Unknown", "ts": 0.0}
+
+
+async def _get_runtime_location_cached() -> Tuple[str, str, str]:
+    """Return cached location; refresh in background only occasionally."""
+    now = time.time()
+    current_location = str(getattr(integrations, "LOCATION", None) or "").strip()
+    current_city = str(getattr(integrations, "CITY", None) or "").strip()
+    current_country = str(getattr(integrations, "COUNTRY", None) or "").strip()
+
+    if current_location and current_location.lower() != "unknown":
+        _location_cache["value"] = current_location
+        _location_cache["city"] = current_city or "Unknown"
+        _location_cache["country"] = current_country or "Unknown"
+        _location_cache["ts"] = now
+        return _location_cache["value"], _location_cache["city"], _location_cache["country"]
+
+    # Avoid blocking every message with network location requests.
+    if now - float(_location_cache.get("ts", 0.0)) < 600:
+        return (
+            str(_location_cache.get("value", "Unknown") or "Unknown"),
+            str(_location_cache.get("city", "Unknown") or "Unknown"),
+            str(_location_cache.get("country", "Unknown") or "Unknown"),
+        )
+
+    try:
+        location, city, country = await asyncio.to_thread(get_location_by_ip)
+        _location_cache["value"] = location or "Unknown"
+        _location_cache["city"] = city or "Unknown"
+        _location_cache["country"] = country or "Unknown"
+        _location_cache["ts"] = now
+    except Exception:
+        _location_cache["ts"] = now
+    return (
+        str(_location_cache.get("value", "Unknown") or "Unknown"),
+        str(_location_cache.get("city", "Unknown") or "Unknown"),
+        str(_location_cache.get("country", "Unknown") or "Unknown"),
+    )
 
 
 def initialize_command_database():
@@ -150,6 +190,7 @@ def initialize_command_database():
     command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
     command_db.add_command("dm-history", "DM only: view/set history cutoff for rolling summarization", "General")
     command_db.add_command("jarvis", "DM only: toggle adaptive Jarvis mode", "General")
+    command_db.add_command("fast-reply", "DM only: temporarily enable faster, shorter replies", "General")
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
     command_db.add_command("status", "Show system status and bot info", "General")
@@ -195,7 +236,8 @@ def initialize_command_database():
     command_db.add_command("run", "Run a script from scripts folder (now or at time)", "Scripts")
     
     # Admin Commands
-    command_db.add_command("update", "Update bot from git and upgrade dependencies (requirements.txt)", "Admin")
+    command_db.add_command("update", "Update bot from git, with buttons to restart or mark version safe", "Admin")
+    command_db.add_command("rollback", "Rollback bot to safe/last working git commit", "Admin")
     command_db.add_command("purge", "Delete messages from channel", "Admin")
     command_db.add_command("restart", "Restart the bot", "Admin")
     command_db.add_command("kill", "Kill the bot", "Admin")
@@ -465,11 +507,12 @@ async def ask_llm(
     chat_context=None,
     attachments=None,
     is_dm=False,
+    fast_reply=False,
 ):
     """Main LLM interface for all platforms with file support"""
     # Get system info
     date, time = update_system_time_date()
-    location, city, country = get_location_by_ip()
+    location, city, country = await _get_runtime_location_cached()
     
     # Get persona
     persona_name = persona_manager.get_user_persona(user_id)
@@ -550,6 +593,11 @@ async def ask_llm(
             "\n\nThis is a direct DM chat. Use a relaxed, natural tone. "
             "Keep it human and concise, and avoid overly formal phrasing."
         )
+    if fast_reply:
+        enhanced_system_prompt += (
+            "\n\nFast reply mode is enabled. Be concise and quick: "
+            "usually 1-3 short sentences unless the user asks for details."
+        )
     
     # Prepare conversation history (channel-based: one thread per channel, last 5 turns)
     if is_continuation:
@@ -567,6 +615,9 @@ async def ask_llm(
     
     # Build messages
     messages = history.copy()
+    if is_dm and len(messages) > 24:
+        # DM responses should stay snappy; summaries preserve long-term context.
+        messages = messages[-24:]
     if is_dm and is_continuation:
         dm_summary = conversation_manager.get_dm_summary_text(channel_id)
         if dm_summary:
@@ -592,12 +643,17 @@ async def ask_llm(
     else:
         messages.append({"role": "user", "content": formatted_message})
     
+    request_options = None
+    if fast_reply:
+        request_options = {"num_predict": 220, "temperature": 0.55}
+
     # Try models with fallback
     final_model, response_text = await _try_models_with_fallback(
         requested_model,
         messages,
         images=bool(images_data),
         provider=provider,
+        request_options=request_options,
     )
     
     # Clean response
@@ -742,7 +798,7 @@ def _to_openrouter_messages(messages: list) -> list:
     return converted
 
 
-async def _make_openrouter_request(model_name: str, messages: list) -> str:
+async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
     if not OPENROUTER_API_KEY:
         return "Error: OPENROUTER_API_KEY is not configured."
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -751,6 +807,8 @@ async def _make_openrouter_request(model_name: str, messages: list) -> str:
         "messages": _to_openrouter_messages(messages),
         "temperature": 0.7,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max(64, min(1024, max_tokens)))
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -812,10 +870,16 @@ async def _make_openrouter_request(model_name: str, messages: list) -> str:
         return f"Error: {str(e)}"
 
 
-async def _try_models_with_fallback(requested_model, messages, images=False, provider="local"):
+async def _try_models_with_fallback(requested_model, messages, images=False, provider="local", request_options: Optional[Dict[str, Any]] = None):
     provider = (provider or "local").strip().lower()
     if provider == "cloud":
-        response = await _make_openrouter_request(requested_model, messages)
+        max_tokens = None
+        if isinstance(request_options, dict) and request_options.get("num_predict") is not None:
+            try:
+                max_tokens = int(request_options.get("num_predict"))
+            except (TypeError, ValueError):
+                max_tokens = None
+        response = await _make_openrouter_request(requested_model, messages, max_tokens=max_tokens)
         if response and not response.startswith("Error:"):
             return requested_model, response
         return requested_model, f"⚠️ Cloud model unavailable: {response}"
@@ -835,7 +899,7 @@ async def _try_models_with_fallback(requested_model, messages, images=False, pro
 
     models_to_try = list(dict.fromkeys(models_to_try))
     for model_name in models_to_try:
-        response = await _make_ollama_request(model_name, messages)
+        response = await _make_ollama_request(model_name, messages, request_options=request_options)
 
         if response and not response.startswith("Error:"):
             return model_name, response
@@ -849,7 +913,7 @@ async def _try_models_with_fallback(requested_model, messages, images=False, pro
         return requested_model, _format_vision_help_message()
     return requested_model, "⚠️ All models are unavailable. Please check your Ollama server."
 
-async def _make_ollama_request(model_name, messages):
+async def _make_ollama_request(model_name, messages, request_options: Optional[Dict[str, Any]] = None):
     """Make request to Ollama API"""
     endpoints = [
         OLLAMA_URL,
@@ -894,14 +958,19 @@ async def _make_ollama_request(model_name, messages):
                 "stream": False
             }
         else:
+            options = {
+                "temperature": 0.7,
+                "num_predict": 1024,  # Increased for file analysis
+            }
+            if isinstance(request_options, dict):
+                for k in ("temperature", "num_predict"):
+                    if request_options.get(k) is not None:
+                        options[k] = request_options.get(k)
             data = {
                 "model": model_name,
                 "messages": messages,
                 "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "num_predict": 1024  # Increased for file analysis
-                }
+                "options": options,
             }
 
         for attempt in range(3):

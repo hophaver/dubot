@@ -71,6 +71,13 @@ def register(client: discord.Client):
 
         answer = await ask_llm(
             interaction.user.id, interaction.channel.id, message, str(interaction.user.name),
-            is_continuation=False, platform="discord", attachments=attachments if attachments else None,
+            is_continuation=False,
+            platform="discord",
+            attachments=attachments if attachments else None,
+            is_dm=isinstance(interaction.channel, discord.DMChannel),
+            fast_reply=(
+                (not isinstance(interaction.channel, discord.DMChannel))
+                or conversation_manager.is_dm_fast_reply_active(interaction.channel.id)
+            ),
         )
         await send_long_message(interaction, answer)
