@@ -20,10 +20,13 @@ def _mask_key(k: str) -> str:
 
 def _parse_env(path: str = ".env") -> Dict[str, str]:
     values: Dict[str, str] = {}
-    if not os.path.isfile(path):
+    env_path = path
+    if not os.path.isabs(env_path):
+        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), path)
+    if not os.path.isfile(env_path):
         return values
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
             for raw in f:
                 line = raw.strip()
                 if not line or line.startswith("#"):
@@ -54,20 +57,16 @@ def _candidate_keys() -> List[Tuple[str, str]]:
     seen = set()
     out: List[Tuple[str, str]] = []
     candidates = [
-        ("integrations.OPENROUTER_CHAT_API_KEY", getattr(integrations, "OPENROUTER_CHAT_API_KEY", "")),
         ("integrations.OPENROUTER_API_KEY", getattr(integrations, "OPENROUTER_API_KEY", "")),
-        ("integrations.OPENROUTER_LEGACY_API_KEY", getattr(integrations, "OPENROUTER_LEGACY_API_KEY", "")),
-        ("env.OPENROUTER_CHAT_API_KEY", os.environ.get("OPENROUTER_CHAT_API_KEY", "")),
         ("env.OPENROUTER_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
         ("env.OPENROUTER_KEY", os.environ.get("OPENROUTER_KEY", "")),
         ("env.OPENROUTER_APIKEY", os.environ.get("OPENROUTER_APIKEY", "")),
-        ("dotenv.OPENROUTER_CHAT_API_KEY", raw_env.get("OPENROUTER_CHAT_API_KEY", "")),
         ("dotenv.OPENROUTER_API_KEY", raw_env.get("OPENROUTER_API_KEY", "")),
         ("dotenv.OPENROUTER_KEY", raw_env.get("OPENROUTER_KEY", "")),
         ("dotenv.OPENROUTER_APIKEY", raw_env.get("OPENROUTER_APIKEY", "")),
-        ("integrations.OPENROUTER_MANAGEMENT_API_KEY", getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", "")),
-        ("env.OPENROUTER_MANAGEMENT_API_KEY", os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", "")),
-        ("dotenv.OPENROUTER_MANAGEMENT_API_KEY", raw_env.get("OPENROUTER_MANAGEMENT_API_KEY", "")),
+        # Optional compatibility aliases are shown only after the primary key path.
+        ("integrations.OPENROUTER_CHAT_API_KEY", getattr(integrations, "OPENROUTER_CHAT_API_KEY", "")),
+        ("dotenv.OPENROUTER_CHAT_API_KEY", raw_env.get("OPENROUTER_CHAT_API_KEY", "")),
     ]
     for source, key in candidates:
         k = str(key or "").strip()

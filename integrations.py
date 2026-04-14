@@ -19,10 +19,13 @@ except ImportError:
 # Bot credentials and API keys
 def _read_dotenv_values(path: str = ".env"):
     values = {}
-    if not os.path.isfile(path):
+    env_path = path
+    if not os.path.isabs(env_path):
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    if not os.path.isfile(env_path):
         return values
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
             for raw in f:
                 line = raw.strip()
                 if not line or line.startswith("#"):
@@ -93,20 +96,17 @@ TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
 HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or 'http://192.168.0.149:8123'
 HA_ACCESS_TOKEN = _get_secret("HA_ACCESS_TOKEN")
 OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.environ.get("OLLAMA_URL", "")) or 'http://localhost:11434'
-# OpenRouter keys (optional):
-# - OPENROUTER_CHAT_API_KEY is used for cloud LLM chat/completions
-# - OPENROUTER_MANAGEMENT_API_KEY is used for /bal credits endpoint
-# Backward compatibility: OPENROUTER_API_KEY works for both when dedicated vars are not set.
-OPENROUTER_LEGACY_API_KEY = _get_secret(
+# OpenRouter keys:
+# - OPENROUTER_API_KEY is the primary key for chat/completions.
+# - OPENROUTER_CHAT_API_KEY and OPENROUTER_MANAGEMENT_API_KEY are optional aliases.
+OPENROUTER_API_KEY = _get_secret(
     "OPENROUTER_API_KEY",
     "OPENROUTER_KEY",
     "OPENROUTER_APIKEY",
 )
-OPENROUTER_CHAT_API_KEY = _get_secret("OPENROUTER_CHAT_API_KEY") or OPENROUTER_LEGACY_API_KEY
-OPENROUTER_MANAGEMENT_API_KEY = _get_secret("OPENROUTER_MANAGEMENT_API_KEY") or OPENROUTER_LEGACY_API_KEY
-# Backward-compatible symbol used by older imports (chat first).
-# Older modules that import OPENROUTER_API_KEY typically expect a chat-capable key.
-OPENROUTER_API_KEY = OPENROUTER_CHAT_API_KEY or OPENROUTER_LEGACY_API_KEY
+OPENROUTER_LEGACY_API_KEY = OPENROUTER_API_KEY
+OPENROUTER_CHAT_API_KEY = _get_secret("OPENROUTER_CHAT_API_KEY") or OPENROUTER_API_KEY
+OPENROUTER_MANAGEMENT_API_KEY = _get_secret("OPENROUTER_MANAGEMENT_API_KEY") or OPENROUTER_API_KEY
 # Cursor user key (preferred var for /cursor spend check attempts)
 CURSOR_USER_API_KEY = _get_secret("CURSOR_USER_API_KEY")
 # Backward-compatible alias for older env setups

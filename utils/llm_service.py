@@ -8,7 +8,7 @@ import time
 import requests
 from typing import Dict, List, Optional, Tuple, Any
 import integrations
-from integrations import OLLAMA_URL, OPENROUTER_CHAT_API_KEY, update_system_time_date, get_location_by_ip
+from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
@@ -834,10 +834,13 @@ def _to_openrouter_messages(messages: list) -> list:
 async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
     def _read_raw_dotenv(path: str = ".env") -> Dict[str, str]:
         out: Dict[str, str] = {}
-        if not os.path.isfile(path):
+        env_path = path
+        if not os.path.isabs(env_path):
+            env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), path)
+        if not os.path.isfile(env_path):
             return out
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
                 for raw in f:
                     line = raw.strip()
                     if not line or line.startswith("#"):
@@ -872,21 +875,16 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         keys: List[str] = []
         dotenv_raw = _read_raw_dotenv(".env")
         for k in [
-            OPENROUTER_CHAT_API_KEY,
-            getattr(integrations, "OPENROUTER_API_KEY", ""),
-            getattr(integrations, "OPENROUTER_LEGACY_API_KEY", ""),
-            os.environ.get("OPENROUTER_CHAT_API_KEY", ""),
+            OPENROUTER_API_KEY,
             os.environ.get("OPENROUTER_API_KEY", ""),
             os.environ.get("OPENROUTER_KEY", ""),
             os.environ.get("OPENROUTER_APIKEY", ""),
-            dotenv_raw.get("OPENROUTER_CHAT_API_KEY", ""),
             dotenv_raw.get("OPENROUTER_API_KEY", ""),
             dotenv_raw.get("OPENROUTER_KEY", ""),
             dotenv_raw.get("OPENROUTER_APIKEY", ""),
-            # Keep management key candidates as a final fallback for compatibility.
-            getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", ""),
-            os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
-            dotenv_raw.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
+            # Optional compatibility fallbacks only after OPENROUTER_API_KEY path.
+            getattr(integrations, "OPENROUTER_CHAT_API_KEY", ""),
+            dotenv_raw.get("OPENROUTER_CHAT_API_KEY", ""),
         ]:
             val = str(k or "").strip()
             if val and val not in keys:
@@ -895,7 +893,7 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
 
     candidate_keys = _candidate_openrouter_keys()
     if not candidate_keys:
-        return "Error: OpenRouter API key is not configured (set OPENROUTER_API_KEY in .env)."
+        return "Error: OPENROUTER_API_KEY is not configured."
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
         "model": model_name,
@@ -921,8 +919,7 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         if status_code == 401:
             return (
                 "OpenRouter authentication failed. "
-                "Check OPENROUTER_API_KEY in .env (or optional override vars). "
-                "Details can indicate key scope, account, or key ownership mismatch."
+                "Check OPENROUTER_API_KEY."
                 f"{(' Details: ' + detail[:180]) if detail else ''}"
             )
         if status_code == 402:
@@ -936,8 +933,6 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/hophaver/dubot",
-            "X-Title": "dubot",
         }
         try:
             response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
