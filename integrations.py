@@ -50,6 +50,9 @@ _DOTENV_VALUES = _read_dotenv_values()
 
 def _normalize_secret(value: str) -> str:
     v = str(value or "").strip().strip('"').strip("'")
+    # Remove common invisible/control characters from copy-pasted secrets.
+    v = v.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+    v = "".join(ch for ch in v if ch.isprintable())
     # Remove all whitespace characters that can sneak in from copy/paste.
     v = re.sub(r"\s+", "", v)
     if v.lower() in {"none", "null"}:

@@ -831,6 +831,12 @@ def _to_openrouter_messages(messages: list) -> list:
 
 
 async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
+    def _mask_key(k: str) -> str:
+        text = str(k or "")
+        if len(text) <= 10:
+            return "***"
+        return f"{text[:6]}...{text[-4:]}"
+
     def _candidate_openrouter_keys() -> List[str]:
         keys: List[str] = []
         for k in [
@@ -907,6 +913,10 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
 
             if response.status_code == 401:
                 last_auth_error = _extract_openrouter_error(response.status_code, body, response.text or "")
+                home_log.log_sync(
+                    f"⚠️ OpenRouter 401 for model `{model_name}` with key {_mask_key(key)} "
+                    f"(candidate {idx + 1}/{len(candidate_keys)}): {last_auth_error}"
+                )
                 # Retry with next candidate key if available.
                 if idx < len(candidate_keys) - 1:
                     continue
