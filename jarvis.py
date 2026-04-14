@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,9 @@ class JarvisManager:
                 },
                 "trusted_commands_no_confirm": [],
                 "pending_confirmation": None,
+                "tone_tuning_queue": [],
+                "last_tone_tuning_ts": 0.0,
+                "tone_tuning_updates": 0,
             }
         return self.state[key]
 
@@ -151,6 +155,43 @@ class JarvisManager:
         trusted = self._get_user_state(user_id).get("trusted_commands_no_confirm", []) or []
         name = str(command_name).strip().lower()
         return name in {str(c).strip().lower() for c in trusted}
+
+    def queue_user_message_for_tuning(self, user_id: int, text: str) -> None:
+        """Queue user-only samples for periodic tone tuning."""
+        if not text:
+            return
+        user_state = self._get_user_state(user_id)
+        queue = list(user_state.get("tone_tuning_queue", []) or [])
+        cleaned = str(text).strip()
+        if not cleaned:
+            return
+        queue.append(cleaned[:240])
+        user_state["tone_tuning_queue"] = queue[-40:]
+        self.save()
+
+    def should_run_tone_tuning(self, user_id: int, min_messages: int = 8, min_interval_seconds: int = 900) -> bool:
+        user_state = self._get_user_state(user_id)
+        queue = user_state.get("tone_tuning_queue", []) or []
+        last_ts = float(user_state.get("last_tone_tuning_ts", 0.0) or 0.0)
+        if len(queue) < int(min_messages):
+            return False
+        return (time.time() - last_ts) >= int(min_interval_seconds)
+
+    def run_tone_tuning_now(self, user_id: int, force: bool = False) -> bool:
+        """Apply queued user samples to profile. Returns True when profile updated."""
+        user_state = self._get_user_state(user_id)
+        queue = list(user_state.get("tone_tuning_queue", []) or [])
+        if not queue:
+            return False
+        if (not force) and (not self.should_run_tone_tuning(user_id)):
+            return False
+        merged = "\n".join(queue[-20:])
+        self.update_profile_from_message(user_id, merged)
+        user_state["tone_tuning_queue"] = []
+        user_state["last_tone_tuning_ts"] = time.time()
+        user_state["tone_tuning_updates"] = int(user_state.get("tone_tuning_updates", 0) or 0) + 1
+        self.save()
+        return True
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.save_file), exist_ok=True)

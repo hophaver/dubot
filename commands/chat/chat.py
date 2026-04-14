@@ -49,16 +49,20 @@ async def _read_attachments(files: List[Optional[discord.Attachment]], interacti
     return attachments
 
 
-def _schedule_jarvis_profile_update(user_id: int, message: str) -> None:
-    if not message:
+def _schedule_jarvis_profile_update(interaction: discord.Interaction, message: str) -> None:
+    if not message or not interaction:
         return
+    user_id = interaction.user.id
     try:
         from jarvis import jarvis_manager
         if not jarvis_manager.is_enabled(user_id):
             return
-        asyncio.create_task(
-            asyncio.to_thread(jarvis_manager.update_profile_from_message, user_id, message)
-        )
+        async def _runner():
+            await asyncio.to_thread(jarvis_manager.queue_user_message_for_tuning, user_id, message)
+            updated = await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
+            if updated and isinstance(interaction.channel, discord.DMChannel):
+                await interaction.channel.send("I just fine-tuned my tone from your recent messages.")
+        asyncio.create_task(_runner())
     except Exception:
         pass
 
@@ -146,4 +150,4 @@ def register(client: discord.Client):
 
         await send_long_message(interaction, answer)
         if is_dm:
-            _schedule_jarvis_profile_update(interaction.user.id, message)
+            _schedule_jarvis_profile_update(interaction, message)

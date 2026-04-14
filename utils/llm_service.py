@@ -195,6 +195,7 @@ def initialize_command_database():
     command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
     command_db.add_command("dm-history", "DM only: view/set history cutoff for rolling summarization", "General")
     command_db.add_command("jarvis", "DM only: toggle adaptive Jarvis mode", "General")
+    command_db.add_command("jarvis-tune", "DM only: manually trigger Jarvis tone tuning update", "General")
     command_db.add_command("fast-reply", "DM only: temporarily enable faster, shorter replies", "General")
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
@@ -414,13 +415,46 @@ async def compact_dm_history_for_channel(user_id: int, channel_id: int, username
         return {"compacted": False, "reason": "nothing-to-compact", "cutoff": cutoff}
 
     previous_summary = conversation_manager.get_dm_summary_text(channel_id)
+    def _summary_line_from_message(item: Dict[str, Any]) -> str:
+        role = str(item.get("role", "user") or "user")
+        content = str(item.get("content", "") or "").strip()
+        if not content:
+            return ""
+        # Strip bulky contextual preambles that blow up tokens.
+        content = re.sub(
+            r"Recent messages in this channel:\n[\s\S]*?\n[\w.\- ]+ says:\s*",
+            "",
+            content,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Exclude likely news digests/alerts from compaction memory.
+        lower = content.lower()
+        if any(
+            marker in lower
+            for marker in [
+                "news briefing",
+                "daily digest",
+                "breaking news",
+                "top stories",
+                "rss",
+                "source:",
+                "headline:",
+            ]
+        ):
+            return ""
+        # Keep user signal compact; assistant messages need less length.
+        cap = 220 if role == "user" else 140
+        if len(content) > cap:
+            content = content[:cap].rstrip() + "…"
+        return f"{role}: {content}"
+
     old_text = []
     for item in old_messages[-80:]:
-        role = item.get("role", "user")
-        content = str(item.get("content", "")).strip()
-        if not content:
-            continue
-        old_text.append(f"{role}: {content[:500]}")
+        line = _summary_line_from_message(item)
+        if line:
+            old_text.append(line)
+        if len(old_text) >= 48:
+            break
     joined = "\n".join(old_text)
     if not joined.strip():
         return {"compacted": False, "reason": "empty-source", "cutoff": cutoff}
@@ -431,7 +465,7 @@ async def compact_dm_history_for_channel(user_id: int, channel_id: int, username
         "1) user preferences and dislikes,\n"
         "2) key ongoing tasks or commitments,\n"
         "3) important context/events that future replies need.\n"
-        "Output plain text bullets only, max 180 words.\n\n"
+        "Output plain text bullets only, max 130 words.\n\n"
         f"Existing memory summary:\n{previous_summary or '(none)'}\n\n"
         f"New older messages to merge:\n{joined}"
     )
@@ -565,6 +599,7 @@ async def ask_llm(
         formatted_message = _format_discord_message(username, message_text, chat_context)
     else:
         formatted_message = f"{username} says: {message_text}"
+    persisted_user_message = f"{username} says: {message_text}"
     
     # Add attachment context to message
     if attachment_context:
@@ -663,7 +698,7 @@ async def ask_llm(
     
     # Store conversation if successful (channel-based; user identity is in formatted_message)
     if response_text and not response_text.startswith("Error:"):
-        conversation_manager.add_message(channel_id, "user", formatted_message)
+        conversation_manager.add_message(channel_id, "user", persisted_user_message)
         conversation_manager.add_message(channel_id, "assistant", response_text)
         conversation_manager.save()
         

@@ -52,8 +52,11 @@ async def _send_with_retry(send_coro_factory, retries: int = 3):
     return None
 
 
-def _schedule_jarvis_post_reply_calibration(user_id: int, message_text: str):
-    """Run Jarvis profile/tone learning asynchronously after response send."""
+def _schedule_jarvis_post_reply_calibration(message: discord.Message, message_text: str):
+    """Queue user-only samples and periodically update Jarvis tone after replying."""
+    user_id = getattr(message.author, "id", None)
+    if user_id is None:
+        return
     if not message_text:
         return
     if not jarvis_manager.is_enabled(user_id):
@@ -61,7 +64,10 @@ def _schedule_jarvis_post_reply_calibration(user_id: int, message_text: str):
 
     async def _runner():
         try:
-            await asyncio.to_thread(jarvis_manager.update_profile_from_message, user_id, message_text)
+            await asyncio.to_thread(jarvis_manager.queue_user_message_for_tuning, user_id, message_text)
+            updated = await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
+            if updated and isinstance(message.channel, discord.DMChannel):
+                await _send_chat_output(message, "I just fine-tuned my tone from your recent messages.")
         except Exception:
             pass
 
@@ -251,6 +257,10 @@ def _looks_like_command_request(text: str) -> bool:
         "status",
         "help",
         "list ",
+        "balance",
+        "credit",
+        "openrouter",
+        "/bal",
     ]
     return any(cue in t for cue in cue_words)
 
@@ -308,6 +318,32 @@ def _normalize_himas_command_text(text: str) -> str:
     ).strip()
     t = re.sub(r"\s+(please|thanks|thank you)\s*$", "", t, flags=re.IGNORECASE).strip()
     return t or (text or "").strip()
+
+
+def _quick_command_plan_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Fast deterministic parser for common command intents."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    # Direct slash/bang command with no args.
+    for simple in ("bal", "help", "status", "wake", "sleep", "checkwake"):
+        if t == f"/{simple}" or t == simple:
+            return {"should_execute": True, "command": simple, "arguments": {}, "reason": "direct command", "risk": "safe"}
+
+    if any(k in t for k in ["openrouter balance", "openrouter credits", "my credits", "check credits", "check balance"]):
+        return {"should_execute": True, "command": "bal", "arguments": {}, "reason": "credits query", "risk": "safe"}
+    if t in {"balance", "credits", "credit balance"}:
+        return {"should_execute": True, "command": "bal", "arguments": {}, "reason": "credits query", "risk": "safe"}
+
+    if t.startswith("/himas "):
+        return {
+            "should_execute": True,
+            "command": "himas",
+            "arguments": {"command": _normalize_himas_command_text(t[7:].strip())},
+            "reason": "direct home assistant command",
+            "risk": "safe",
+        }
+    return None
 
 
 def _extract_no_confirm_preference(text: str):
@@ -707,8 +743,10 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
 
     if not _looks_like_command_request(clean_content):
         return False
-    schema = _build_command_schema(client)
-    plan = await plan_command_from_text(user_id, clean_content, schema)
+    plan = _quick_command_plan_from_text(clean_content)
+    if not plan:
+        schema = _build_command_schema(client)
+        plan = await plan_command_from_text(user_id, clean_content, schema)
     if not plan.get("should_execute"):
         return False
 
@@ -889,7 +927,7 @@ async def process_discord_message(client, message, permission, conversation_mana
         # Save conversations periodically
         conversation_manager.save()
         if is_dm:
-            _schedule_jarvis_post_reply_calibration(message.author.id, clean_content)
+            _schedule_jarvis_post_reply_calibration(message, clean_content)
         return True
 
 async def process_wakeword_download(client, message, link_or_empty):
