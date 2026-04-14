@@ -12,7 +12,7 @@ from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
-from jarvis import jarvis_manager
+from jarvis import jarvis_manager, JARVIS_SYSTEM_SUFFIX
 from utils import home_log
 from utils import reliability_telemetry
 
@@ -196,6 +196,7 @@ def initialize_command_database():
     command_db.add_command("dm-history", "DM only: view/set history cutoff for rolling summarization", "General")
     command_db.add_command("jarvis", "DM only: toggle adaptive Jarvis mode", "General")
     command_db.add_command("jarvis-tune", "DM only: manually trigger Jarvis tone tuning update", "General")
+    command_db.add_command("jarvis-status", "DM only: show Jarvis tone, behaviour, and effective system additions", "General")
     command_db.add_command("fast-reply", "DM only: temporarily enable faster, shorter replies", "General")
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
@@ -621,11 +622,7 @@ async def ask_llm(
         jarvis_profile_prompt = jarvis_manager.get_profile_prompt(user_id)
         if jarvis_profile_prompt:
             enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{jarvis_profile_prompt}"
-        enhanced_system_prompt += (
-            "\n\nJarvis mode is ON for this DM. Keep your tone natural and conversational. "
-            "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
-            "Be proactive, keep continuity, and match the user's style."
-        )
+        enhanced_system_prompt += JARVIS_SYSTEM_SUFFIX
     elif is_dm:
         enhanced_system_prompt += (
             "\n\nThis is a direct DM chat. Use a relaxed, natural tone. "

@@ -1280,6 +1280,12 @@ class NewsExpandedView(discord.ui.View):
         record_feedback(interaction.user.id, self.article_hash, "critical", self.topic)
         await interaction.response.send_message("Marked critical — similar updates will be prioritized.", ephemeral=True)
 
+    @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger)
+    async def delete_message(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Does not affect personalization/curation signals.
+        await interaction.response.defer()
+        await interaction.message.delete()
+
 
 class NewsSourceIssueView(discord.ui.View):
     def __init__(self, topic: str, source_name: str):
@@ -1319,7 +1325,7 @@ class NewsCompactView(discord.ui.View):
         slop_text = f"~~{self.compact_text}~~\n\n**SLOP**"
         await interaction.response.edit_message(content=slop_text, view=None)
 
-    @discord.ui.button(label="Delete", emoji="❌", style=discord.ButtonStyle.danger)
+    @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger)
     async def delete_message(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Delete should not affect personalization/curation signals.
         await interaction.response.defer()

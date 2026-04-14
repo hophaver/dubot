@@ -5,6 +5,13 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
+# Appended to the system prompt when Jarvis is ON in DMs (single source of truth).
+JARVIS_SYSTEM_SUFFIX = (
+    "\n\nJarvis mode is ON for this DM. Keep your tone natural and conversational. "
+    "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
+    "Be proactive, keep continuity, and match the user's style."
+)
+
 
 class JarvisManager:
     """DM-only per-user adaptive assistant state."""
@@ -117,6 +124,28 @@ class JarvisManager:
             return ""
         lines.append("- Match the user's style naturally without being repetitive.")
         return "\n".join(lines)
+
+    def get_full_jarvis_system_addition(self, user_id: int) -> str:
+        """Text appended to the base persona+chat system prompt when Jarvis is enabled (learned + fixed behavior)."""
+        parts = []
+        profile = self.get_profile_prompt(user_id)
+        if profile:
+            parts.append(profile)
+        parts.append(JARVIS_SYSTEM_SUFFIX.strip())
+        return "\n\n".join(parts)
+
+    def get_status_snapshot(self, user_id: int) -> Dict[str, Any]:
+        """Read-only snapshot for /jarvis-status."""
+        st = self._get_user_state(user_id)
+        return {
+            "enabled": bool(st.get("enabled", False)),
+            "profile": dict(st.get("profile", {}) or {}),
+            "trusted_commands": list(st.get("trusted_commands_no_confirm", []) or []),
+            "pending_confirmation": st.get("pending_confirmation"),
+            "tone_queue_len": len(st.get("tone_tuning_queue", []) or []),
+            "tone_tuning_updates": int(st.get("tone_tuning_updates", 0) or 0),
+            "last_tone_tuning_ts": float(st.get("last_tone_tuning_ts", 0.0) or 0.0),
+        }
 
     def set_pending_confirmation(self, user_id: int, payload: Optional[Dict[str, Any]]) -> None:
         user_state = self._get_user_state(user_id)
