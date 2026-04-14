@@ -52,6 +52,13 @@ async def _send_with_retry(send_coro_factory, retries: int = 3):
     return None
 
 
+async def _send_chat_output(message: discord.Message, content=None, *, embed=None, embeds=None, file=None, files=None, view=None):
+    """Send naturally in DMs; reply in non-DM channels."""
+    if isinstance(message.channel, discord.DMChannel):
+        return await message.channel.send(content=content, embed=embed, embeds=embeds, file=file, files=files, view=view)
+    return await message.reply(content=content, embed=embed, embeds=embeds, file=file, files=files, view=view)
+
+
 def _parse_bool(value: str) -> bool:
     v = value.strip().lower()
     if v in {"true", "1", "yes", "on", "enable", "enabled"}:
@@ -403,7 +410,7 @@ def _format_discord_admin_bang_help(client: discord.Client) -> str:
 async def _process_admin_bang_slash_command(client, message: discord.Message, bang_payload: str) -> bool:
     payload = (bang_payload or "").strip()
     if not payload:
-        await message.reply(_format_discord_admin_bang_help(client))
+        await _send_chat_output(message, _format_discord_admin_bang_help(client))
         return True
 
     parts = payload.split(maxsplit=1)
@@ -411,7 +418,8 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
     arg_text = parts[1] if len(parts) > 1 else ""
     command_obj = client.tree.get_command(raw_command)
     if command_obj is None:
-        await message.reply(
+        await _send_chat_output(
+            message,
             f"❌ Unknown command `!{raw_command}`.\nUse `/help` for all commands."
         )
         return True
@@ -419,7 +427,8 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
     try:
         kwargs = _parse_admin_bang_kwargs(client, message, command_obj, arg_text)
     except Exception as exc:
-        await message.reply(
+        await _send_chat_output(
+            message,
             f"❌ Invalid syntax for `!{command_obj.name}`: {str(exc)}\n"
             f"Format: `{_build_command_usage(command_obj)}`"
         )
@@ -429,13 +438,15 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
     try:
         await command_obj.callback(interaction, **kwargs)
     except TypeError as exc:
-        await message.reply(
+        await _send_chat_output(
+            message,
             f"❌ Invalid syntax for `!{command_obj.name}`.\n"
             f"Format: `{_build_command_usage(command_obj)}`\n"
             f"Details: {str(exc)[:180]}"
         )
     except Exception as exc:
-        await message.reply(
+        await _send_chat_output(
+            message,
             f"❌ Command `!{command_obj.name}` failed: {str(exc)[:200]}\n"
             f"Format: `{_build_command_usage(command_obj)}`"
         )
@@ -453,22 +464,23 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
             command_obj = client.tree.get_command(command_name)
             jarvis_manager.clear_pending_confirmation(user_id)
             if command_obj is None:
-                await message.reply(f"❌ I can no longer find `/{command_name}`.")
+                await _send_chat_output(message, f"❌ I can no longer find `/{command_name}`.")
                 return True
             try:
                 kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
                 interaction = _MessageInteractionProxy(client, message, command_obj.name)
                 await command_obj.callback(interaction, **kwargs)
             except Exception as exc:
-                await message.reply(
+                await _send_chat_output(
+                    message,
                     f"❌ I couldn't run `/{command_obj.name}` from that request: {str(exc)[:200]}"
                 )
             return True
         if _is_negative_confirmation(clean_content):
             jarvis_manager.clear_pending_confirmation(user_id)
-            await message.reply("✅ Cancelled. I will not run that command.")
+            await _send_chat_output(message, "✅ Cancelled. I will not run that command.")
             return True
-        await message.reply("I still need confirmation. Reply `yes` to run it, or `no` to cancel.")
+        await _send_chat_output(message, "I still need confirmation. Reply `yes` to run it, or `no` to cancel.")
         return True
 
     if not _looks_like_command_request(clean_content):
@@ -495,7 +507,8 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
     )
     pretty_args = ", ".join(f"{k}={v}" for k, v in args.items()) if args else "no arguments"
     risk_note = "⚠️ Potentially sensitive command. " if risk in {"risky", "dangerous"} else ""
-    await message.reply(
+    await _send_chat_output(
+        message,
         f"{risk_note}Jarvis detected command intent: `/{command_obj.name}` ({pretty_args}).\n"
         f"{('Reason: ' + reason + chr(10)) if reason else ''}"
         "Reply `yes` to execute, or `no` to cancel."
@@ -613,7 +626,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                 f"user={message.author.id}. {reliability_telemetry.format_snapshot('Counters')}"
             )
             await _send_with_retry(
-                lambda: message.reply("⚠️ I timed out while generating a reply. Please try again in a moment.")
+                lambda: _send_chat_output(message, "⚠️ I timed out while generating a reply. Please try again in a moment.")
             )
             return True
         except Exception as exc:
@@ -623,7 +636,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                 f"user={message.author.id}. error={str(exc)[:280]}"
             )
             await _send_with_retry(
-                lambda: message.reply("⚠️ I hit an internal error while generating a reply. Please try again.")
+                lambda: _send_chat_output(message, "⚠️ I hit an internal error while generating a reply. Please try again.")
             )
             return True
 
@@ -634,7 +647,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                 f"user={message.author.id}. {reliability_telemetry.format_snapshot('Counters')}"
             )
             await _send_with_retry(
-                lambda: message.reply("⚠️ I could not generate a response this time. Please try again.")
+                lambda: _send_chat_output(message, "⚠️ I could not generate a response this time. Please try again.")
             )
             return True
         
@@ -643,7 +656,7 @@ async def process_discord_message(client, message, permission, conversation_mana
         response = None
         for i, chunk in enumerate(chunks):
             if i == 0:
-                response = await _send_with_retry(lambda: message.reply(chunk))
+                response = await _send_with_retry(lambda: _send_chat_output(message, chunk))
             else:
                 response = await _send_with_retry(lambda: message.channel.send(chunk))
             conversation_manager.set_last_bot_message(message.channel.id, response.id)
@@ -686,7 +699,7 @@ async def process_wakeword_download(client, message, link_or_empty):
         except Exception:
             pass
     if not target_url and not target_attachment:
-        await message.reply("❌ No link or media found. Send a link or use `/download` after a message with media.")
+        await _send_chat_output(message, "❌ No link or media found. Send a link or use `/download` after a message with media.")
         return True
     data, filename = None, None
     if target_attachment:
@@ -694,19 +707,19 @@ async def process_wakeword_download(client, message, link_or_empty):
             data = await target_attachment.read()
             filename = target_attachment.filename
             if len(data) > max_bytes:
-                await message.reply(f"❌ File too large. Max: {get_download_limit_mb()} MB.")
+                await _send_chat_output(message, f"❌ File too large. Max: {get_download_limit_mb()} MB.")
                 return True
         except Exception as e:
-            await message.reply(f"❌ Failed to read attachment: {e}")
+            await _send_chat_output(message, f"❌ Failed to read attachment: {e}")
             return True
     elif target_url:
         import asyncio
         data, filename = await asyncio.to_thread(download_url_sync, target_url, max_bytes)
         if data is None:
-            await message.reply(f"❌ Download failed: {filename}")
+            await _send_chat_output(message, f"❌ Download failed: {filename}")
             return True
     if not data:
-        await message.reply("❌ Nothing to send.")
+        await _send_chat_output(message, "❌ Nothing to send.")
         return True
     from utils.llm_service import ask_llm
     ext = os.path.splitext(filename or "")[1].lower()
@@ -723,15 +736,16 @@ async def process_wakeword_download(client, message, link_or_empty):
                 platform="discord",
                 attachments=attachments,
             )
-            await message.reply(reply)
+            await _send_chat_output(message, reply)
         else:
             from io import BytesIO
-            await message.reply(
+            await _send_chat_output(
+                message,
                 f"📥 Downloaded: **{filename}**",
                 file=discord.File(filename=filename, fp=BytesIO(data)),
             )
     except Exception as e:
-        await message.reply(f"❌ Error: {e}")
+        await _send_chat_output(message, f"❌ Error: {e}")
     return True
 
 async def process_wakeword_admin_command(client, message, command, content, permission):

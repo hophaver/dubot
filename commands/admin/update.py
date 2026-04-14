@@ -14,29 +14,25 @@ _REQUIREMENTS = os.path.join(_PROJECT_ROOT, "requirements.txt")
 
 
 def _format_requirements_status(pip_res: Optional[subprocess.CompletedProcess]) -> str:
-    """Create a clean requirements section for update output."""
+    """Create a compact requirements section for update output."""
     section = ["### Requirements"]
     if pip_res is None:
-        section.append("○ No `requirements.txt` found, skipped dependency upgrade.")
+        section.append("○ No `requirements.txt` found.")
         return "\n".join(section)
 
-    if pip_res.returncode == 0:
-        combined = ((pip_res.stdout or "") + "\n" + (pip_res.stderr or "")).strip()
-        if not combined:
-            combined = "(pip finished with no output)"
-        section.append("✅ Dependency upgrade finished.")
-        section.append("```")
-        section.append(combined[:1200])
-        section.append("```")
+    combined = ((pip_res.stdout or "") + "\n" + (pip_res.stderr or "")).strip()
+    lower = combined.lower()
+
+    if pip_res.returncode != 0:
+        first_line = (pip_res.stderr or pip_res.stdout or "unknown pip error").strip().splitlines()[0][:220]
+        section.append(f"❌ Dependency check failed: {first_line}")
         return "\n".join(section)
 
-    err_text = (pip_res.stderr or pip_res.stdout or "").strip()
-    if not err_text:
-        err_text = "(no error output)"
-    section.append(f"⚠️ Dependency upgrade failed (exit code {pip_res.returncode}).")
-    section.append("```")
-    section.append(err_text[:1000])
-    section.append("```")
+    if "successfully installed" in lower or "uninstalling " in lower:
+        section.append("✅ Dependencies updated.")
+        return "\n".join(section)
+
+    section.append("○ No dependency updates.")
     return "\n".join(section)
 
 
