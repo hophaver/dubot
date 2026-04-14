@@ -15,9 +15,9 @@ Discord/Telegram bot with LLM chat and various features
 
 1. Setup `.env`
 2. `python -m venv venv`
-4. `source venv/bin/activate`
-5. `pip install -r requirements.txt`
-6. Run: `sh start.sh`
+3. `source venv/bin/activate`
+4. `pip install -r requirements.txt`
+5. Run: `sh start.sh`
 
 ### Multi-platform mode
 
@@ -37,6 +37,12 @@ Discord/Telegram bot with LLM chat and various features
 - **`whitelist.json`** – Permissions
 - **`data/ha_mappings.json`** – HA friendly name → entity_id (from `/explain`)
 - **`data/ha_entities_allowlist.json`** – Optional
+
+### reliability defaults (recommended)
+- keep `OLLAMA_URL` pointed to a reachable Ollama host
+- set at least one local fallback model in `model_fallback.json`
+- if using cloud models, set `OPENROUTER_API_KEY`
+- use `/reliability` to inspect retry/timeout/error counters
 
 ## Commands (summary)
 
@@ -71,3 +77,10 @@ Discord/Telegram bot with LLM chat and various features
 - **`models.py`** – User model preferences
 - **`personas.py`** – Persona definitions
 - **`services/`** – Reminder service
+
+## Reliability notes
+
+- Discord message sends are retried automatically on transient HTTP failures.
+- LLM calls retry transient errors and model fallback is used when a model is unavailable.
+- DMs support compacted long history summaries to keep context while reducing token load.
+- File and image flows are handled through shared LLM service code paths, so behavior is consistent between chat and file commands.

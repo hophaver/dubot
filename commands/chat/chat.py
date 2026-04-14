@@ -1,9 +1,66 @@
-from typing import Optional
+import asyncio
+from typing import Optional, List, Dict, Any
 import discord
 from discord import app_commands
 from whitelist import get_user_permission
 from conversations import conversation_manager
 from commands.shared import send_long_message
+
+
+COMPARE_KEYWORDS = {"compare", "difference", "similar", "contrast"}
+ANALYZE_KEYWORDS = {
+    "analyze",
+    "review",
+    "summarize",
+    "extract",
+    "read",
+    "what's in",
+    "describe this",
+    "look at",
+    "what is",
+    "show me",
+}
+
+
+def _is_dm_channel(channel: Optional[discord.abc.Messageable]) -> bool:
+    return isinstance(channel, discord.DMChannel)
+
+
+async def _read_attachments(files: List[Optional[discord.Attachment]], interaction: discord.Interaction) -> List[Dict[str, Any]]:
+    attachments: List[Dict[str, Any]] = []
+    for attachment in files:
+        if not attachment:
+            continue
+        try:
+            data = await attachment.read()
+            attachments.append(
+                {
+                    "filename": attachment.filename,
+                    "data": data,
+                    "content_type": attachment.content_type,
+                    "size": attachment.size,
+                }
+            )
+        except Exception as exc:
+            await interaction.followup.send(
+                f"⚠️ Failed to read attachment: {str(exc)[:100]}",
+                ephemeral=True,
+            )
+    return attachments
+
+
+def _schedule_jarvis_profile_update(user_id: int, message: str) -> None:
+    if not message:
+        return
+    try:
+        from jarvis import jarvis_manager
+        if not jarvis_manager.is_enabled(user_id):
+            return
+        asyncio.create_task(
+            asyncio.to_thread(jarvis_manager.update_profile_from_message, user_id, message)
+        )
+    except Exception:
+        pass
 
 
 def register(client: discord.Client):
@@ -25,19 +82,15 @@ def register(client: discord.Client):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
         await interaction.response.defer()
-        from utils.llm_service import ask_llm, analyze_file, compare_files, FileProcessor
+        from utils.llm_service import ask_llm, analyze_file, compare_files
 
-        attachments = []
-        for f in (file1, file2, file3):
-            if f:
-                try:
-                    data = await f.read()
-                    attachments.append({"filename": f.filename, "data": data, "content_type": f.content_type, "size": f.size})
-                except Exception as e:
-                    await interaction.followup.send(f"⚠️ Failed to read attachment: {str(e)[:100]}", ephemeral=True)
+        attachments = await _read_attachments([file1, file2, file3], interaction)
 
         msg_lower = message.lower()
-        if len(attachments) >= 2 and any(k in msg_lower for k in ["compare", "difference", "similar", "contrast"]):
+        is_dm = _is_dm_channel(interaction.channel)
+        fast_reply_enabled = (not is_dm) or conversation_manager.is_dm_fast_reply_active(interaction.channel.id)
+
+        if len(attachments) >= 2 and any(keyword in msg_lower for keyword in COMPARE_KEYWORDS):
             try:
                 file_data_list = [{"filename": a["filename"], "data": a["data"]} for a in attachments]
                 result = await compare_files(
@@ -54,7 +107,7 @@ def register(client: discord.Client):
             except Exception as e:
                 await interaction.followup.send(f"⚠️ Error comparing files: {str(e)[:100]}")
 
-        if attachments and any(k in msg_lower for k in ["analyze", "review", "summarize", "extract", "read", "what's in", "describe this", "look at", "what is", "show me"]):
+        if attachments and any(keyword in msg_lower for keyword in ANALYZE_KEYWORDS):
             try:
                 a = attachments[0]
                 result = await analyze_file(
@@ -69,15 +122,28 @@ def register(client: discord.Client):
             except Exception as e:
                 await interaction.followup.send(f"⚠️ Error analyzing file: {str(e)[:100]}")
 
-        answer = await ask_llm(
-            interaction.user.id, interaction.channel.id, message, str(interaction.user.name),
-            is_continuation=False,
-            platform="discord",
-            attachments=attachments if attachments else None,
-            is_dm=isinstance(interaction.channel, discord.DMChannel),
-            fast_reply=(
-                (not isinstance(interaction.channel, discord.DMChannel))
-                or conversation_manager.is_dm_fast_reply_active(interaction.channel.id)
-            ),
-        )
+        try:
+            answer = await asyncio.wait_for(
+                ask_llm(
+                    interaction.user.id,
+                    interaction.channel.id,
+                    message,
+                    str(interaction.user.name),
+                    is_continuation=False,
+                    platform="discord",
+                    attachments=attachments if attachments else None,
+                    is_dm=is_dm,
+                    fast_reply=fast_reply_enabled,
+                ),
+                timeout=150,
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⚠️ I timed out while generating a reply. Please try again.")
+            return
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ I hit an internal error: {str(exc)[:140]}")
+            return
+
         await send_long_message(interaction, answer)
+        if is_dm:
+            _schedule_jarvis_profile_update(interaction.user.id, message)

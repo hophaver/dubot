@@ -47,6 +47,11 @@ SUPPORTED_FILE_TYPES = {
     'code': ['.py', '.js', '.html', '.css', '.java', '.cpp', '.c', '.go', '.rs', '.php', '.sh'],
     'document': ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']
 }
+SUPPORTED_EXTENSION_TO_TYPE = {
+    ext: file_type
+    for file_type, extensions in SUPPORTED_FILE_TYPES.items()
+    for ext in extensions
+}
 
 # Command database for LLM awareness
 class CommandDatabase:
@@ -319,11 +324,8 @@ class FileProcessor:
     @staticmethod
     def get_file_type(filename: str) -> str:
         """Get the type of file based on extension"""
-        for file_type, extensions in SUPPORTED_FILE_TYPES.items():
-            for ext in extensions:
-                if filename.lower().endswith(ext):
-                    return file_type
-        return "unknown"
+        ext = os.path.splitext((filename or "").lower())[1]
+        return SUPPORTED_EXTENSION_TO_TYPE.get(ext, "unknown")
     
     @staticmethod
     def read_text_file(content: bytes) -> str:
@@ -661,11 +663,6 @@ async def ask_llm(
     
     # Store conversation if successful (channel-based; user identity is in formatted_message)
     if response_text and not response_text.startswith("Error:"):
-        if is_dm and jarvis_manager.is_enabled(user_id):
-            try:
-                jarvis_manager.update_profile_from_message(user_id, message_text)
-            except Exception:
-                pass
         conversation_manager.add_message(channel_id, "user", formatted_message)
         conversation_manager.add_message(channel_id, "assistant", response_text)
         conversation_manager.save()
@@ -924,54 +921,41 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
     def _is_transient_status(code: int) -> bool:
         return code in {408, 425, 429, 500, 502, 503, 504}
 
-    for base_url in endpoints:
-        url = f"{base_url}/api/chat"
-
-        # Check if any message has images
-        has_images = False
+    has_images = any(isinstance(msg, dict) and msg.get("images") for msg in messages)
+    if has_images:
+        formatted_messages = []
         for msg in messages:
-            if isinstance(msg, dict) and msg.get("images"):
-                has_images = True
-                break
-
-        # Prepare data
-        if has_images:
-            # For vision models, we need to format messages with images
-            formatted_messages = []
-            for msg in messages:
-                if msg.get("role") == "user" and msg.get("images"):
-                    # Ollama vision format
-                    formatted_messages.append({
+            if msg.get("role") == "user" and msg.get("images"):
+                formatted_messages.append(
+                    {
                         "role": "user",
                         "content": msg["content"],
-                        "images": msg["images"]
-                    })
-                else:
-                    formatted_messages.append({
+                        "images": msg["images"],
+                    }
+                )
+            else:
+                formatted_messages.append(
+                    {
                         "role": msg.get("role", "user"),
-                        "content": msg.get("content", "")
-                    })
+                        "content": msg.get("content", ""),
+                    }
+                )
+        data = {"model": model_name, "messages": formatted_messages, "stream": False}
+    else:
+        options = {"temperature": 0.7, "num_predict": 1024}
+        if isinstance(request_options, dict):
+            for k in ("temperature", "num_predict"):
+                if request_options.get(k) is not None:
+                    options[k] = request_options.get(k)
+        data = {
+            "model": model_name,
+            "messages": messages,
+            "stream": False,
+            "options": options,
+        }
 
-            data = {
-                "model": model_name,
-                "messages": formatted_messages,
-                "stream": False
-            }
-        else:
-            options = {
-                "temperature": 0.7,
-                "num_predict": 1024,  # Increased for file analysis
-            }
-            if isinstance(request_options, dict):
-                for k in ("temperature", "num_predict"):
-                    if request_options.get(k) is not None:
-                        options[k] = request_options.get(k)
-            data = {
-                "model": model_name,
-                "messages": messages,
-                "stream": False,
-                "options": options,
-            }
+    for base_url in endpoints:
+        url = f"{base_url}/api/chat"
 
         for attempt in range(3):
             try:
@@ -999,7 +983,23 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                     )
                     return f"Error {response.status_code}: {error_text}"
 
-                result = response.json()
+                try:
+                    result = response.json()
+                except ValueError:
+                    if attempt < 2:
+                        reliability_telemetry.increment("llm_retries")
+                        home_log.log_sync(
+                            f"⚠️ LLM returned non-JSON response for model `{model_name}` "
+                            f"(attempt {attempt + 1}/3)."
+                        )
+                        await asyncio.sleep(1 + attempt)
+                        continue
+                    error_count = reliability_telemetry.increment("llm_errors")
+                    home_log.log_sync(
+                        f"🔴 LLM returned invalid JSON for model `{model_name}` "
+                        f"(error #{error_count})."
+                    )
+                    return "Error: Invalid JSON response from Ollama."
                 return result.get("message", {}).get("content", "No response.")
 
             except requests.exceptions.ConnectionError:
@@ -1030,13 +1030,6 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                     f"{reliability_telemetry.format_snapshot('Counters')}"
                 )
                 return "Error: Request timed out"
-            except ValueError:
-                error_count = reliability_telemetry.increment("llm_errors")
-                home_log.log_sync(
-                    f"🔴 LLM returned invalid JSON for model `{model_name}` "
-                    f"(error #{error_count})."
-                )
-                return "Error: Invalid JSON response from Ollama."
             except Exception as e:
                 if attempt < 2:
                     reliability_telemetry.increment("llm_retries")

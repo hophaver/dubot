@@ -52,11 +52,66 @@ async def _send_with_retry(send_coro_factory, retries: int = 3):
     return None
 
 
+def _schedule_jarvis_post_reply_calibration(user_id: int, message_text: str):
+    """Run Jarvis profile/tone learning asynchronously after response send."""
+    if not message_text:
+        return
+    if not jarvis_manager.is_enabled(user_id):
+        return
+
+    async def _runner():
+        try:
+            await asyncio.to_thread(jarvis_manager.update_profile_from_message, user_id, message_text)
+        except Exception:
+            pass
+
+    asyncio.create_task(_runner())
+
+
 async def _send_chat_output(message: discord.Message, content=None, *, embed=None, embeds=None, file=None, files=None, view=None):
     """Send naturally in DMs; reply in non-DM channels."""
     if isinstance(message.channel, discord.DMChannel):
         return await message.channel.send(content=content, embed=embed, embeds=embeds, file=file, files=files, view=view)
     return await message.reply(content=content, embed=embed, embeds=embeds, file=file, files=files, view=view)
+
+
+async def _execute_planned_command(
+    client: discord.Client,
+    message: discord.Message,
+    command_name: str,
+    args: dict,
+    *,
+    not_found_message: str,
+    failure_message: str,
+) -> bool:
+    """Resolve and execute a planned slash command using message-proxy interaction."""
+    command_name = str(command_name or "").strip().lower()
+    command_obj = client.tree.get_command(command_name)
+    if command_obj is None:
+        await _send_chat_output(message, not_found_message)
+        return True
+    try:
+        kwargs = _build_kwargs_from_plan(client, message, command_obj, args or {})
+        interaction = _MessageInteractionProxy(client, message, command_obj.name)
+        await command_obj.callback(interaction, **kwargs)
+    except Exception as exc:
+        await _send_chat_output(message, f"{failure_message} `/{command_obj.name}`: {str(exc)[:200]}")
+    return True
+
+
+async def _read_message_attachments(message: discord.Message):
+    attachments = []
+    for att in list(getattr(message, "attachments", []) or []):
+        try:
+            data = await att.read()
+            attachments.append({"filename": att.filename, "data": data})
+        except Exception as exc:
+            reliability_telemetry.increment("discord_send_errors")
+            await home_log.send_to_home(
+                f"⚠️ Failed to read Discord attachment `{getattr(att, 'filename', 'unknown')}` "
+                f"in channel {getattr(message.channel, 'id', 'unknown')}: {str(exc)[:220]}"
+            )
+    return attachments
 
 
 def _parse_bool(value: str) -> bool:
@@ -579,17 +634,15 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
             if pending and _is_positive_confirmation(clean_content):
                 command_name = str(pending.get("command", "")).strip().lower()
                 args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
-                command_obj = client.tree.get_command(command_name)
                 jarvis_manager.clear_pending_confirmation(user_id)
-                if command_obj is None:
-                    await _send_chat_output(message, f"❌ I can no longer find `/{command_name}`.")
-                    return True
-                try:
-                    kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
-                    interaction = _MessageInteractionProxy(client, message, command_obj.name)
-                    await command_obj.callback(interaction, **kwargs)
-                except Exception as exc:
-                    await _send_chat_output(message, f"❌ Couldn't run `/{command_obj.name}`: {str(exc)[:200]}")
+                return await _execute_planned_command(
+                    client,
+                    message,
+                    command_name,
+                    args,
+                    not_found_message=f"❌ I can no longer find `/{command_name}`.",
+                    failure_message="❌ Couldn't run",
+                )
             return True
         if is_pending_target:
             await _send_chat_output(message, "I can apply that once there is a pending command to confirm.")
@@ -599,38 +652,29 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
         if _is_positive_confirmation(clean_content):
             command_name = str(pending.get("command", "")).strip().lower()
             args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
-            command_obj = client.tree.get_command(command_name)
             jarvis_manager.clear_pending_confirmation(user_id)
-            if command_obj is None:
-                await _send_chat_output(message, f"❌ I can no longer find `/{command_name}`.")
-                return True
-            try:
-                kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
-                interaction = _MessageInteractionProxy(client, message, command_obj.name)
-                await command_obj.callback(interaction, **kwargs)
-            except Exception as exc:
-                await _send_chat_output(
-                    message,
-                    f"❌ I couldn't run `/{command_obj.name}` from that request: {str(exc)[:200]}"
-                )
-            return True
+            return await _execute_planned_command(
+                client,
+                message,
+                command_name,
+                args,
+                not_found_message=f"❌ I can no longer find `/{command_name}`.",
+                failure_message="❌ I couldn't run",
+            )
         if _looks_like_disable_confirmation_phrase(clean_content):
             command_name = str(pending.get("command", "")).strip().lower()
             if command_name:
                 jarvis_manager.add_trusted_command(user_id, command_name)
-            command_obj = client.tree.get_command(command_name)
             args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
             jarvis_manager.clear_pending_confirmation(user_id)
-            if command_obj is None:
-                await _send_chat_output(message, f"❌ I can no longer find `/{command_name}`.")
-                return True
-            try:
-                kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
-                interaction = _MessageInteractionProxy(client, message, command_obj.name)
-                await command_obj.callback(interaction, **kwargs)
-            except Exception as exc:
-                await _send_chat_output(message, f"❌ Couldn't run `/{command_obj.name}`: {str(exc)[:200]}")
-            return True
+            return await _execute_planned_command(
+                client,
+                message,
+                command_name,
+                args,
+                not_found_message=f"❌ I can no longer find `/{command_name}`.",
+                failure_message="❌ Couldn't run",
+            )
         if _is_negative_confirmation(clean_content):
             jarvis_manager.clear_pending_confirmation(user_id)
             await _send_chat_output(message, "No worries, cancelled.")
@@ -771,14 +815,7 @@ async def process_discord_message(client, message, permission, conversation_mana
         is_continuation = is_reply_to_bot or is_dm
         
         # Build attachments list (for files/images with wake word or mentions)
-        attachments = []
-        if message.attachments:
-            for att in message.attachments:
-                try:
-                    data = await att.read()
-                    attachments.append({"filename": att.filename, "data": data})
-                except Exception:
-                    pass
+        attachments = await _read_message_attachments(message)
         
         # Include recent channel context for continuity and non-LLM bot messages (e.g. news posts).
         context = None
@@ -851,6 +888,8 @@ async def process_discord_message(client, message, permission, conversation_mana
         
         # Save conversations periodically
         conversation_manager.save()
+        if is_dm:
+            _schedule_jarvis_post_reply_calibration(message.author.id, clean_content)
         return True
 
 async def process_wakeword_download(client, message, link_or_empty):
