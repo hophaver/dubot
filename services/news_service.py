@@ -344,6 +344,7 @@ def record_feedback(user_id: int, article_hash: str, feedback_type: str, topic: 
         "keywords_suppress": [],
         "sources_boost": [],
         "sources_suppress": [],
+        "sources_disabled": [],
     })
     seen = _load_seen()
     article_meta = seen.get("details", {}).get(article_hash, {})
@@ -373,6 +374,40 @@ def record_feedback(user_id: int, article_hash: str, feedback_type: str, topic: 
         topic_prefs["not_critical_count"] = topic_prefs.get("not_critical_count", 0) + 1
     elif feedback_type == "critical":
         topic_prefs["critical_count"] = topic_prefs.get("critical_count", 0) + 1
+
+    prefs[uid] = user_prefs
+    save_preferences(prefs)
+
+
+def disable_source_for_user(user_id: int, topic: str, source_name: str) -> None:
+    """Disable a specific source for a user+topic without affecting other curation signals."""
+    source_key = (source_name or "").strip().lower()
+    if not source_key:
+        return
+
+    prefs = get_preferences()
+    uid = _platform_user_key(user_id)
+    user_prefs = prefs.setdefault(uid, {})
+    topic_prefs = user_prefs.setdefault(topic, {
+        "slop_count": 0,
+        "more_count": 0,
+        "not_critical_count": 0,
+        "critical_count": 0,
+        "keywords_boost": [],
+        "keywords_suppress": [],
+        "sources_boost": [],
+        "sources_suppress": [],
+        "sources_disabled": [],
+    })
+
+    disabled = topic_prefs.setdefault("sources_disabled", [])
+    if source_key not in disabled:
+        disabled.append(source_key)
+        topic_prefs["sources_disabled"] = disabled[-50:]
+
+    # If a source is explicitly disabled, remove existing positive/negative source bias.
+    topic_prefs["sources_boost"] = [s for s in topic_prefs.get("sources_boost", []) if (s or "").strip().lower() != source_key]
+    topic_prefs["sources_suppress"] = [s for s in topic_prefs.get("sources_suppress", []) if (s or "").strip().lower() != source_key]
 
     prefs[uid] = user_prefs
     save_preferences(prefs)
@@ -501,6 +536,12 @@ def _importance_score(article: Dict) -> float:
 
 def _should_skip_article(user_id: int, topic: str, article: Dict) -> bool:
     """Use accumulated feedback to suppress low-relevance content."""
+    tp = _get_user_topic_prefs(user_id, topic)
+    source_name = (article.get("source", "") or "").strip().lower()
+    disabled_sources = set((s or "").strip().lower() for s in tp.get("sources_disabled", []))
+    if source_name and source_name in disabled_sources:
+        return True
+
     if should_suppress_article(user_id, topic, article.get("title", "")):
         return True
 
@@ -509,7 +550,6 @@ def _should_skip_article(user_id: int, topic: str, article: Dict) -> bool:
         return True
 
     score = _article_relevance_score(user_id, topic, article)
-    tp = _get_user_topic_prefs(user_id, topic)
     slop_count = int(tp.get("slop_count", 0))
     more_count = int(tp.get("more_count", 0))
     critical = int(tp.get("critical_count", 0))
@@ -865,23 +905,43 @@ def _resolve_feeds_for_topic(topic: str) -> List[Tuple[str, str]]:
     return merged
 
 
-def _fetch_feed(url: str, timeout: int = 15) -> List[Dict]:
-    """Fetch and parse an RSS feed. Returns list of article dicts."""
+def _fetch_feed(url: str, timeout: int = 15) -> Tuple[List[Dict], Optional[str]]:
+    """Fetch and parse an RSS feed. Returns (articles, error_message)."""
     try:
         import feedparser
     except ImportError:
         home_log.log_sync("⚠️ feedparser not installed – news service cannot fetch RSS")
-        return []
+        return [], "feedparser not installed"
 
-    try:
-        resp = requests.get(url, timeout=timeout, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; DuBot/1.0; +https://github.com/dubot)"
-        })
-        resp.raise_for_status()
-        feed = feedparser.parse(resp.text)
-    except Exception as e:
-        home_log.log_sync(f"⚠️ RSS fetch error for {url}: {e}")
-        return []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; DuBot/1.0; +https://github.com/dubot)",
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+    }
+    last_error = None
+    feed = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, timeout=timeout, headers=headers)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.text)
+            if getattr(feed, "entries", None):
+                break
+            bozo_exc = getattr(feed, "bozo_exception", None)
+            if bozo_exc:
+                last_error = f"parse error: {bozo_exc}"
+            else:
+                last_error = "no entries in feed response"
+        except Exception as e:
+            last_error = str(e)
+        if attempt == 0:
+            time.sleep(1.0)
+
+    if not feed or not getattr(feed, "entries", None):
+        err = last_error or "unknown fetch/parse failure"
+        home_log.log_sync(f"⚠️ RSS fetch error for {url}: {err}")
+        return [], err
 
     articles = []
     for entry in feed.entries[:MAX_ARTICLES_PER_CYCLE]:
@@ -899,21 +959,24 @@ def _fetch_feed(url: str, timeout: int = 15) -> List[Dict]:
             "summary": summary[:1500],
             "published": published,
         })
-    return articles
+    return articles, None
 
 
-def fetch_articles_for_topic(topic: str) -> List[Dict]:
-    """Fetch articles from all feeds related to a topic. Each article has source_name added."""
+def fetch_articles_for_topic(topic: str) -> Tuple[List[Dict], List[Tuple[str, str]]]:
+    """Fetch topic articles and return (articles, failed_sources[(source, reason)])."""
     feeds = _resolve_feeds_for_topic(topic)
     all_articles = []
+    failed_sources: List[Tuple[str, str]] = []
     for url, source in feeds:
-        articles = _fetch_feed(url)
+        articles, err = _fetch_feed(url)
         for a in articles:
             a["source"] = source
             a["topic"] = topic
             a["hash"] = _hash_article(a["title"], a["link"])
         all_articles.extend(articles)
-    return all_articles
+        if err:
+            failed_sources.append((source, err))
+    return all_articles, failed_sources
 
 
 # ---------------------------------------------------------------------------
@@ -1218,6 +1281,21 @@ class NewsExpandedView(discord.ui.View):
         await interaction.response.send_message("Marked critical — similar updates will be prioritized.", ephemeral=True)
 
 
+class NewsSourceIssueView(discord.ui.View):
+    def __init__(self, topic: str, source_name: str):
+        super().__init__(timeout=86400)
+        self.topic = topic
+        self.source_name = source_name
+
+    @discord.ui.button(label="Disable source", emoji="🚫", style=discord.ButtonStyle.danger)
+    async def disable_source(self, interaction: discord.Interaction, button: discord.ui.Button):
+        disable_source_for_user(interaction.user.id, self.topic, self.source_name)
+        await interaction.response.edit_message(
+            content=f"🚫 Source disabled for `{self.topic}`: **{self.source_name}**",
+            view=None,
+        )
+
+
 class NewsCompactView(discord.ui.View):
     def __init__(self, article_hash: str, topic: str, compact_text: str, expanded_text: str):
         super().__init__(timeout=86400)
@@ -1326,6 +1404,7 @@ class NewsManager:
         self.telegram_bot = None
         self.platform = _runtime_platform()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self._source_error_last_notice: Dict[str, float] = {}
         _ensure_data_dir()
 
     def set_client(self, client: discord.Client) -> None:
@@ -1397,10 +1476,13 @@ class NewsManager:
         # Fetch articles per topic
         for topic, user_ids in all_topics.items():
             try:
-                articles = await asyncio.to_thread(fetch_articles_for_topic, topic)
+                articles, failed_sources = await asyncio.to_thread(fetch_articles_for_topic, topic)
             except Exception as e:
                 home_log.log_sync(f"⚠️ Fetch failed for topic '{topic}': {e}")
                 continue
+
+            if failed_sources:
+                await self._notify_source_errors(topic, sorted(user_ids), failed_sources)
 
             # Filter already seen
             new_articles = [a for a in articles if not _is_seen(a["hash"])]
@@ -1443,6 +1525,34 @@ class NewsManager:
 
                 # Small delay between users to avoid bursts
                 await asyncio.sleep(1)
+
+    async def _notify_source_errors(self, topic: str, user_ids: List[int], failed_sources: List[Tuple[str, str]]) -> None:
+        """Notify users of persistent source issues and offer one-click source disable."""
+        if self.platform != "discord" or not self.client or not failed_sources:
+            return
+
+        source_name, reason = failed_sources[0]
+        now_ts = time.time()
+        cooldown_seconds = 12 * 60 * 60
+
+        for uid in user_ids:
+            key = f"{uid}|{topic}|{source_name.lower()}"
+            last_ts = self._source_error_last_notice.get(key, 0.0)
+            if now_ts - last_ts < cooldown_seconds:
+                continue
+            self._source_error_last_notice[key] = now_ts
+
+            message = (
+                f"⚠️ I could not fetch updates from **{source_name}** for `{topic}`.\n"
+                f"Error: `{reason[:180]}`\n\n"
+                "If this keeps failing, you can disable this source for this topic."
+            )
+            view = NewsSourceIssueView(topic, source_name)
+            try:
+                user = await self.client.fetch_user(uid)
+                await user.send(content=message, view=view)
+            except Exception:
+                continue
 
     async def _deliver_article(self, user_id: int, article: Dict, topic: str) -> bool:
         """Deliver a single article to a user via DM. Respects quiet time and preferences."""
