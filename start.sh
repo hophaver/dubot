@@ -19,10 +19,26 @@ else
     echo "  ○ No venv found, using system Python"
 fi
 
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+else
+    echo "  ❌ Python is not available in PATH."
+    exit 1
+fi
+echo "  ✓ Python: $PYTHON_BIN"
+
 if [ -f "requirements.txt" ]; then
     echo "  Checking dependencies..."
-    pip install -q -r requirements.txt
-    echo "  ✓ Dependencies OK"
+    if "$PYTHON_BIN" -m pip install -q -r requirements.txt; then
+        echo "  ✓ Dependencies OK"
+    elif "$PYTHON_BIN" -m pip install -q --user -r requirements.txt; then
+        echo "  ✓ Dependencies OK (user site)"
+    else
+        echo "  ⚠ Dependency install failed; continuing startup."
+        echo "    Run manually: $PYTHON_BIN -m pip install -r requirements.txt"
+    fi
 fi
 
 if [ -f "$PID_FILE" ]; then
@@ -47,7 +63,7 @@ if [ -f "$PIDS_FILE" ]; then
 fi
 
 echo "=== Starting bot in background ==="
-PLATFORM_DECISION="$(python3 - <<'PY'
+PLATFORM_DECISION="$("$PYTHON_BIN" - <<'PY'
 import os
 try:
     from dotenv import load_dotenv
@@ -69,21 +85,48 @@ PY
 )"
 
 if [ "$PLATFORM_DECISION" = "both" ]; then
-    nohup env DUBOT_RUNTIME=discord python3 "main.py" >> "$LOG_FILE" 2>&1 &
+    nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$LOG_FILE" 2>&1 &
     DISCORD_PID=$!
-    nohup env DUBOT_RUNTIME=telegram python3 "main_telegram.py" >> "$LOG_FILE" 2>&1 &
+    nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$LOG_FILE" 2>&1 &
     TELEGRAM_PID=$!
     printf "discord:%s\ntelegram:%s\n" "$DISCORD_PID" "$TELEGRAM_PID" > "$PIDS_FILE"
-    echo "  ✓ Discord started (PID $DISCORD_PID)"
-    echo "  ✓ Telegram started (PID $TELEGRAM_PID)"
-    echo "  ✓ Multi-platform mode active. Logs: $LOG_FILE"
+    sleep 2
+    DISCORD_OK=0
+    TELEGRAM_OK=0
+    if kill -0 "$DISCORD_PID" 2>/dev/null; then DISCORD_OK=1; fi
+    if kill -0 "$TELEGRAM_PID" 2>/dev/null; then TELEGRAM_OK=1; fi
+    if [ "$DISCORD_OK" -eq 1 ] && [ "$TELEGRAM_OK" -eq 1 ]; then
+        echo "  ✓ Discord started (PID $DISCORD_PID)"
+        echo "  ✓ Telegram started (PID $TELEGRAM_PID)"
+        echo "  ✓ Multi-platform mode active. Logs: $LOG_FILE"
+    else
+        rm -f "$PIDS_FILE"
+        echo "  ❌ One or more bot runtimes failed to start. Check logs: $LOG_FILE"
+        exit 1
+    fi
 elif [ "$PLATFORM_DECISION" = "telegram" ]; then
-    nohup env DUBOT_RUNTIME=telegram python3 "main_telegram.py" >> "$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
-    echo "  ✓ Telegram started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+    nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$LOG_FILE" 2>&1 &
+    NEW_PID=$!
+    echo "$NEW_PID" > "$PID_FILE"
+    sleep 2
+    if kill -0 "$NEW_PID" 2>/dev/null; then
+        echo "  ✓ Telegram started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+    else
+        rm -f "$PID_FILE"
+        echo "  ❌ Telegram failed to start. Check logs: $LOG_FILE"
+        exit 1
+    fi
 else
-    nohup env DUBOT_RUNTIME=discord python3 "main.py" >> "$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
-    echo "  ✓ Discord started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+    nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$LOG_FILE" 2>&1 &
+    NEW_PID=$!
+    echo "$NEW_PID" > "$PID_FILE"
+    sleep 2
+    if kill -0 "$NEW_PID" 2>/dev/null; then
+        echo "  ✓ Discord started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
+    else
+        rm -f "$PID_FILE"
+        echo "  ❌ Discord failed to start. Check logs: $LOG_FILE"
+        exit 1
+    fi
 fi
 echo "  Run ./stop.sh to stop."

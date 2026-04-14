@@ -4,13 +4,22 @@ import os
 os.environ["DUBOT_RUNTIME"] = "discord"
 
 try:
-    from utils.bootstrap_deps import ensure_news_dependencies
+    from utils.bootstrap_deps import ensure_discord_dependencies, ensure_news_dependencies
+    ensure_discord_dependencies()
     ensure_news_dependencies()
 except Exception as e:
     print(f"⚠️ bootstrap_deps failed (non-fatal): {e}", flush=True)
 
 import asyncio
-import discord
+try:
+    import discord
+except ModuleNotFoundError as e:
+    print("❌ Missing dependency: discord.py is not installed.", flush=True)
+    print("Try:", flush=True)
+    print(f"  {sys.executable} -m pip install -r requirements.txt", flush=True)
+    print("or:", flush=True)
+    print(f"  {sys.executable} -m pip install discord.py>=2.3.0", flush=True)
+    sys.exit(1)
 import signal
 import time
 import random
