@@ -831,6 +831,36 @@ def _to_openrouter_messages(messages: list) -> list:
 
 
 async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
+    def _read_raw_dotenv(path: str = ".env") -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        if not os.path.isfile(path):
+            return out
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.lower().startswith("export "):
+                        line = line[7:].strip()
+                    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+                    if not m:
+                        continue
+                    key, val = m.group(1), m.group(2).strip()
+                    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                        val = val[1:-1]
+                    else:
+                        if " #" in val:
+                            val = val.split(" #", 1)[0].rstrip()
+                    val = val.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+                    val = "".join(ch for ch in val if ch.isprintable())
+                    val = re.sub(r"\s+", "", val)
+                    if val:
+                        out[key] = val
+        except Exception:
+            return {}
+        return out
+
     def _mask_key(k: str) -> str:
         text = str(k or "")
         if len(text) <= 10:
@@ -839,11 +869,18 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
 
     def _candidate_openrouter_keys() -> List[str]:
         keys: List[str] = []
+        dotenv_raw = _read_raw_dotenv(".env")
         for k in [
             OPENROUTER_CHAT_API_KEY,
             getattr(integrations, "OPENROUTER_API_KEY", ""),
             getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", ""),
             getattr(integrations, "OPENROUTER_LEGACY_API_KEY", ""),
+            os.environ.get("OPENROUTER_CHAT_API_KEY", ""),
+            os.environ.get("OPENROUTER_API_KEY", ""),
+            os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
+            dotenv_raw.get("OPENROUTER_CHAT_API_KEY", ""),
+            dotenv_raw.get("OPENROUTER_API_KEY", ""),
+            dotenv_raw.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
         ]:
             val = str(k or "").strip()
             if val and val not in keys:
@@ -893,6 +930,8 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/hophaver/dubot",
+            "X-Title": "dubot",
         }
         try:
             response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
