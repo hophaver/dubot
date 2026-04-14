@@ -7,6 +7,23 @@ PID_FILE="${SCRIPT_DIR}/.bot.pid"
 PIDS_FILE="${SCRIPT_DIR}/.bot.pids"
 LOG_FILE="${SCRIPT_DIR}/bot.log"
 
+print_recent_log() {
+    if [ -f "$LOG_FILE" ]; then
+        echo "  --- Last log lines ---"
+        "$PYTHON_BIN" - <<'PY'
+import os
+path = os.environ.get("DUBOT_LOG_PATH", "")
+if not path or not os.path.isfile(path):
+    raise SystemExit(0)
+with open(path, "r", errors="ignore") as f:
+    lines = f.readlines()[-40:]
+for line in lines:
+    print("  " + line.rstrip())
+PY
+        echo "  --- End log ---"
+    fi
+}
+
 echo "=== Startup checks ==="
 
 if [ -d "venv" ]; then
@@ -80,9 +97,15 @@ elif discord and telegram:
 elif telegram:
     print("telegram")
 else:
-    print("discord")
+    print("none")
 PY
 )"
+
+if [ "$PLATFORM_DECISION" = "none" ]; then
+    echo "  ❌ No bot token found."
+    echo "  Set DISCORD_BOT_TOKEN and/or TELEGRAM_BOT_TOKEN in .env, then retry."
+    exit 1
+fi
 
 if [ "$PLATFORM_DECISION" = "both" ]; then
     nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$LOG_FILE" 2>&1 &
@@ -102,6 +125,7 @@ if [ "$PLATFORM_DECISION" = "both" ]; then
     else
         rm -f "$PIDS_FILE"
         echo "  ❌ One or more bot runtimes failed to start. Check logs: $LOG_FILE"
+        DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
         exit 1
     fi
 elif [ "$PLATFORM_DECISION" = "telegram" ]; then
@@ -114,6 +138,7 @@ elif [ "$PLATFORM_DECISION" = "telegram" ]; then
     else
         rm -f "$PID_FILE"
         echo "  ❌ Telegram failed to start. Check logs: $LOG_FILE"
+        DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
         exit 1
     fi
 else
@@ -126,6 +151,7 @@ else
     else
         rm -f "$PID_FILE"
         echo "  ❌ Discord failed to start. Check logs: $LOG_FILE"
+        DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
         exit 1
     fi
 fi
