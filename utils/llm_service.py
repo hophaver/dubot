@@ -832,67 +832,7 @@ def _to_openrouter_messages(messages: list) -> list:
 
 
 async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
-    def _read_raw_dotenv(path: str = ".env") -> Dict[str, str]:
-        out: Dict[str, str] = {}
-        env_path = path
-        if not os.path.isabs(env_path):
-            env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), path)
-        if not os.path.isfile(env_path):
-            return out
-        try:
-            with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
-                for raw in f:
-                    line = raw.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if line.lower().startswith("export "):
-                        line = line[7:].strip()
-                    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
-                    if not m:
-                        continue
-                    key, val = m.group(1), m.group(2).strip()
-                    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-                        val = val[1:-1]
-                    else:
-                        if " #" in val:
-                            val = val.split(" #", 1)[0].rstrip()
-                    val = val.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
-                    val = "".join(ch for ch in val if ch.isprintable())
-                    val = re.sub(r"\s+", "", val)
-                    if val:
-                        out[key] = val
-        except Exception:
-            return {}
-        return out
-
-    def _mask_key(k: str) -> str:
-        text = str(k or "")
-        if len(text) <= 10:
-            return "***"
-        return f"{text[:6]}...{text[-4:]}"
-
-    def _candidate_openrouter_keys() -> List[str]:
-        keys: List[str] = []
-        dotenv_raw = _read_raw_dotenv(".env")
-        for k in [
-            OPENROUTER_API_KEY,
-            os.environ.get("OPENROUTER_API_KEY", ""),
-            os.environ.get("OPENROUTER_KEY", ""),
-            os.environ.get("OPENROUTER_APIKEY", ""),
-            dotenv_raw.get("OPENROUTER_API_KEY", ""),
-            dotenv_raw.get("OPENROUTER_KEY", ""),
-            dotenv_raw.get("OPENROUTER_APIKEY", ""),
-            # Optional compatibility fallbacks only after OPENROUTER_API_KEY path.
-            getattr(integrations, "OPENROUTER_CHAT_API_KEY", ""),
-            dotenv_raw.get("OPENROUTER_CHAT_API_KEY", ""),
-        ]:
-            val = str(k or "").strip()
-            if val and val not in keys:
-                keys.append(val)
-        return keys
-
-    candidate_keys = _candidate_openrouter_keys()
-    if not candidate_keys:
+    if not OPENROUTER_API_KEY:
         return "Error: OPENROUTER_API_KEY is not configured."
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
@@ -902,6 +842,11 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
     }
     if max_tokens is not None:
         payload["max_tokens"] = int(max(64, min(1024, max_tokens)))
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
     def _extract_openrouter_error(status_code: int, body: dict, raw_text: str) -> str:
         error_obj = body.get("error") if isinstance(body, dict) else {}
         if not isinstance(error_obj, dict):
@@ -910,77 +855,56 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         metadata = error_obj.get("metadata") if isinstance(error_obj.get("metadata"), dict) else {}
         raw_meta = str(metadata.get("raw", "")).strip()
         detail = raw_meta or message or raw_text
-
         if status_code == 429:
             return (
                 f"Rate limited for `{model_name}` on OpenRouter. "
                 "Retry in a moment, switch to another cloud model, or use a local model."
             )
         if status_code == 401:
-            return (
-                "OpenRouter authentication failed. "
-                "Check OPENROUTER_API_KEY."
-                f"{(' Details: ' + detail[:180]) if detail else ''}"
-            )
+            return f"OpenRouter authentication failed. Check OPENROUTER_API_KEY.{(' Details: ' + detail[:180]) if detail else ''}"
         if status_code == 402:
             return "OpenRouter credits required for this request. Top up credits or choose another model."
         if detail:
             return f"OpenRouter request failed ({status_code}): {detail[:220]}"
         return f"OpenRouter request failed ({status_code})."
 
-    last_auth_error = ""
-    for idx, key in enumerate(candidate_keys):
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
+    try:
+        response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+        body = {}
         try:
-            response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+            body = response.json()
+        except ValueError:
             body = {}
+
+        if response.status_code == 429:
+            await asyncio.sleep(2)
+            response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
             try:
                 body = response.json()
             except ValueError:
                 body = {}
 
-            # One automatic retry for temporary rate limits
-            if response.status_code == 429:
-                await asyncio.sleep(2)
-                response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
-                try:
-                    body = response.json()
-                except ValueError:
-                    body = {}
+        if response.status_code == 401:
+            err = _extract_openrouter_error(response.status_code, body, response.text or "")
+            home_log.log_sync(f"⚠️ OpenRouter 401 for model `{model_name}`: {err}")
+            return f"Error: {err}"
 
-            if response.status_code == 401:
-                last_auth_error = _extract_openrouter_error(response.status_code, body, response.text or "")
-                home_log.log_sync(
-                    f"⚠️ OpenRouter 401 for model `{model_name}` with key {_mask_key(key)} "
-                    f"(candidate {idx + 1}/{len(candidate_keys)}): {last_auth_error}"
-                )
-                # Retry with next candidate key if available.
-                if idx < len(candidate_keys) - 1:
-                    continue
-                return f"Error: {last_auth_error}"
+        if response.status_code != 200:
+            return f"Error: {_extract_openrouter_error(response.status_code, body, response.text or '')}"
 
-            if response.status_code != 200:
-                return f"Error: {_extract_openrouter_error(response.status_code, body, response.text or '')}"
-
-            choices = body.get("choices") or []
-            if not choices:
-                return "Error: No choices returned by OpenRouter."
-            message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-            content = message.get("content", "")
-            if isinstance(content, list):
-                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-                content = "".join(text_parts)
-            return str(content).strip() or "No response."
-        except requests.exceptions.Timeout:
-            return "Error: Request timed out"
-        except Exception as e:
-            return f"Error: {str(e)}"
-    if last_auth_error:
-        return f"Error: {last_auth_error}"
-    return "Error: OpenRouter request failed."
+        choices = body.get("choices") or []
+        if not choices:
+            return "Error: No choices returned by OpenRouter."
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = message.get("content", "")
+        if isinstance(content, list):
+            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+            content = "".join(text_parts)
+        return str(content).strip() or "No response."
+    except requests.exceptions.Timeout:
+        return "Error: Request timed out"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 async def _try_models_with_fallback(requested_model, messages, images=False, provider="local", request_options: Optional[Dict[str, Any]] = None):
