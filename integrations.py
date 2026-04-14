@@ -35,6 +35,10 @@ def _read_dotenv_values(path: str = ".env"):
                 key, val = m.group(1), m.group(2).strip()
                 if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
                     val = val[1:-1]
+                else:
+                    # Strip inline comments in unquoted dotenv values: KEY=value # comment
+                    if " #" in val:
+                        val = val.split(" #", 1)[0].rstrip()
                 values[key] = val
     except Exception:
         return {}
@@ -46,6 +50,8 @@ _DOTENV_VALUES = _read_dotenv_values()
 
 def _normalize_secret(value: str) -> str:
     v = str(value or "").strip().strip('"').strip("'")
+    # Remove all whitespace characters that can sneak in from copy/paste.
+    v = re.sub(r"\s+", "", v)
     if v.lower() in {"none", "null"}:
         return ""
     upper = v.upper()

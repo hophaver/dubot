@@ -874,6 +874,7 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
                 "OpenRouter authentication failed. "
                 "Check OPENROUTER_CHAT_API_KEY (chat key). "
                 "If /bal works but chat fails, you likely set only a management key."
+                f"{(' Details: ' + detail[:180]) if detail else ''}"
             )
         if status_code == 402:
             return "OpenRouter credits required for this request. Top up credits or choose another model."
