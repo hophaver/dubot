@@ -5,6 +5,7 @@ import requests
 import threading
 import time
 import sys
+import re
 
 # Try to load from .env file
 try:
@@ -16,17 +17,65 @@ except ImportError:
     pass
 
 # Bot credentials and API keys
-DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '').strip()
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
-HA_URL = os.environ.get('HA_URL', 'http://192.168.0.149:8123')
-HA_ACCESS_TOKEN = os.environ.get('HA_ACCESS_TOKEN', '')
-OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+def _read_dotenv_values(path: str = ".env"):
+    values = {}
+    if not os.path.isfile(path):
+        return values
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[7:].strip()
+                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+                if not m:
+                    continue
+                key, val = m.group(1), m.group(2).strip()
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                values[key] = val
+    except Exception:
+        return {}
+    return values
+
+
+_DOTENV_VALUES = _read_dotenv_values()
+
+
+def _normalize_secret(value: str) -> str:
+    v = str(value or "").strip().strip('"').strip("'")
+    if v.lower() in {"none", "null"}:
+        return ""
+    return v
+
+
+def _get_secret(*keys: str) -> str:
+    # Prefer .env values on host to avoid stale shell env values.
+    for key in keys:
+        if key in _DOTENV_VALUES:
+            v = _normalize_secret(_DOTENV_VALUES.get(key, ""))
+            if v:
+                return v
+    for key in keys:
+        v = _normalize_secret(os.environ.get(key, ""))
+        if v:
+            return v
+    return ""
+
+
+DISCORD_BOT_TOKEN = _get_secret("DISCORD_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
+HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or 'http://192.168.0.149:8123'
+HA_ACCESS_TOKEN = _get_secret("HA_ACCESS_TOKEN")
+OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.environ.get("OLLAMA_URL", "")) or 'http://localhost:11434'
 # OpenRouter management key (for /bal credits); optional
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '').strip()
+OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "OPENROUTER_KEY", "OPENROUTER_APIKEY")
 # Cursor user key (preferred var for /cursor spend check attempts)
-CURSOR_USER_API_KEY = os.environ.get('CURSOR_USER_API_KEY', '').strip()
+CURSOR_USER_API_KEY = _get_secret("CURSOR_USER_API_KEY")
 # Backward-compatible alias for older env setups
-CURSOR_API_KEY = os.environ.get('CURSOR_API_KEY', '').strip()
+CURSOR_API_KEY = _get_secret("CURSOR_API_KEY")
 
 # Permanent admin by user ID
 PERMANENT_ADMIN = 266952987128233985
