@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import shlex
 import re
-from typing import Optional, Any, get_args, get_origin
+from typing import Optional, Any, Dict, get_args, get_origin
 from discord import app_commands
 from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
