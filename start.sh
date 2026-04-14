@@ -12,13 +12,17 @@ print_recent_log() {
         echo "  --- Last log lines ---"
         "$PYTHON_BIN" - <<'PY'
 import os
+import re
 path = os.environ.get("DUBOT_LOG_PATH", "")
 if not path or not os.path.isfile(path):
     raise SystemExit(0)
 with open(path, "r", errors="ignore") as f:
     lines = f.readlines()[-40:]
 for line in lines:
-    print("  " + line.rstrip())
+    text = line.rstrip("\n")
+    # Redact Telegram/Discord-style token patterns in diagnostic output.
+    text = re.sub(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b", "[REDACTED_TOKEN]", text)
+    print("  " + text.rstrip())
 PY
         echo "  --- End log ---"
     fi
@@ -140,19 +144,33 @@ if [ "$PLATFORM_DECISION" = "both" ]; then
     DISCORD_PID=$!
     nohup env DUBOT_RUNTIME=telegram "$PYTHON_BIN" "main_telegram.py" >> "$LOG_FILE" 2>&1 &
     TELEGRAM_PID=$!
-    printf "discord:%s\ntelegram:%s\n" "$DISCORD_PID" "$TELEGRAM_PID" > "$PIDS_FILE"
     sleep 2
     DISCORD_OK=0
     TELEGRAM_OK=0
     if kill -0 "$DISCORD_PID" 2>/dev/null; then DISCORD_OK=1; fi
     if kill -0 "$TELEGRAM_PID" 2>/dev/null; then TELEGRAM_OK=1; fi
-    if [ "$DISCORD_OK" -eq 1 ] && [ "$TELEGRAM_OK" -eq 1 ]; then
-        echo "  ✓ Discord started (PID $DISCORD_PID)"
-        echo "  ✓ Telegram started (PID $TELEGRAM_PID)"
-        echo "  ✓ Multi-platform mode active. Logs: $LOG_FILE"
+
+    if [ "$DISCORD_OK" -eq 1 ] || [ "$TELEGRAM_OK" -eq 1 ]; then
+        : > "$PIDS_FILE"
+        if [ "$DISCORD_OK" -eq 1 ]; then
+            printf "discord:%s\n" "$DISCORD_PID" >> "$PIDS_FILE"
+            echo "  ✓ Discord started (PID $DISCORD_PID)"
+        else
+            echo "  ⚠ Discord failed to start."
+        fi
+        if [ "$TELEGRAM_OK" -eq 1 ]; then
+            printf "telegram:%s\n" "$TELEGRAM_PID" >> "$PIDS_FILE"
+            echo "  ✓ Telegram started (PID $TELEGRAM_PID)"
+        else
+            echo "  ⚠ Telegram failed to start."
+        fi
+        echo "  ✓ Startup completed with available runtime(s). Logs: $LOG_FILE"
+        if [ "$DISCORD_OK" -eq 0 ] || [ "$TELEGRAM_OK" -eq 0 ]; then
+            DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
+        fi
     else
         rm -f "$PIDS_FILE"
-        echo "  ❌ One or more bot runtimes failed to start. Check logs: $LOG_FILE"
+        echo "  ❌ Both Discord and Telegram failed to start. Check logs: $LOG_FILE"
         DUBOT_LOG_PATH="$LOG_FILE" print_recent_log
         exit 1
     fi
