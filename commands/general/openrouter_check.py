@@ -55,14 +55,19 @@ def _candidate_keys() -> List[Tuple[str, str]]:
     out: List[Tuple[str, str]] = []
     candidates = [
         ("integrations.OPENROUTER_CHAT_API_KEY", getattr(integrations, "OPENROUTER_CHAT_API_KEY", "")),
-        ("integrations.OPENROUTER_MANAGEMENT_API_KEY", getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", "")),
         ("integrations.OPENROUTER_API_KEY", getattr(integrations, "OPENROUTER_API_KEY", "")),
+        ("integrations.OPENROUTER_LEGACY_API_KEY", getattr(integrations, "OPENROUTER_LEGACY_API_KEY", "")),
         ("env.OPENROUTER_CHAT_API_KEY", os.environ.get("OPENROUTER_CHAT_API_KEY", "")),
-        ("env.OPENROUTER_MANAGEMENT_API_KEY", os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", "")),
         ("env.OPENROUTER_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
+        ("env.OPENROUTER_KEY", os.environ.get("OPENROUTER_KEY", "")),
+        ("env.OPENROUTER_APIKEY", os.environ.get("OPENROUTER_APIKEY", "")),
         ("dotenv.OPENROUTER_CHAT_API_KEY", raw_env.get("OPENROUTER_CHAT_API_KEY", "")),
-        ("dotenv.OPENROUTER_MANAGEMENT_API_KEY", raw_env.get("OPENROUTER_MANAGEMENT_API_KEY", "")),
         ("dotenv.OPENROUTER_API_KEY", raw_env.get("OPENROUTER_API_KEY", "")),
+        ("dotenv.OPENROUTER_KEY", raw_env.get("OPENROUTER_KEY", "")),
+        ("dotenv.OPENROUTER_APIKEY", raw_env.get("OPENROUTER_APIKEY", "")),
+        ("integrations.OPENROUTER_MANAGEMENT_API_KEY", getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", "")),
+        ("env.OPENROUTER_MANAGEMENT_API_KEY", os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", "")),
+        ("dotenv.OPENROUTER_MANAGEMENT_API_KEY", raw_env.get("OPENROUTER_MANAGEMENT_API_KEY", "")),
     ]
     for source, key in candidates:
         k = str(key or "").strip()

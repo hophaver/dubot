@@ -104,8 +104,9 @@ OPENROUTER_LEGACY_API_KEY = _get_secret(
 )
 OPENROUTER_CHAT_API_KEY = _get_secret("OPENROUTER_CHAT_API_KEY") or OPENROUTER_LEGACY_API_KEY
 OPENROUTER_MANAGEMENT_API_KEY = _get_secret("OPENROUTER_MANAGEMENT_API_KEY") or OPENROUTER_LEGACY_API_KEY
-# Backward-compatible symbol used by older imports (legacy first).
-OPENROUTER_API_KEY = OPENROUTER_LEGACY_API_KEY or OPENROUTER_CHAT_API_KEY
+# Backward-compatible symbol used by older imports (chat first).
+# Older modules that import OPENROUTER_API_KEY typically expect a chat-capable key.
+OPENROUTER_API_KEY = OPENROUTER_CHAT_API_KEY or OPENROUTER_LEGACY_API_KEY
 # Cursor user key (preferred var for /cursor spend check attempts)
 CURSOR_USER_API_KEY = _get_secret("CURSOR_USER_API_KEY")
 # Backward-compatible alias for older env setups

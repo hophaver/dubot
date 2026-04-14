@@ -874,13 +874,18 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         for k in [
             OPENROUTER_CHAT_API_KEY,
             getattr(integrations, "OPENROUTER_API_KEY", ""),
-            getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", ""),
             getattr(integrations, "OPENROUTER_LEGACY_API_KEY", ""),
             os.environ.get("OPENROUTER_CHAT_API_KEY", ""),
             os.environ.get("OPENROUTER_API_KEY", ""),
-            os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
+            os.environ.get("OPENROUTER_KEY", ""),
+            os.environ.get("OPENROUTER_APIKEY", ""),
             dotenv_raw.get("OPENROUTER_CHAT_API_KEY", ""),
             dotenv_raw.get("OPENROUTER_API_KEY", ""),
+            dotenv_raw.get("OPENROUTER_KEY", ""),
+            dotenv_raw.get("OPENROUTER_APIKEY", ""),
+            # Keep management key candidates as a final fallback for compatibility.
+            getattr(integrations, "OPENROUTER_MANAGEMENT_API_KEY", ""),
+            os.environ.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
             dotenv_raw.get("OPENROUTER_MANAGEMENT_API_KEY", ""),
         ]:
             val = str(k or "").strip()
