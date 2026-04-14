@@ -101,8 +101,10 @@ class HomeAssistantManager:
         from models import model_manager
 
         p = (HIMAS_PARSE_PROVIDER or "auto").strip().lower()
-        if p not in ("auto", "ollama", "openrouter"):
+        if p not in ("auto", "ollama", "openrouter", "local"):
             p = "auto"
+        if p == "local":
+            p = "ollama"
         fixed = (HIMAS_PARSE_MODEL or "").strip()
 
         if p == "openrouter":
@@ -119,9 +121,9 @@ class HomeAssistantManager:
                 return "ollama", fixed
             return "ollama", model_manager.get_last_local_model(user_id, refresh_local=True)
 
-        # auto
+        # auto: slash often means OpenRouter (openai/gpt-4o-mini), but Ollama can use hf.co/... IDs.
         if fixed:
-            if "/" in fixed:
+            if "/" in fixed and not fixed.lower().startswith("hf.co/"):
                 return "openrouter", fixed
             return "ollama", fixed
         info = model_manager.get_user_model_info(user_id)
