@@ -52,6 +52,7 @@ initialize_command_database()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
+intents.reactions = True
 
 class BotClient(discord.Client):
     def __init__(self):
@@ -436,6 +437,17 @@ async def on_message(message):
     # Shitpost fallback: only when no command/chat path handled the message.
     if await handle_shitpost(client, message):
         return
+
+
+@client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    """Global admin: configured emoji deletes messages (guild: any; DM: bot-only)."""
+    try:
+        from services.remover_service import handle_raw_reaction_add
+
+        await handle_raw_reaction_add(client, payload)
+    except Exception as exc:
+        await home_log.send_to_home(f"⚠️ on_raw_reaction_add: {str(exc)[:220]}")
 
 
 async def _handle_auto_conversation(message: discord.Message) -> None:

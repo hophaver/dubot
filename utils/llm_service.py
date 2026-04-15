@@ -263,6 +263,11 @@ def initialize_command_database():
         "Admin",
     )
     command_db.add_command("profanity", "View/edit profanity list used by clone filtering (permanent admin only)", "Admin")
+    command_db.add_command(
+        "remover",
+        "Set emoji so permanent admin can react-delete messages (servers: any; DMs: bot messages only)",
+        "Admin",
+    )
     command_db.add_command("ollama-on", "Start Ollama server (admin only)", "Admin")
     command_db.add_command("ollama-off", "Stop Ollama server (admin only)", "Admin")
 
@@ -514,7 +519,7 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
         "- Use only command names from schema.\n"
         "- Fill only known argument names for that command.\n"
         "- Keep arguments as plain strings/numbers/booleans.\n"
-        "- risk must be dangerous for restart/kill/update/purge/clone/run/profanity/setwake/sethome/setstatus/whitelist.\n\n"
+        "- risk must be dangerous for restart/kill/update/purge/clone/run/profanity/remover/setwake/sethome/setstatus/whitelist.\n\n"
         f"Command schema:\n{schema_json}\n\n"
         f"User message:\n{message_text}"
     )
