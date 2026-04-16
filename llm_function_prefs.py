@@ -19,6 +19,7 @@ LLM_FUNCTION_KEYS: List[str] = [
     "compare_files",
     "translate",
     "shitpost",
+    "image_generation",
 ]
 
 LLM_FUNCTION_LABELS: Dict[str, str] = {
@@ -29,6 +30,7 @@ LLM_FUNCTION_LABELS: Dict[str, str] = {
     "compare_files": "Compare files",
     "translate": "Translate",
     "shitpost": "Shitpost (!word / .word)",
+    "image_generation": "Image generation (/imagine; OpenRouter only)",
 }
 
 

@@ -207,7 +207,7 @@ def register(client: discord.Client):
         cloud_models = get_news_recent_cloud_models()
         if not local_models and not cloud_models:
             await interaction.response.send_message(
-                "No models available in menu yet. Install a local model with `/pull-model local model_name` "
+                "No models available in menu yet. Install a local model with `/pull-model` → type **local (Ollama)** "
                 "or set a cloud model directly with `/news-model cloud model_name`.",
                 ephemeral=True,
             )

@@ -13,6 +13,7 @@ from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
 from llm_function_prefs import get_function_persona_name
+from utils.openrouter_image import generate_openrouter_image, probe_openrouter_image_model
 from adaptive_dm import adaptive_dm_manager, ADAPTIVE_DM_BASE_PERSONA, ADAPTIVE_DM_SYSTEM_SUFFIX
 from utils import home_log
 from utils import reliability_telemetry
@@ -226,6 +227,11 @@ def initialize_command_database():
         "Tune adaptive profile from a server channel (same as DMs; your messages only; URLs ignored for tuning)",
         "General",
     )
+    command_db.add_command(
+        "imagine",
+        "Generate an image via OpenRouter (model: /llm-settings → Image generation; add model: /pull-model)",
+        "General",
+    )
     command_db.add_command("fast-reply", "DM only: temporarily enable faster, shorter replies", "General")
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
@@ -262,10 +268,14 @@ def initialize_command_database():
     # Model Commands
     command_db.add_command(
         "llm-settings",
-        "Per-function model (local/cloud) and persona; default chat model; adaptive DM unchanged",
+        "Per-function model (local/cloud) and persona; default chat; OpenRouter image model for /imagine",
         "Model",
     )
-    command_db.add_command("pull-model", "Install local model or validate cloud model", "Model")
+    command_db.add_command(
+        "pull-model",
+        "Install local model, validate cloud chat model, or validate OpenRouter image-generation model",
+        "Model",
+    )
     
     # Download Commands
     command_db.add_command("download", "Download media from link or last message and send to chat", "Download")
@@ -547,6 +557,10 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
         "should_execute (bool), command (string), arguments (object), reason (string), risk (safe|risky|dangerous).\n"
         "Rules:\n"
         "- should_execute=false when the message is general chat, question, or unclear.\n"
+        "- For command `imagine`: should_execute=true ONLY when the user explicitly wants a generated image "
+        "(e.g. draw/picture/image/diagram/mockup/wireframe/visual/reference render). "
+        "If they only say \"imagine\" figuratively or intent is ambiguous, should_execute=false.\n"
+        "- Map the user's image description to the `idea` argument for `imagine`.\n"
         "- Use only command names from schema.\n"
         "- Fill only known argument names for that command.\n"
         "- Keep arguments as plain strings/numbers/booleans.\n"
@@ -1176,11 +1190,85 @@ async def validate_and_set_model(user_id, provider, model_name):
 
 
 async def validate_and_set_function_model(user_id, function_key: str, provider: str, model_name: str) -> Tuple[bool, str]:
+    if str(function_key) == "image_generation":
+        if (provider or "").strip().lower() != "cloud":
+            return False, "Image generation uses OpenRouter only — pick a **cloud** model id."
+        ok, msg = await probe_openrouter_image_model(str(model_name).strip())
+        if ok:
+            model_manager.set_function_model(user_id, "image_generation", str(model_name).strip(), provider="cloud")
+            return True, f"Saved image model: `{model_name}` (cloud)."
+        return False, msg
     ok, msg = await probe_model(provider, model_name)
     if ok:
         model_manager.set_function_model(user_id, function_key, model_name, provider=provider)
         return True, f"Saved for this function: `{model_name}` ({provider})."
     return False, msg
+
+
+async def validate_and_set_image_generation_model(user_id: int, model_name: str) -> Tuple[bool, str]:
+    """Validate an OpenRouter image-generation model and save under function image_generation."""
+    name = str(model_name or "").strip()
+    if not name:
+        return False, "Model name is empty."
+    ok, msg = await probe_openrouter_image_model(name)
+    if ok:
+        model_manager.set_function_model(user_id, "image_generation", name, provider="cloud")
+        return True, f"Image model `{name}` validated and saved. Use **`/llm-settings`** if you need to change it later."
+    return False, msg
+
+
+async def commentary_for_generated_image(
+    user_id: int,
+    user_request: str,
+    model_label: str,
+    image_bytes: bytes,
+    mime: str,
+) -> str:
+    """
+    Short assistant text about the generated image vs user intent (vision + chat model).
+    Returns empty string on failure or when model declines.
+    """
+    if not image_bytes:
+        return ""
+    eff = model_manager.get_effective_model_for_function(user_id, "chat")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
+    try:
+        import base64 as _b64
+
+        b64 = _b64.b64encode(image_bytes).decode("ascii")
+    except Exception:
+        return ""
+    sys = (
+        "You are helping in Discord after an AI image was just generated for the user.\n"
+        "The user's request (may be truncated):\n"
+        f"{(user_request or '')[:1200]}\n\n"
+        "You can see the generated image attached as the user message image.\n"
+        "Write a brief follow-up (usually 1-4 short sentences).\n"
+        "If the image matches the request well and there are no notable issues, you may answer with exactly: OK\n"
+        "If the image is off, misleading, low quality, wrong subject, wrong text in image, artifacts, or safety-filtered oddly, explain briefly and suggest a tighter prompt or different angle.\n"
+        "Do not be verbose. No bullet lists unless the user asked for critique. Plain text only."
+    )
+    user_text = f"Model used for generation: {model_label}\nComment on this result vs what I asked for."
+    messages = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": user_text, "images": [b64]},
+    ]
+    try:
+        _, text = await _try_models_with_fallback(
+            requested_model,
+            messages,
+            images=True,
+            provider=provider,
+        )
+    except Exception:
+        return ""
+    text = _clean_response(text or "")
+    if not text or text.startswith("Error:") or text.startswith("⚠️"):
+        return ""
+    if text.strip().upper() in {"OK", "OK.", "OK!"}:
+        return ""
+    return text.strip()
 
 async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: bytes, user_prompt: str = "", username: str = "", vision_mode: str = "concise", return_only_text: bool = False) -> str:
     """vision_mode: concise (short), examine (detailed), interrogate (very short). return_only_text: if True, return only extracted/response text (no header)."""

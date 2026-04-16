@@ -177,12 +177,36 @@ class ModelManager:
 
     def get_effective_model_for_function(self, user_id, function_key: str) -> Dict[str, str]:
         """Provider + model for a logical LLM function (per-function override or user default)."""
+        if str(function_key) == "image_generation":
+            ov = self.get_function_model_override(user_id, "image_generation")
+            if ov:
+                p, m = ov
+                if str(p).lower() == "cloud" and str(m or "").strip():
+                    return {"provider": "cloud", "model": str(m).strip()}
+            return {"provider": "cloud", "model": ""}
         base = self.get_user_model_info(user_id)
         ov = self.get_function_model_override(user_id, function_key)
         if ov:
             p, m = ov
             return {"provider": p, "model": m}
         return {"provider": base["provider"], "model": base["model"]}
+
+    def list_known_image_generation_cloud_models(self) -> List[str]:
+        """Unique OpenRouter image model ids saved on any user (for /llm-settings menu)."""
+        seen: List[str] = []
+        for entry in self.user_models.values():
+            if not isinstance(entry, dict):
+                continue
+            fm = self._normalize_function_models(entry.get("function_models"))
+            slot = fm.get("image_generation")
+            if not slot:
+                continue
+            if str(slot.get("provider", "")).lower() != "cloud":
+                continue
+            m = str(slot.get("model", "") or "").strip()
+            if m and m not in seen:
+                seen.append(m)
+        return seen
 
     def get_recent_cloud_models(self, user_id: int) -> List[str]:
         info = self.get_user_model_info(user_id)

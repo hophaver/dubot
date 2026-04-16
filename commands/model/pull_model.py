@@ -5,7 +5,7 @@ from discord import app_commands
 from whitelist import is_admin
 from integrations import OLLAMA_URL
 from models import model_manager
-from utils.llm_service import validate_and_set_model
+from utils.llm_service import validate_and_set_model, validate_and_set_image_generation_model
 
 
 def _status_line(data: dict) -> str:
@@ -20,18 +20,22 @@ def _status_line(data: dict) -> str:
 
 
 def register(client: discord.Client):
-    @client.tree.command(name="pull-model", description="Install local model or validate cloud model")
-    @app_commands.describe(
-        provider="Model provider: local (Ollama pull) or cloud (OpenRouter validate)",
-        model_name="Model name (e.g. llama3.2:3b, llava, openai/gpt-4o-mini)",
+    @client.tree.command(
+        name="pull-model",
+        description="Install local model, validate cloud chat model, or validate OpenRouter image model",
     )
-    @app_commands.choices(provider=[
+    @app_commands.describe(
+        type="Model type: local pull, cloud chat validate, or OpenRouter image-generation validate",
+        model_name="Model name (e.g. llama3.2:3b, llava, openai/gpt-4o-mini, google/gemini-2.5-flash-image)",
+    )
+    @app_commands.choices(type=[
         app_commands.Choice(name="local (Ollama)", value="local"),
         app_commands.Choice(name="cloud (OpenRouter)", value="cloud"),
+        app_commands.Choice(name="image generation (OpenRouter)", value="image_generation"),
     ])
     async def pull_model(
         interaction: discord.Interaction,
-        provider: app_commands.Choice[str],
+        type: app_commands.Choice[str],
         model_name: str,
     ):
         if not is_admin(interaction.user.id):
@@ -40,7 +44,19 @@ def register(client: discord.Client):
         await interaction.response.defer()
         try:
             model = model_name.strip()
-            if provider.value == "cloud":
+            if type.value == "image_generation":
+                success, msg = await validate_and_set_image_generation_model(interaction.user.id, model)
+                if success:
+                    await interaction.edit_original_response(
+                        content=(
+                            f"✅ {msg}\n"
+                            "Users can generate with **`/imagine`**. Per-user override: **`/llm-settings`** → **Image generation**."
+                        )
+                    )
+                else:
+                    await interaction.edit_original_response(content=f"❌ {msg}")
+                return
+            if type.value == "cloud":
                 success, msg = await validate_and_set_model(interaction.user.id, "cloud", model)
                 if success:
                     local_runtime = model_manager.get_last_local_model(interaction.user.id, refresh_local=True)
@@ -55,6 +71,7 @@ def register(client: discord.Client):
                     await interaction.edit_original_response(content=f"❌ {msg}")
                 return
 
+            # type.value == "local"
             url = f"{OLLAMA_URL}/api/pull"
             response = requests.post(url, json={"name": model}, stream=True, timeout=600)
             if response.status_code != 200:

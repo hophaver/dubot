@@ -66,6 +66,20 @@ def _build_model_pairs(user_id: int, fn_key: str) -> List[Optional[Tuple[str, st
         seen.add(key)
         pairs.append((provider, model_name))
 
+    if fn_key == "image_generation":
+        for m in cloud_hist:
+            add_pair("cloud", str(m))
+        for m in model_manager.list_known_image_generation_cloud_models():
+            add_pair("cloud", m)
+        if isinstance(fm, dict):
+            for slot in fm.values():
+                if isinstance(slot, dict) and str(slot.get("provider", "")).lower() == "cloud":
+                    add_pair("cloud", str(slot.get("model", "")))
+        eff = model_manager.get_effective_model_for_function(user_id, fn_key)
+        if str(eff.get("model", "") or "").strip():
+            add_pair("cloud", str(eff["model"]))
+        return pairs[:25]
+
     add_pair(str(info.get("provider", "local")), str(info.get("model", "")))
     for m in local_models:
         add_pair("local", m)
@@ -116,7 +130,8 @@ def _build_embed(
         title="LLM settings (per function)",
         description=(
             "Use the three menus, then **Apply**. "
-            "**Adaptive DM** still uses the **default chat model** only and ignores per-function personas.\n\n"
+            "**Adaptive DM** uses the **default chat model** only and ignores per-function personas "
+            "(**image generation** has its own model below; `/imagine` and adaptive-triggered images use it).\n\n"
             "**Personas** (per function; global, admin to change)\n"
             f"{persona_block}\n\n"
             "**Models** (per function; per user)\n"
@@ -286,6 +301,8 @@ class LLMSettingsView(View):
                     prov, mname = slot
                     if self.fn_key == "chat":
                         ok, msg = await validate_and_set_model(self.user_id, prov, mname)
+                    elif self.fn_key == "image_generation":
+                        ok, msg = await validate_and_set_function_model(self.user_id, "image_generation", prov, mname)
                     else:
                         ok, msg = await validate_and_set_function_model(self.user_id, self.fn_key, prov, mname)
                     msgs.append("Model: " + msg)
@@ -363,7 +380,7 @@ class LLMSettingsView(View):
 def register(client: discord.Client):
     @client.tree.command(
         name="llm-settings",
-        description="Per-function model (local/cloud) and persona; default chat model; adaptive DM unchanged",
+        description="Per-function model (local/cloud) and persona; default chat; separate OpenRouter image model",
     )
     async def llm_settings(interaction: discord.Interaction):
         if not get_user_permission(interaction.user.id):

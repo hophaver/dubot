@@ -2,6 +2,8 @@ import discord
 import subprocess
 import sys
 import os
+import io
+import mimetypes
 import asyncio
 import inspect
 import shlex
@@ -11,7 +13,9 @@ from discord import app_commands
 from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
-from utils.llm_service import ask_llm, plan_command_from_text
+from models import model_manager
+from utils.llm_service import ask_llm, plan_command_from_text, commentary_for_generated_image
+from utils.openrouter_image import generate_openrouter_image_with_fallback
 from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
@@ -236,6 +240,106 @@ def _looks_like_download_request(text: str) -> bool:
     )
 
 
+def _ext_for_generated_image_mime(mime: str) -> str:
+    m = (mime or "image/png").split(";")[0].strip().lower()
+    ext = mimetypes.guess_extension(m) or ".png"
+    if ext == ".jpe":
+        ext = ".jpg"
+    return ext
+
+
+def _adaptive_dm_explicit_image_intent(text: str) -> bool:
+    """
+    Strict gate: natural-language image generation in adaptive DMs only when clearly requested.
+    Slash /imagine is handled by the adaptive command planner, not here.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return False
+    t = raw.lower()
+    if t.startswith("imagine "):
+        rest = raw[len("imagine ") :].strip()
+        if rest.lower().startswith("if "):
+            return False
+        return bool(rest)
+    patterns = (
+        r"\b(generate|create|make|draw|render)\s+(?:me\s+)?(?:an?\s+)?(image|picture|photo|diagram|illustration|mockup|mock-up)\b",
+        r"\b(show|give)\s+me\s+(?:an?\s+)?(image|picture|photo|diagram)\b",
+        r"\bimage\s+of\b",
+        r"\bpicture\s+of\b",
+        r"\bdiagram\s+of\b",
+        r"\bwireframe\b",
+        r"\bvisual\s+reference\b",
+        r"\breference\s+(?:image|picture|render)\b",
+    )
+    return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
+
+
+async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
+    """Return True when handled (including errors)."""
+    uid = message.author.id
+    eff = model_manager.get_effective_model_for_function(uid, "image_generation")
+    model_name = str(eff.get("model") or "").strip()
+    if not model_name:
+        await _send_chat_output(
+            message,
+            "Image generation is not set up yet — an admin needs to add an OpenRouter image model "
+            "(`**/pull-model**` → type **image generation (OpenRouter)**), then pick it in **`/llm-settings`** → **Image generation**.",
+        )
+        return True
+
+    idea = (clean_content or "").strip()
+    if idea.lower().startswith("imagine "):
+        idea = idea[8:].strip()
+    if not idea:
+        await _send_chat_output(message, "Say what to generate (e.g. **imagine** a red panda in a spacesuit), or use **`/imagine`**.")
+        return True
+
+    img_bytes, mime, api_text, err = await generate_openrouter_image_with_fallback(model_name, idea)
+    if err:
+        await _send_chat_output(message, f"❌ {err}")
+        return True
+    if not img_bytes:
+        await _send_chat_output(message, "❌ No image came back from the model. Try another model or a clearer prompt.")
+        return True
+
+    ext = _ext_for_generated_image_mime(mime)
+    file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
+    note = await commentary_for_generated_image(
+        uid,
+        idea,
+        f"OpenRouter `{model_name}`",
+        img_bytes,
+        mime,
+    )
+    cap = (api_text or "").strip()
+    if len(cap) > 1800:
+        cap = cap[:1790] + "…"
+    parts = []
+    if cap:
+        parts.append(cap)
+    if note:
+        if parts:
+            parts.append("")
+        parts.append(note)
+    content = "\n".join(parts).strip() or None
+
+    sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
+    try:
+        cid = message.channel.id
+        conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
+        if content:
+            conversation_manager.add_message(cid, "assistant", content)
+        else:
+            conversation_manager.add_message(cid, "assistant", "[Sent a generated image]")
+    except Exception:
+        pass
+    conversation_manager.set_last_bot_message(message.channel.id, sent.id)
+    conversation_manager.save()
+    _schedule_adaptive_post_reply_calibration(message, clean_content)
+    return True
+
+
 def _looks_like_command_request(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
@@ -357,7 +461,8 @@ def _normalize_himas_command_text(text: str) -> str:
 
 def _quick_command_plan_from_text(text: str) -> Optional[Dict[str, Any]]:
     """Fast deterministic parser for common command intents."""
-    t = (text or "").strip().lower()
+    raw = (text or "").strip()
+    t = raw.lower()
     if not t:
         return None
     # Direct slash/bang command with no args.
@@ -376,6 +481,15 @@ def _quick_command_plan_from_text(text: str) -> Optional[Dict[str, Any]]:
             "command": "himas",
             "arguments": {"command": _normalize_himas_command_text(t[7:].strip())},
             "reason": "direct home assistant command",
+            "risk": "safe",
+        }
+    if t.startswith("/imagine"):
+        rest = raw[len("/imagine") :].strip() if raw else ""
+        return {
+            "should_execute": True,
+            "command": "imagine",
+            "arguments": {"idea": rest},
+            "reason": "direct /imagine",
             "risk": "safe",
         }
     return None
@@ -939,6 +1053,17 @@ async def process_discord_message(client, message, permission, conversation_mana
                 return True
         except Exception:
             # If adaptive command routing fails, fall back to normal chat flow.
+            pass
+
+    if (
+        is_dm
+        and adaptive_dm_manager.is_enabled(message.author.id)
+        and _adaptive_dm_explicit_image_intent(clean_content)
+    ):
+        try:
+            if await _try_send_adaptive_dm_imagine(client, message, clean_content):
+                return True
+        except Exception:
             pass
 
     async with message.channel.typing():
