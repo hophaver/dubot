@@ -58,6 +58,18 @@ def _extract_images_from_message(message: Any) -> List[Tuple[bytes, str]]:
     return out
 
 
+def _should_try_next_modalities_combo(error_msg: str) -> bool:
+    """True when OpenRouter rejected the modality mix — try another combo (e.g. image-only vs image+text)."""
+    if not error_msg:
+        return False
+    low = error_msg.lower()
+    return (
+        "modalities" in low
+        or "output modalities" in low
+        or "no endpoints found" in low
+    )
+
+
 async def probe_openrouter_image_model(model_name: str) -> Tuple[bool, str]:
     """Minimal image-gen probe; does not persist."""
     _b, _mime, _text, err = await generate_openrouter_image_with_fallback(
@@ -79,8 +91,16 @@ async def generate_openrouter_image_with_fallback(
     system_prompt: Optional[str] = None,
     timeout: int = 120,
 ) -> Tuple[Optional[bytes], str, str, str]:
-    """Try image+text modalities first, then image-only (model-dependent)."""
-    for mods in (("image", "text"), ("image",)):
+    """
+    Try modality combos in an order that works for both image-only models (e.g. Seedream) and
+    image+text models (e.g. some Gemini image endpoints): image-only first, then image+text.
+    Retries when OpenRouter returns modality/endpoint mismatch (e.g. 404 for image,text).
+    """
+    combos: Tuple[Tuple[str, ...], ...] = (("image",), ("image", "text"))
+    last_err = ""
+    last_text = ""
+    last_mime = "image/png"
+    for i, mods in enumerate(combos):
         b, mime, text, err = await generate_openrouter_image(
             model_name,
             user_prompt,
@@ -90,10 +110,16 @@ async def generate_openrouter_image_with_fallback(
         )
         if b:
             return b, mime, text, err
-        if err and "No image in API response" in err and mods == ("image", "text"):
+        last_err = err or ""
+        last_text = text or ""
+        last_mime = mime or "image/png"
+        is_last = i >= len(combos) - 1
+        if not is_last and _should_try_next_modalities_combo(last_err):
             continue
-        return b, mime, text, err
-    return None, "image/png", "", "Error: No image in API response (model may not support image output)."
+        if not is_last and "No image in API response" in last_err:
+            continue
+        break
+    return None, last_mime, last_text, last_err or "Error: No image in API response (model may not support image output)."
 
 
 async def generate_openrouter_image(
