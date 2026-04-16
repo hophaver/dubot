@@ -711,7 +711,8 @@ async def adaptive_dm_image_flow_refine_text_for_image(
         "Use keep:true if the image matches what the draft describes. Use keep:false only if the image is wrong enough "
         "that the text must change; then message is the full new user-visible reply (max ~900 chars, plain text).\n"
         "Never include: internal image prompts, bracket tags like [Sent a generated image: ...], "
-        "or a second paragraph describing the image for the user — the image is shown separately."
+        "or a second paragraph describing the image for the user — the image is shown separately.\n"
+        "Never output text that only describes the image in brackets — that is invalid."
     )
     user_t = f"Draft:\n{(draft_reply or '')[:900]}"
     messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_t, "images": [b64]}]
@@ -731,7 +732,10 @@ async def adaptive_dm_image_flow_refine_text_for_image(
             return draft_reply or ""
         msg = parsed.get("message")
         if isinstance(msg, str) and msg.strip():
-            return msg.strip()[:1800]
+            m = msg.strip()
+            if re.match(r"^\s*\[Sent a generated image", m, flags=re.IGNORECASE):
+                return draft_reply or ""
+            return m[:1800]
         # Legacy plain KEEP
         if out.strip().upper() in {"KEEP", "KEEP.", "KEEP!"}:
             return draft_reply or ""

@@ -40,6 +40,69 @@ def _parse_data_url(data_url: str) -> Optional[Tuple[bytes, str]]:
     return raw, mime
 
 
+def _collect_image_urls_from_obj(obj: Any, out: List[str], depth: int = 0) -> None:
+    """Best-effort collect URL-like strings from nested API JSON (provider quirks)."""
+    if depth > 8:
+        return
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s.startswith("data:image/") or (s.startswith("http://") or s.startswith("https://")) and any(
+            x in s.lower() for x in (".png", ".jpg", ".jpeg", ".webp", "format=png", "/image", "image/png")
+        ):
+            out.append(s)
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in ("url", "imageurl", "href") and isinstance(v, str) and v.strip():
+                s = v.strip()
+                if s.startswith("data:image/") or s.startswith("http"):
+                    out.append(s)
+            _collect_image_urls_from_obj(v, out, depth + 1)
+        return
+    if isinstance(obj, list):
+        for v in obj:
+            _collect_image_urls_from_obj(v, out, depth + 1)
+
+
+def _bytes_from_image_url_string(url: str) -> Optional[Tuple[bytes, str]]:
+    u = (url or "").strip()
+    if not u:
+        return None
+    parsed = _parse_data_url(u)
+    if parsed:
+        return parsed
+    if u.startswith("http://") or u.startswith("https://"):
+        try:
+            r = requests.get(u, timeout=60)
+            if r.status_code != 200 or not r.content:
+                return None
+            ct = (r.headers.get("Content-Type") or "image/png").split(";")[0].strip().lower()
+            if not ct.startswith("image/"):
+                ct = "image/png"
+            return r.content, ct
+        except Exception:
+            return None
+    return None
+
+
+def _extract_url_from_image_part(item: Any) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "image_url":
+        iu = item.get("image_url") or item.get("imageUrl")
+        if isinstance(iu, dict):
+            return iu.get("url")
+        if isinstance(iu, str):
+            return iu
+    iu2 = item.get("image_url") or item.get("imageUrl")
+    if isinstance(iu2, dict):
+        return iu2.get("url")
+    if isinstance(iu2, str):
+        return iu2
+    return None
+
+
 def _extract_images_from_message(message: Any) -> List[Tuple[bytes, str]]:
     out: List[Tuple[bytes, str]] = []
     if not isinstance(message, dict):
@@ -49,15 +112,33 @@ def _extract_images_from_message(message: Any) -> List[Tuple[bytes, str]]:
         if not isinstance(items, list):
             continue
         for item in items:
+            if isinstance(item, str):
+                parsed = _parse_data_url(item)
+                if parsed:
+                    out.append(parsed)
+                continue
             if not isinstance(item, dict):
                 continue
+            url = _extract_url_from_image_part(item)
+            if not url:
+                continue
+            parsed = _parse_data_url(str(url))
+            if parsed:
+                out.append(parsed)
+    # Some providers put generated images inside message.content as parts
+    content = message.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "image_url":
+                continue
+            iu = part.get("image_url") or part.get("imageUrl")
             url = None
-            if item.get("type") == "image_url" and isinstance(item.get("image_url"), dict):
-                url = item["image_url"].get("url")
-            elif isinstance(item.get("image_url"), dict):
-                url = item["image_url"].get("url")
-            elif isinstance(item.get("imageUrl"), dict):
-                url = item["imageUrl"].get("url")
+            if isinstance(iu, dict):
+                url = iu.get("url")
+            elif isinstance(iu, str):
+                url = iu
             if not url:
                 continue
             parsed = _parse_data_url(str(url))
@@ -215,7 +296,23 @@ async def generate_openrouter_image(
 
     blobs = _extract_images_from_message(msg)
     if not blobs:
-        home_log.log_sync(f"⚠️ OpenRouter image gen: no images in message keys={list(msg.keys())}")
+        extra_urls: List[str] = []
+        _collect_image_urls_from_obj(msg, extra_urls)
+        for u in extra_urls:
+            got = await asyncio.to_thread(_bytes_from_image_url_string, u)
+            if got:
+                blobs.append(got)
+                break
+    if not blobs and text_out:
+        got = await asyncio.to_thread(_bytes_from_image_url_string, text_out.strip())
+        if got:
+            blobs.append(got)
+            text_out = ""
+    if not blobs:
+        home_log.log_sync(
+            f"⚠️ OpenRouter image gen: no images in message keys={list(msg.keys())} "
+            f"content_type={type(msg.get('content')).__name__}"
+        )
         return None, "image/png", text_out, "Error: No image in API response (model may not support image output or modalities mismatch)."
 
     raw, mime = blobs[0]

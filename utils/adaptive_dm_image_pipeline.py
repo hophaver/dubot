@@ -151,6 +151,8 @@ async def run_adaptive_dm_image_file_pipeline(
         refined = _sanitize_final_message(refined, image_user_message)
         if not refined:
             refined = (draft or "").strip()
+        if re.match(r"^\s*\[Sent a generated image", refined, flags=re.IGNORECASE):
+            refined = (draft or "").strip()
         await write_text(final_path, refined)
 
         return session, img_bytes, mime or "image/png", ""
