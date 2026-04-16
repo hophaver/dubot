@@ -58,10 +58,72 @@ async def _body_from_discord_link(client: discord.Client, user_id: int, url: str
     return body
 
 
+def _resolve_file_attachment(interaction: discord.Interaction, explicit: Optional[discord.Attachment]) -> Optional[discord.Attachment]:
+    """Discord sometimes omits injecting Attachment into the callback; read it from the interaction payload."""
+    if explicit is not None:
+        return explicit
+    ns = getattr(interaction, "namespace", None)
+    if ns is not None:
+        try:
+            cand = getattr(ns, "file", None)
+            if isinstance(cand, discord.Attachment):
+                return cand
+        except Exception:
+            pass
+    data = getattr(interaction, "data", None)
+    if not isinstance(data, dict):
+        return None
+    resolved = data.get("resolved") or {}
+    raw_atts = resolved.get("attachments") or {}
+    if not raw_atts:
+        return None
+    state = getattr(interaction, "_state", None)
+    if state is None:
+        return None
+    for opt in data.get("options") or []:
+        if opt.get("type") != 11:  # ApplicationCommandOptionType.attachment
+            continue
+        aid = opt.get("value")
+        if aid is None:
+            continue
+        key = str(aid)
+        payload = raw_atts.get(key)
+        if payload is None and isinstance(aid, str) and aid.isdigit():
+            payload = raw_atts.get(int(aid))
+        if not isinstance(payload, dict):
+            continue
+        try:
+            return discord.Attachment(data=payload, state=state)
+        except Exception:
+            continue
+    if len(raw_atts) == 1:
+        payload = next(iter(raw_atts.values()))
+        if isinstance(payload, dict):
+            try:
+                return discord.Attachment(data=payload, state=state)
+            except Exception:
+                pass
+    return None
+
+
+def _is_text_file(att: discord.Attachment) -> bool:
+    name = (att.filename or "").lower()
+    ct = (att.content_type or "").lower()
+    if name.endswith(".txt"):
+        return True
+    if ct.startswith("text/") or ct in ("text/plain", "text/txt"):
+        return True
+    if ct == "application/octet-stream" and (not name or name.endswith(".txt")):
+        return True
+    return False
+
+
 async def _body_from_txt(attachment: discord.Attachment) -> str:
-    name = (attachment.filename or "").lower()
-    if not name.endswith(".txt"):
-        raise ValueError("Attachment must be a **`.txt`** file (or use a Discord message link instead).")
+    if not _is_text_file(attachment):
+        raise ValueError(
+            "Upload a **`.txt`** or **plain text** file (or use a Discord message link). "
+            "If you attached a file, use the **file** option on the command form, not only a message attachment."
+        )
     data = await attachment.read()
     try:
         return data.decode("utf-8")
@@ -76,7 +138,7 @@ def register(client: discord.Client):
     )
     @app_commands.describe(
         source_message_link="Optional: Copy Message Link — that message’s full text is the corpus",
-        file="Optional: .txt file whose contents are the corpus",
+        file="Attach here (required for uploads): .txt or plain text — use this field, not a loose message attachment",
     )
     async def adaptive_tune_batch(
         interaction: discord.Interaction,
@@ -102,15 +164,17 @@ def register(client: discord.Client):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            if file is not None:
-                raw = await _body_from_txt(file)
+            resolved_file = _resolve_file_attachment(interaction, file)
+            if resolved_file is not None:
+                raw = await _body_from_txt(resolved_file)
             elif source_message_link and str(source_message_link).strip():
                 raw = await _body_from_discord_link(
                     client, interaction.user.id, str(source_message_link).strip()
                 )
             else:
                 raise ValueError(
-                    "Attach a **`.txt`** file **or** paste a **message link** to the message that contains your full text."
+                    "Use the **`file`** option on this command to attach **`.txt`** (not only a message attachment), "
+                    "or paste a **message link**."
                 )
         except ValueError as e:
             await interaction.followup.send(str(e), ephemeral=True)
