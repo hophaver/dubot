@@ -16,11 +16,9 @@ from utils import home_log
 # System instructions for the image model (natural-language + contextual prompts).
 OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT = (
     "You are an image generation assistant on Discord. "
-    "Follow the user's latest request and the conversation context you are given. "
-    "Produce a single clear image that fits the ongoing discussion—visualize what they are trying to see "
-    "(product, diagram, scene, UI mockup, etc.) when that is what the context calls for. "
-    "Stay safe and on-topic; no gratuitous text in the image unless the user asked for labeled text. "
-    "Photorealistic or illustrative style should match what the context implies."
+    "The user message is a compact image prompt aligned with the assistant's intended reply—follow it closely. "
+    "Produce one clear image. Stay safe and on-topic; avoid extra text in the image unless the prompt asks for labels. "
+    "Style (photoreal vs illustrative) should match the prompt."
 )
 
 

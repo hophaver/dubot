@@ -17,8 +17,9 @@ from models import model_manager
 from utils.llm_service import (
     ask_llm,
     plan_command_from_text,
-    commentary_for_generated_image,
-    summarize_dm_thread_for_image_prompt,
+    adaptive_dm_image_flow_compress_image_prompt,
+    adaptive_dm_image_flow_draft_reply,
+    adaptive_dm_image_flow_refine_text_for_image,
 )
 from utils.openrouter_image import (
     OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
@@ -343,22 +344,17 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
         await _send_chat_output(message, "Say what to generate (e.g. **imagine** a red panda in a spacesuit), or use **`/imagine`**.")
         return True
 
-    brief = await summarize_dm_thread_for_image_prompt(
+    draft_reply = await adaptive_dm_image_flow_draft_reply(
         uid,
         message.channel.id,
         str(message.author.name),
         idea,
     )
-    image_user_prompt = (
-        "Conversation summary (for context — visualize what fits this thread):\n"
-        f"{brief}\n\n"
-        "Latest explicit request from the user (prioritize this):\n"
-        f"{idea}"
-    )
+    image_prompt = await adaptive_dm_image_flow_compress_image_prompt(uid, draft_reply, idea)
 
-    img_bytes, mime, api_text, err = await generate_openrouter_image_with_fallback(
+    img_bytes, mime, _api_text, err = await generate_openrouter_image_with_fallback(
         model_name,
-        image_user_prompt,
+        image_prompt,
         system_prompt=OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
     )
     if err:
@@ -368,35 +364,21 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
         await _send_chat_output(message, "❌ No image came back from the model. Try another model or a clearer prompt.")
         return True
 
+    final_text = await adaptive_dm_image_flow_refine_text_for_image(uid, draft_reply, img_bytes)
+    if not (final_text or "").strip():
+        final_text = draft_reply
+    if len(final_text) > 1900:
+        final_text = final_text[:1890].rstrip() + "…"
+
     ext = _ext_for_generated_image_mime(mime)
     file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
-    note = await commentary_for_generated_image(
-        uid,
-        idea,
-        f"OpenRouter `{model_name}`",
-        img_bytes,
-        mime,
-    )
-    cap = (api_text or "").strip()
-    if len(cap) > 1800:
-        cap = cap[:1790] + "…"
-    parts = []
-    if cap:
-        parts.append(cap)
-    if note:
-        if parts:
-            parts.append("")
-        parts.append(note)
-    content = "\n".join(parts).strip() or None
+    content = final_text.strip()
 
     sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
     try:
         cid = message.channel.id
         conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
-        if content:
-            conversation_manager.add_message(cid, "assistant", content)
-        else:
-            conversation_manager.add_message(cid, "assistant", "[Sent a generated image]")
+        conversation_manager.add_message(cid, "assistant", content)
     except Exception:
         pass
     conversation_manager.set_last_bot_message(message.channel.id, sent.id)

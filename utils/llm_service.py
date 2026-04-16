@@ -589,44 +589,83 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
     }
     return plan
 
-async def summarize_dm_thread_for_image_prompt(
+def _compact_dm_tail_for_image_flow(channel_id: int, username: str, max_chars: int = 1100) -> str:
+    """Recent transcript slice for image flow — no extra LLM; keeps token budget low."""
+    hist = conversation_manager.get_conversation(channel_id) or []
+    chunks: List[str] = []
+    for m in hist[-10:]:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            continue
+        role = "U" if m.get("role") == "user" else "A"
+        text = str(m.get("content", "") or "").strip().replace("\n", " ")
+        if not text:
+            continue
+        if len(text) > 280:
+            text = text[:260].rstrip() + "…"
+        chunks.append(f"{role}: {text}")
+    joined = " | ".join(chunks)
+    if len(joined) > max_chars:
+        joined = "…" + joined[-(max_chars - 1) :]
+    return joined or f"U: {username} (no prior transcript)"
+
+
+async def adaptive_dm_image_flow_draft_reply(
     user_id: int,
     channel_id: int,
     username: str,
     user_trigger: str,
-    max_brief_chars: int = 1400,
 ) -> str:
     """
-    Compact summary of recent user/assistant turns for image generation (OpenRouter prompt).
-    Falls back to a short manual excerpt if the LLM fails.
+    Step 1: Chat model writes the DM reply as if the image were already attached (token-light).
     """
-    hist = conversation_manager.get_conversation(channel_id) or []
-    lines: List[str] = []
-    for m in hist[-18:]:
-        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
-            continue
-        text = str(m.get("content", "") or "").strip()
-        if not text:
-            continue
-        role = "User" if m.get("role") == "user" else "Assistant"
-        if len(text) > 420:
-            text = text[:400].rstrip() + "…"
-        lines.append(f"- {role}: {text}")
-    if not lines:
-        return f"User request (only recent message): {(user_trigger or '')[:800]}"
-    transcript = "\n".join(lines[-16:])
-    eff = model_manager.get_effective_model_for_function(user_id, "command_planner")
-    requested_model = eff.get("model", "qwen2.5:7b")
-    provider = eff.get("provider", "local")
+    model_info = model_manager.get_user_model_info(user_id)
+    requested_model = model_info.get("model", "llama3.2:1b")
+    provider = model_info.get("provider", "local")
+    tail = _compact_dm_tail_for_image_flow(channel_id, username)
+    sys = (
+        f"{ADAPTIVE_DM_BASE_PERSONA}\n"
+        "The user asked for a generated image. You already attached the image to this reply—write ONLY your "
+        "Discord message text as you normally would (no meta, no 'here is the image', no apologies about being text-only). "
+        "Stay concise (max ~120 words). Plain text."
+    )
+    prof = adaptive_dm_manager.get_profile_prompt(user_id)
+    if prof:
+        sys = sys + "\n\n" + prof[:800]
+    user_block = (
+        f"Recent DM (compact): {tail}\n"
+        f"User now: {(user_trigger or '')[:500]}"
+    )
+    messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_block}]
+    try:
+        _, raw = await _try_models_with_fallback(
+            requested_model,
+            messages,
+            images=False,
+            provider=provider,
+            request_options={"num_predict": 320, "temperature": 0.65},
+        )
+        out = _clean_response(raw or "")
+        if out and not out.startswith("Error:") and not out.startswith("⚠️"):
+            return out[:1800]
+    except Exception:
+        pass
+    return "Here’s a visual for what we discussed."
+
+
+async def adaptive_dm_image_flow_compress_image_prompt(
+    user_id: int,
+    draft_reply: str,
+    user_trigger: str,
+) -> str:
+    """Step 2: One short line optimized for the image model (matches draft + request)."""
+    model_info = model_manager.get_user_model_info(user_id)
+    requested_model = model_info.get("model", "llama3.2:1b")
+    provider = model_info.get("provider", "local")
     prompt = (
-        "You compress Discord DM thread excerpts for an IMAGE generation model.\n"
-        "Output ONE plain-text block (no JSON, no bullets) that:\n"
-        "1) States the main topic and concrete visual subject the user and assistant discussed.\n"
-        "2) Keeps critical physical details (layout, colors, object names, materials, angles) needed to draw it.\n"
-        "3) Drops small talk. Max ~180 words.\n"
-        f"The user's explicit image request is: {(user_trigger or '')[:600]}\n\n"
-        "Recent conversation (oldest to newest within this excerpt):\n"
-        f"{transcript}"
+        "Output ONE English image prompt only (no quotes, no labels). Max 60 words. "
+        "Must match the assistant reply below and the user's ask. Photoreal or style implied by context.\n\n"
+        f"User ask: {(user_trigger or '')[:400]}\n"
+        f"Assistant reply (ground truth): {(draft_reply or '')[:900]}"
     )
     try:
         _, raw = await _try_models_with_fallback(
@@ -634,21 +673,57 @@ async def summarize_dm_thread_for_image_prompt(
             [{"role": "user", "content": prompt}],
             images=False,
             provider=provider,
+            request_options={"num_predict": 180, "temperature": 0.45},
         )
-        brief = _clean_response(raw or "")
-        if brief and not brief.startswith("Error:") and not brief.startswith("⚠️"):
-            if len(brief) > max_brief_chars:
-                brief = brief[: max_brief_chars - 1].rstrip() + "…"
-            return brief.strip()
+        out = _clean_response(raw or "")
+        if out and not out.startswith("Error:") and not out.startswith("⚠️"):
+            return out[:1200]
     except Exception:
         pass
-    fallback = transcript[-max_brief_chars:]
-    if len(fallback) > max_brief_chars:
-        fallback = "…" + fallback[-(max_brief_chars - 1) :]
-    return (
-        f"Conversation context (fallback): {fallback}\n\n"
-        f"User image request: {(user_trigger or '')[:600]}"
+    combined = f"{(user_trigger or '')[:200]}. {(draft_reply or '')[:400]}"
+    return combined[:900]
+
+
+async def adaptive_dm_image_flow_refine_text_for_image(
+    user_id: int,
+    draft_reply: str,
+    image_bytes: bytes,
+) -> str:
+    """Step 3: Vision — adjust draft if image mismatches; else return unchanged."""
+    if not image_bytes:
+        return draft_reply or ""
+    model_info = model_manager.get_user_model_info(user_id)
+    requested_model = model_info.get("model", "llama3.2:1b")
+    provider = model_info.get("provider", "local")
+    try:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+    except Exception:
+        return draft_reply or ""
+    sys = (
+        "You see the image the assistant just generated for a Discord DM.\n"
+        "You are given the draft message text written as if that image was already sent.\n"
+        "If the image matches the draft, output exactly: KEEP\n"
+        "If the image differs (wrong subject, missing detail, wrong colors, bad text in image), output the FULL revised "
+        "message text only (same tone, still acknowledging you generated this image; max ~120 words). No explanation."
     )
+    user_t = f"Draft:\n{(draft_reply or '')[:900]}"
+    messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_t, "images": [b64]}]
+    try:
+        _, raw = await _try_models_with_fallback(
+            requested_model,
+            messages,
+            images=True,
+            provider=provider,
+            request_options={"num_predict": 360, "temperature": 0.4},
+        )
+        out = _clean_response(raw or "")
+        if not out or out.startswith("Error:") or out.startswith("⚠️"):
+            return draft_reply or ""
+        if out.strip().upper() in {"KEEP", "KEEP.", "KEEP!"}:
+            return draft_reply or ""
+        return out[:1800]
+    except Exception:
+        return draft_reply or ""
 
 
 async def ask_llm(
