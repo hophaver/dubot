@@ -34,6 +34,28 @@ def _sanitize_final_message(text: str, image_prompt: str) -> str:
         idx = low.find(ip.lower())
         if idx != -1:
             t = t[:idx].rstrip()
+    # Strip common "second message" image-description patterns (vision models sometimes add these)
+    t = re.sub(
+        r"\n*\[Sent a generated image:\s*[^\]]+\]\s*",
+        "\n",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"\n*\*{0,3}\s*Sent a generated image:\s*.*$",
+        "",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Cut after horizontal rule often used before an appended description
+    msep = re.search(r"\n\s*\*{3,}\s*\n", t)
+    if msep:
+        tail = t[msep.end() :].strip()
+        if "photorealistic" in tail.lower() or "render" in tail.lower():
+            t = t[: msep.start()].rstrip()
+    msep2 = re.search(r"\n\s*-{3,}\s*\n", t)
+    if msep2 and "photorealistic" in t[msep2.end() :].lower():
+        t = t[: msep2.start()].rstrip()
     # If model echoed "User ask:" or similar, cut from there
     for marker in ("\nuser ask:", "\nassistant reply:", "\nimage prompt:", "\nprompt:"):
         p = t.lower().find(marker)

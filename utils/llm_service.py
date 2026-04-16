@@ -662,7 +662,8 @@ async def adaptive_dm_image_flow_compress_image_prompt(
     requested_model = model_info.get("model", "llama3.2:1b")
     provider = model_info.get("provider", "local")
     prompt = (
-        "Output ONE English image prompt only (no quotes, no labels). Max 60 words. "
+        "Output ONE English image prompt only — the exact string that will be sent to an image API. "
+        "No quotes, no prefixes like 'Image prompt:', no labels, no second paragraph. Max 60 words.\n"
         "Must match the assistant reply below and the user's ask. Photoreal or style implied by context.\n\n"
         f"User ask: {(user_trigger or '')[:400]}\n"
         f"Assistant reply (ground truth): {(draft_reply or '')[:900]}"
@@ -691,7 +692,7 @@ async def adaptive_dm_image_flow_refine_text_for_image(
     *,
     image_prompt: str = "",
 ) -> str:
-    """Step 3: Vision — adjust draft if image mismatches; else return unchanged."""
+    """Step 3: Vision — JSON only so we never concatenate image descriptions into the DM text."""
     if not image_bytes:
         return draft_reply or ""
     model_info = model_manager.get_user_model_info(user_id)
@@ -702,16 +703,16 @@ async def adaptive_dm_image_flow_refine_text_for_image(
     except Exception:
         return draft_reply or ""
     sys = (
-        "You see the image the assistant just generated for a Discord DM.\n"
-        "You are given the draft message text written as if that image was already sent.\n"
-        "If the image matches the draft, output exactly: KEEP\n"
-        "If the image differs (wrong subject, missing detail, wrong colors, bad text in image), output the FULL revised "
-        "message text only (same tone, still acknowledging you generated this image; max ~120 words). No explanation.\n"
-        "Output ONLY the message the user will see — one block of text. Do NOT append the image prompt, labels, "
-        "or any second paragraph of instructions."
+        "You see the image that will attach to a Discord DM. You also see the draft reply text.\n"
+        "Return JSON ONLY (no markdown fences, no prose before/after). Exactly one of:\n"
+        '{"keep":true}\n'
+        'or\n'
+        '{"keep":false,"message":"<full replacement DM text for the user>"}\n'
+        "Use keep:true if the image matches what the draft describes. Use keep:false only if the image is wrong enough "
+        "that the text must change; then message is the full new user-visible reply (max ~900 chars, plain text).\n"
+        "Never include: internal image prompts, bracket tags like [Sent a generated image: ...], "
+        "or a second paragraph describing the image for the user — the image is shown separately."
     )
-    if (image_prompt or "").strip():
-        sys += "\nNever repeat or quote this internal image prompt in your output:\n" + (image_prompt or "")[:500]
     user_t = f"Draft:\n{(draft_reply or '')[:900]}"
     messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_t, "images": [b64]}]
     try:
@@ -720,14 +721,21 @@ async def adaptive_dm_image_flow_refine_text_for_image(
             messages,
             images=True,
             provider=provider,
-            request_options={"num_predict": 360, "temperature": 0.4},
+            request_options={"num_predict": 280, "temperature": 0.25},
         )
         out = _clean_response(raw or "")
         if not out or out.startswith("Error:") or out.startswith("⚠️"):
             return draft_reply or ""
+        parsed = _extract_json_object(out)
+        if parsed.get("keep") is True:
+            return draft_reply or ""
+        msg = parsed.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()[:1800]
+        # Legacy plain KEEP
         if out.strip().upper() in {"KEEP", "KEEP.", "KEEP!"}:
             return draft_reply or ""
-        return out[:1800]
+        return draft_reply or ""
     except Exception:
         return draft_reply or ""
 

@@ -338,41 +338,54 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
 
     session_dir = None
     try:
-        session_dir, img_bytes, mime, err = await run_adaptive_dm_image_file_pipeline(
-            uid,
-            message.channel.id,
-            str(message.author.name),
-            idea,
-            model_name,
-        )
-        if err:
-            await _send_chat_output(message, f"❌ {err}")
-            return True
-        if not img_bytes:
-            await _send_chat_output(message, "❌ No image came back from the model. Try another model or a clearer prompt.")
-            return True
-
-        final_path = session_dir / FINAL_NAME
-        content = (await read_text(final_path)).strip()
-        if not content:
-            content = "Here’s the image."
-        if len(content) > 1900:
-            content = content[:1890].rstrip() + "…"
-
-        ext = _ext_for_generated_image_mime(mime)
-        file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
-
-        sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
         try:
-            cid = message.channel.id
-            conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
-            conversation_manager.add_message(cid, "assistant", content)
-        except Exception:
-            pass
-        conversation_manager.set_last_bot_message(message.channel.id, sent.id)
-        conversation_manager.save()
-        _schedule_adaptive_post_reply_calibration(message, clean_content)
-        return True
+            session_dir, img_bytes, mime, err = await run_adaptive_dm_image_file_pipeline(
+                uid,
+                message.channel.id,
+                str(message.author.name),
+                idea,
+                model_name,
+            )
+            if err:
+                await _send_chat_output(message, f"❌ {err}")
+                return True
+            if not img_bytes:
+                await _send_chat_output(
+                    message,
+                    "❌ No image came back from the model. Try another model or a clearer prompt.",
+                )
+                return True
+
+            final_path = session_dir / FINAL_NAME
+            content = (await read_text(final_path)).strip()
+            if not content:
+                content = "Here’s the image."
+            if len(content) > 1900:
+                content = content[:1890].rstrip() + "…"
+
+            ext = _ext_for_generated_image_mime(mime)
+            file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
+
+            sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
+            try:
+                cid = message.channel.id
+                conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
+                conversation_manager.add_message(cid, "assistant", content)
+            except Exception:
+                pass
+            conversation_manager.set_last_bot_message(message.channel.id, sent.id)
+            conversation_manager.save()
+            _schedule_adaptive_post_reply_calibration(message, clean_content)
+            return True
+        except Exception as exc:
+            await home_log.send_to_home(
+                f"🔴 adaptive_dm_image_pipeline failed user={uid} ch={message.channel.id}: {str(exc)[:400]}"
+            )
+            await _send_chat_output(
+                message,
+                "⚠️ Something went wrong while generating that image. Please try again.",
+            )
+            return True
     finally:
         await remove_session_dir(session_dir)
 
