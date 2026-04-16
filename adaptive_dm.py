@@ -194,6 +194,22 @@ class AdaptiveDmManager:
         self.save()
 
     @staticmethod
+    def strip_status_export_file_headers(raw: str) -> str:
+        """Remove adaptive-status file preamble lines only (keep body through fixed suffix)."""
+        t = (raw or "").replace("\r\n", "\n").strip()
+        lines = t.split("\n")
+        while lines:
+            low0 = lines[0].lower().strip()
+            if not low0:
+                lines.pop(0)
+                continue
+            if any(low0.startswith(p) for p in _MANUAL_PASTE_HEADER_PREFIXES):
+                lines.pop(0)
+                continue
+            break
+        return "\n".join(lines).strip()
+
+    @staticmethod
     def normalize_pasted_manual_context(text: str) -> str:
         """Strip export headers and fixed behaviour suffix from a pasted status attachment."""
         t = (text or "").replace("\r\n", "\n").strip()
@@ -218,6 +234,37 @@ class AdaptiveDmManager:
         if suffix and t.endswith(suffix):
             t = t[: -len(suffix)].rstrip()
         return t.strip()
+
+    def validate_status_export_and_extract_manual(self, user_id: int, pasted: str) -> Tuple[bool, str, str]:
+        """
+        Require a full adaptive-dm-context body (profile block + fixed suffix), with auto-learned text unchanged.
+        Returns (ok, error_code, manual_inner). error_code empty on success; manual_inner for set_profile_manual_override.
+        """
+        suffix = ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
+        body = self.strip_status_export_file_headers(pasted)
+        if not body:
+            return False, "empty", ""
+        if not suffix or suffix not in body:
+            return False, "missing_suffix", ""
+        if not body.endswith(suffix):
+            return False, "bad_suffix", ""
+        core = body[: -len(suffix)].rstrip()
+        auto_expected = (self._structured_profile_prompt(user_id) or "").strip()
+        if auto_expected:
+            if not core.endswith(auto_expected):
+                return False, "auto_mismatch", ""
+            rest = core[: -len(auto_expected)].rstrip()
+            if rest.endswith("\n\n"):
+                manual_outer = rest[:-2].rstrip()
+            elif rest == "":
+                manual_outer = ""
+            else:
+                return False, "auto_mismatch", ""
+        else:
+            manual_outer = core.strip()
+
+        manual_inner = self.normalize_pasted_manual_context(manual_outer).strip()
+        return True, "", manual_inner
 
     def set_guild_tune_channel(
         self,

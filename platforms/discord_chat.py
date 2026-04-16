@@ -863,8 +863,21 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
     return True
 
 
+async def _read_first_txt_attachment(message: discord.Message) -> Optional[str]:
+    for att in list(getattr(message, "attachments", []) or []):
+        fn = (att.filename or "").lower()
+        if not fn.endswith(".txt"):
+            continue
+        try:
+            raw = await att.read()
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+    return None
+
+
 async def _try_handle_dm_status_reply(client: discord.Client, message: discord.Message) -> bool:
-    """Apply manual user context when the user replies to the latest /adaptive-status message."""
+    """Apply manual user context when the user replies to the latest /adaptive-status with the full export file."""
     if not isinstance(message.channel, discord.DMChannel):
         return False
     ref = message.reference
@@ -886,27 +899,46 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
         return False
 
     text = (message.content or "").strip()
-    if not text:
-        return False
+    file_body = await _read_first_txt_attachment(message)
+    if file_body is not None:
+        pasted = file_body.strip()
+    else:
+        pasted = text
 
-    low = text.lower()
+    if not pasted:
+        await _send_chat_output(
+            message,
+            "Reply with the **full** `adaptive-dm-context.txt` from the status message (paste the whole file, or attach the `.txt`). "
+            "Say **`reset manual`** to clear manual context only.",
+        )
+        return True
+
+    low = pasted.lower()
     if low in ("reset", "reset manual", "clear", "clear manual"):
         adaptive_dm_manager.clear_profile_manual_override(uid)
         await _send_chat_output(message, "✅ Manual context cleared. Using automatic profile again.")
         return True
 
-    normalized = adaptive_dm_manager.normalize_pasted_manual_context(text)
-    if not normalized:
-        await _send_chat_output(
-            message,
-            "Send your edited context text, or **`reset manual`** to clear manual overrides.",
-        )
+    ok, err_code, manual_inner = adaptive_dm_manager.validate_status_export_and_extract_manual(uid, pasted)
+    if not ok:
+        hints = {
+            "empty": "Paste or attach the **entire** `adaptive-dm-context.txt` (download from the status message).",
+            "missing_suffix": "Your paste is missing the **fixed behaviour** block at the end — use the full file, unmodified at the bottom.",
+            "bad_suffix": "The file must end with the **exact** fixed-behaviour block from the export. Do not delete or shorten the tail.",
+            "auto_mismatch": (
+                "The **auto-learned** section must match your current profile (middle of the file). "
+                "Run **`/adaptive-status`** again, then replace only the **manual** section at the top — "
+                "or clear manual with **`reset manual`** first."
+            ),
+        }
+        msg = hints.get(err_code, "Use the complete `adaptive-dm-context.txt` from **`/adaptive-status`** without stripping the tail.")
+        await _send_chat_output(message, f"❌ {msg}")
         return True
 
-    adaptive_dm_manager.set_profile_manual_override(uid, normalized)
+    adaptive_dm_manager.set_profile_manual_override(uid, manual_inner)
     await _send_chat_output(
         message,
-        "✅ Manual user context updated. It overrides auto-learned bullets until you send **reset manual** as a reply here.",
+        "✅ Manual context replaced from your full export. Auto-learned tuning from your messages continues as before.",
     )
     return True
 
