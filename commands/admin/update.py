@@ -23,6 +23,13 @@ def register(client: discord.Client):
             return
         await interaction.response.defer(ephemeral=True)
         try:
+            try:
+                from integrations import refresh_environment_location_async
+
+                await refresh_environment_location_async()
+            except Exception:
+                pass
+
             before_commit = get_current_commit()
             result = run_git(["pull"])
             after_commit = get_current_commit()

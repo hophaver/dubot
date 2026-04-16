@@ -11,4 +11,10 @@ def register(client: discord.Client):
             await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
         await interaction.response.send_message("🔄 Restarting bot...")
+        try:
+            from integrations import refresh_environment_location
+
+            refresh_environment_location()
+        except Exception:
+            pass
         os.execv(sys.executable, [sys.executable] + sys.argv)

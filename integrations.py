@@ -233,6 +233,25 @@ def get_location_by_ip():
     
     return LOCATION, CITY, COUNTRY
 
+
+def refresh_environment_location() -> None:
+    """Re-fetch public IP and geo from the host (blocking). Syncs LLM runtime location cache."""
+    get_location_by_ip()
+    try:
+        from utils import llm_service as _lm
+
+        _lm.sync_location_cache_from_integrations()
+    except Exception:
+        pass
+
+
+async def refresh_environment_location_async() -> None:
+    """Same as refresh_environment_location but runs the network calls in a thread pool."""
+    import asyncio
+
+    await asyncio.to_thread(refresh_environment_location)
+
+
 def start_location_updater():
     """Run location lookup once on startup; retry until a location is found, then stop."""
     def try_until_found():

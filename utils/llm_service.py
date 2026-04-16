@@ -149,6 +149,20 @@ command_db = CommandDatabase()
 _location_cache = {"value": "Unknown", "city": "Unknown", "country": "Unknown", "ts": 0.0}
 
 
+def sync_location_cache_from_integrations() -> None:
+    """After integrations.get_location_by_ip / refresh, copy globals into the chat LLM cache."""
+    global _location_cache
+    now = time.time()
+    loc = str(getattr(integrations, "LOCATION", None) or "").strip()
+    if loc and loc.lower() != "unknown":
+        _location_cache["value"] = loc
+        _location_cache["city"] = str(getattr(integrations, "CITY", None) or "").strip() or "Unknown"
+        _location_cache["country"] = str(getattr(integrations, "COUNTRY", None) or "").strip() or "Unknown"
+        _location_cache["ts"] = now
+    else:
+        _location_cache = {"value": "Unknown", "city": "Unknown", "country": "Unknown", "ts": 0.0}
+
+
 async def _get_runtime_location_cached() -> Tuple[str, str, str]:
     """Return cached location; refresh in background only occasionally."""
     now = time.time()
