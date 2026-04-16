@@ -64,10 +64,8 @@ def _schedule_jarvis_post_reply_calibration(message: discord.Message, message_te
 
     async def _runner():
         try:
-            await asyncio.to_thread(jarvis_manager.queue_user_message_for_tuning, user_id, message_text)
-            updated = await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
-            if updated and isinstance(message.channel, discord.DMChannel):
-                await _send_chat_output(message, "I just fine-tuned my tone from your recent messages.")
+            await asyncio.to_thread(jarvis_manager.apply_live_message_tune, user_id, message_text)
+            await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
         except Exception:
             pass
 
@@ -266,12 +264,49 @@ def _looks_like_command_request(text: str) -> bool:
 
 
 def _looks_like_himas_request(text: str) -> bool:
-    t = (text or "").strip().lower()
-    if not t:
+    """
+    Detect likely smart-home commands for chat-triggered /himas.
+    Kept strict on purpose: words like \"set\", \"switch\", and \"status\" appear constantly in normal chat.
+    """
+    raw = (text or "").strip()
+    if not raw:
         return False
-    if any(word in t for word in ["light", "lamp", "kitchen", "bedroom", "living room", "thermostat", "temperature", "switch", "fan", "ceiling", "heater", "ac"]):
-        return any(verb in t for verb in ["turn on", "turn off", "set", "dim", "toggle", "what is", "status"])
-    return False
+    tl = raw.lower()
+    if tl.startswith("/himas") or tl.startswith("himas "):
+        return True
+
+    trimmed = re.sub(
+        r"^(can you|could you|would you|please|hey|yo|hi|hello)[,\s]+",
+        "",
+        tl,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Short utterances only; allow extra headroom for chained "… and …" HA commands.
+    max_scan = min(len(trimmed), 300)
+    hay = trimmed[:max_scan]
+
+    patterns = (
+        r"\bturn\s+on\b",
+        r"\bturn\s+off\b",
+        r"\bswitch\s+on\b",
+        r"\bswitch\s+off\b",
+        r"\blights?\s+on\b",
+        r"\blights?\s+off\b",
+        r"\bturn\s+(?:the\s+|my\s+)[\w\s]{1,42}?\s+on\b",
+        r"\bturn\s+(?:the\s+|my\s+)[\w\s]{1,42}?\s+off\b",
+        r"\bswitch\s+(?:the\s+|my\s+)[\w\s]{1,42}?\s+on\b",
+        r"\bswitch\s+(?:the\s+|my\s+)[\w\s]{1,42}?\s+off\b",
+        r"\btoggle\s+(?:the|my|all)\s+\w",  # e.g. toggle the lights (not bare "toggle my …" in chat)
+        r"\btoggle\s+(?:the\s+|my\s+)?(?:\w+\s+){0,2}(?:lights?|lamps?|fans?)\b",
+        r"\bdim\s+(?:the|my)\b",
+        # Brightness / thermostat style only (not generic "set … to …")
+        r"\bset\s+(?:the\s+)?(?:lights?|lamps?|thermostat|temperature|fan|brightness|ceiling|kitchen|bedroom|living\s+room|heater|hvac|ac)\b[\w\s,'-]{0,40}?(?:to|at)\s+\d{1,3}\s*%",
+        # set kitchen red 60% (color + brightness without "to")
+        r"\bset\s+(?:the\s+)?[\w\s]{1,32}\s+(?:red|green|blue|white|yellow|orange|purple|pink|cyan|magenta|warm\s+white|cool\s+white)\s+\d{1,3}\s*%",
+        r"\bset\s+(?:the\s+)?(?:thermostat|temperature|hvac|heat|cool|ac)\b[\w\s,'-]{0,35}?(?:to|at)\s+\d{1,3}\s*(?:°|degrees?\b)?",
+        r"\b(?:what\s*'?\s*s|what\s+is)\s+the\s+temperature\s+(?:in|of)\s+\w",
+    )
+    return any(re.search(p, hay, flags=re.IGNORECASE) for p in patterns)
 
 
 def _normalize_command_name(name: str) -> str:
@@ -847,7 +882,14 @@ async def process_discord_message(client, message, permission, conversation_mana
     # Only process if activated
     if not (is_wake_word or is_dm or is_mentioned or is_reply_to_bot or is_admin_bang):
         return False
-    
+
+    if is_dm:
+        try:
+            label = (getattr(message.author, "global_name", None) or message.author.name or "").strip()
+            jarvis_manager.touch_adaptive_sync_display_name(message.author.id, label)
+        except Exception:
+            pass
+
     # Extract clean content
     if is_wake_word:
         clean_content = message.content[len(wake_word):].strip()

@@ -15,15 +15,11 @@ def register(client: discord.Client):
         if not isinstance(interaction.channel, discord.DMChannel):
             await interaction.response.send_message("❌ This command works only in DMs.", ephemeral=True)
             return
+        label = (getattr(interaction.user, "global_name", None) or interaction.user.name or "").strip()
+        jarvis_manager.touch_adaptive_sync_display_name(interaction.user.id, label)
         if not jarvis_manager.is_enabled(interaction.user.id):
             await interaction.response.send_message(
                 "ℹ️ Adaptive assistant is off in this DM. Turn it on with the DM assistant toggle first.",
-                ephemeral=True,
-            )
-            return
-        if jarvis_manager.get_profile_manual_override(interaction.user.id):
-            await interaction.response.send_message(
-                "ℹ️ Manual user context is active. Clear it with **`reset manual`** as a reply to your latest status export message before auto tone tuning can update the profile.",
                 ephemeral=True,
             )
             return

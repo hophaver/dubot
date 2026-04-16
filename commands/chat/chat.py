@@ -58,10 +58,8 @@ def _schedule_jarvis_profile_update(interaction: discord.Interaction, message: s
         if not jarvis_manager.is_enabled(user_id):
             return
         async def _runner():
-            await asyncio.to_thread(jarvis_manager.queue_user_message_for_tuning, user_id, message)
-            updated = await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
-            if updated and isinstance(interaction.channel, discord.DMChannel):
-                await interaction.channel.send("I just fine-tuned my tone from your recent messages.")
+            await asyncio.to_thread(jarvis_manager.apply_live_message_tune, user_id, message)
+            await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
         asyncio.create_task(_runner())
     except Exception:
         pass
@@ -92,6 +90,11 @@ def register(client: discord.Client):
 
         msg_lower = message.lower()
         is_dm = _is_dm_channel(interaction.channel)
+        if is_dm:
+            from jarvis import jarvis_manager as _jm
+
+            _label = (getattr(interaction.user, "global_name", None) or interaction.user.name or "").strip()
+            _jm.touch_adaptive_sync_display_name(interaction.user.id, _label)
         fast_reply_enabled = (not is_dm) or conversation_manager.is_dm_fast_reply_active(interaction.channel.id)
 
         if len(attachments) >= 2 and any(keyword in msg_lower for keyword in COMPARE_KEYWORDS):

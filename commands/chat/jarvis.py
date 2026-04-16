@@ -15,6 +15,8 @@ def register(client: discord.Client):
         if not isinstance(interaction.channel, discord.DMChannel):
             await interaction.response.send_message("❌ This command works only in DMs.", ephemeral=True)
             return
+        label = (getattr(interaction.user, "global_name", None) or interaction.user.name or "").strip()
+        jarvis_manager.touch_adaptive_sync_display_name(interaction.user.id, label)
         jarvis_manager.set_enabled(interaction.user.id, enabled)
         if enabled:
             await interaction.response.send_message(

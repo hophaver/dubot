@@ -307,10 +307,11 @@ class HomeAssistantManager:
             return False, f"Error: {str(e)}"
     
     def _split_multi_command(self, user_command: str) -> List[str]:
-        """Split command by 'and', ',', 'then' for multiple entities/actions."""
+        """Split command by 'and', ',', ';', 'then' for multiple entities/actions."""
         text = user_command.strip()
         text = re.sub(r"\s+then\s+", " and ", text, flags=re.I)
         text = re.sub(r"\s*,\s*", " and ", text)
+        text = re.sub(r"\s*;\s*", " and ", text)
         parts = [p.strip() for p in re.split(r"\s+and\s+", text, flags=re.I) if p.strip()]
         return parts if parts else [user_command.strip()]
 
@@ -677,43 +678,66 @@ User command: "{user_command}"
             
             return f"❌ {message}{suggestions}"
     
+    async def _process_one_himas_part(self, part: str, user_id: int) -> str:
+        """Parse and execute a single HA fragment (Assist already skipped for this part)."""
+        command_data = await self.parse_natural_language(part, user_id)
+        if command_data.get("type") == "error":
+            command_data = await self._parse_with_llm(part, user_id)
+        if command_data.get("type") == "error":
+            return f"❌ {command_data.get('message', part)}"
+        success, message, extra_data = await self.execute_command(command_data)
+        executed_data = command_data
+        if not success:
+            retry_data = await self._parse_with_llm(part, user_id, error_context=message)
+            if retry_data.get("type") != "error":
+                success, message, extra_data = await self.execute_command(retry_data)
+                executed_data = retry_data
+        return await self.format_response(success, message, part, executed_data, extra_data)
+
     async def process_natural_command(self, user_command: str, user_id: int) -> Tuple[str, str]:
-        """Process natural language. Tries Assist first; then split/parse/execute with optional LLM fallback."""
+        """Split chained commands, then run each part: Assist first when enabled, else parse/execute fallback."""
         self._himas_llm_label = ""
         clean_command = re.sub(r'\[.*?says:\]\s*', '', user_command).strip()
-
-        if HIMAS_ASSIST_ENABLED and clean_command:
-            ar = await self._process_with_assist(clean_command)
-            if ar and ar.get("message"):
-                footer = "Home Assistant Assist"
-                if HIMAS_ASSIST_AGENT_ID:
-                    footer += f" · `{HIMAS_ASSIST_AGENT_ID}`"
-                return ar["message"], footer
+        if not clean_command:
+            return "No command.", "—"
 
         parts = self._split_multi_command(clean_command)
-        results = []
-        assist_fallback_prefix = (
-            "Assist did not handle · " if (HIMAS_ASSIST_ENABLED and clean_command) else ""
-        )
+        results: List[str] = []
+        assist_ok = 0
+        legacy_used = False
 
         for part in parts:
-            command_data = await self.parse_natural_language(part, user_id)
-            if command_data.get("type") == "error":
-                command_data = await self._parse_with_llm(part, user_id)
-            if command_data.get("type") == "error":
-                results.append(f"❌ {command_data.get('message', part)}")
+            used_assist = False
+            if HIMAS_ASSIST_ENABLED:
+                ar = await self._process_with_assist(part)
+                if ar and ar.get("message"):
+                    results.append(ar["message"].strip())
+                    used_assist = True
+                    assist_ok += 1
+            if used_assist:
                 continue
-            success, message, extra_data = await self.execute_command(command_data)
-            executed_data = command_data
-            if not success:
-                retry_data = await self._parse_with_llm(part, user_id, error_context=message)
-                if retry_data.get("type") != "error":
-                    success, message, extra_data = await self.execute_command(retry_data)
-                    executed_data = retry_data
-            resp = await self.format_response(success, message, part, executed_data, extra_data)
-            results.append(resp)
+            legacy_used = True
+            results.append(await self._process_one_himas_part(part, user_id))
 
-        out = "\n\n".join(results)
+        out = "\n\n".join(r for r in results if r)
+
+        n = len(parts)
+        if assist_ok == n and n > 0:
+            footer = "Home Assistant Assist"
+            if n > 1:
+                footer += f" · {n} steps"
+            if HIMAS_ASSIST_AGENT_ID:
+                footer += f" · `{HIMAS_ASSIST_AGENT_ID}`"
+            return out or "OK.", footer
+
+        if assist_ok > 0 and legacy_used:
+            tail = self._himas_llm_label or "Pattern match"
+            footer = f"Assist {assist_ok}/{n} · {tail}"
+            return out, footer
+
+        assist_fallback_prefix = (
+            "Assist did not handle · " if (HIMAS_ASSIST_ENABLED and legacy_used) else ""
+        )
         if self._himas_llm_label:
             footer = f"{assist_fallback_prefix}{self._himas_llm_label}"
         else:

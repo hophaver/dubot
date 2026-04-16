@@ -67,6 +67,13 @@ class BotClient(discord.Client):
             await revert_if_active(self)
         except Exception:
             pass
+        try:
+            from jarvis import export_adaptive_to_personas
+            from personas import persona_manager as _persona_manager
+
+            export_adaptive_to_personas(_persona_manager)
+        except Exception:
+            pass
         conversation_manager.save()
         reminder_manager.stop()
         news_manager.stop()
@@ -84,7 +91,15 @@ class BotClient(discord.Client):
 
         # Set news service client
         news_manager.set_client(self)
-    
+
+        try:
+            from jarvis import export_adaptive_to_personas
+            from personas import persona_manager as _persona_manager
+
+            export_adaptive_to_personas(_persona_manager)
+        except Exception:
+            pass
+
     async def register_all_commands(self):
         """Register ALL commands without duplicates"""
         # Clear existing commands

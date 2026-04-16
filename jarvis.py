@@ -3,23 +3,33 @@ import os
 import re
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # Minimal base instructions when adaptive DM assistant is on (replaces global persona for that DM).
 ADAPTIVE_DM_BASE_PERSONA = (
     "You are the user's private DM assistant. "
     "Follow the user-specific context and behaviour instructions supplied below. "
-    "Be accurate and helpful; use command and capability details from the system prompt when relevant."
+    "Be accurate and helpful; use command and capability details from the system prompt when relevant. "
+    "Sound like a sharp human in DMs—direct, specific, not generic—without sounding like customer support or a tutorial."
 )
 
 # Appended to the system prompt when adaptive DM assistant is enabled (single source of truth).
 ADAPTIVE_DM_SYSTEM_SUFFIX = (
     "\n\nFor this direct message conversation, keep your tone natural and conversational. "
     "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
-    "Be proactive, keep continuity, and match the user's style."
+    "Be proactive, keep continuity, and match the user's style. "
+    "Use normal punctuation (periods, commas, question marks) in your replies even when the user omits it. "
+    "Avoid AI tells (over-explaining, numbered lists unless asked, 'happy to help', 'let me know if you need anything else')."
 )
 
+# Aggressive tuning: batch queue + frequent structured nudges from single messages.
+TUNE_MIN_MESSAGES = 3
+TUNE_MIN_INTERVAL_SECONDS = 120
+TUNE_QUEUE_ENTRY_MAX = 400
+TUNE_QUEUE_MAX_ITEMS = 60
+
 _MANUAL_CONTEXT_MAX_LEN = 12000
+
 
 # Lines at the start of exported status files to strip when pasting back.
 _MANUAL_PASTE_HEADER_PREFIXES = (
@@ -59,8 +69,38 @@ class JarvisManager:
                 "tone_tuning_updates": 0,
                 "profile_manual_override": "",
                 "status_reply_anchor": None,
+                "adaptive_sync_display_name": "",
+                "last_exported_persona_key": "",
             }
         return self.state[key]
+
+    def touch_adaptive_sync_display_name(self, user_id: int, display_name: str) -> None:
+        """Remember Discord display/global name for the \"<name> adaptive\" persona export."""
+        name = (display_name or "").strip()
+        if not name:
+            return
+        st = self._get_user_state(user_id)
+        if st.get("adaptive_sync_display_name") == name:
+            return
+        st["adaptive_sync_display_name"] = name
+        self.save()
+
+    def adaptive_export_persona_key(self, user_id: int, used_keys: Set[str]) -> str:
+        """
+        Personas.json key shown in /persona: \"<display_name> adaptive\" (e.g. \".dubyu adaptive\").
+        If that label is already taken, uses \"<display_name> adaptive (<user_id>)\".
+        """
+        raw = str(self._get_user_state(user_id).get("adaptive_sync_display_name", "") or "").strip() or "user"
+        raw = raw.replace("\n", " ").replace("\r", "").strip()
+        if len(raw) > 72:
+            raw = raw[:72].rstrip()
+        primary = f"{raw} adaptive"
+        if primary not in used_keys:
+            used_keys.add(primary)
+            return primary
+        fallback = f"{raw} adaptive ({self._key(user_id)})"
+        used_keys.add(fallback)
+        return fallback
 
     def is_enabled(self, user_id: int) -> bool:
         return bool(self._get_user_state(user_id).get("enabled", False))
@@ -134,10 +174,8 @@ class JarvisManager:
         return t.strip()
 
     def update_profile_from_message(self, user_id: int, text: str) -> None:
-        """Lightweight preference/tone extraction from DM user text."""
+        """Lightweight preference/tone extraction from DM user text (runs even when manual context is set)."""
         if not text:
-            return
-        if self.get_profile_manual_override(user_id):
             return
         user_state = self._get_user_state(user_id)
         profile = user_state.setdefault("profile", {})
@@ -174,43 +212,87 @@ class JarvisManager:
         if len(text.split()) <= 6:
             if "often writes short direct messages" not in tone_notes:
                 tone_notes.append("often writes short direct messages")
+        if len(text) > 12 and not re.search(r"[.!?]", text):
+            if "often skips sentence-ending punctuation" not in tone_notes:
+                tone_notes.append("often skips sentence-ending punctuation")
+        slang_hits = (
+            " ngl ",
+            " tbh ",
+            " imo ",
+            " idk ",
+            " kinda ",
+            " sorta ",
+            " nvm ",
+            " fr ",
+            " lowkey ",
+        )
+        if any(s in f" {lower} " for s in slang_hits) or lower.startswith(
+            ("ngl ", "tbh ", "imo ", "lol", "lmao", "idk ")
+        ):
+            if "uses informal internet shorthand" not in tone_notes:
+                tone_notes.append("uses informal internet shorthand")
+        if "..." in text or re.search(r"\.{2,}", text):
+            if "uses ellipses or multi-dot pauses" not in tone_notes:
+                tone_notes.append("uses ellipses or multi-dot pauses")
+        if len(text) > 80:
+            if "sometimes sends longer messages" not in tone_notes:
+                tone_notes.append("sometimes sends longer messages")
 
         # Cap growth.
         profile["preferred_name"] = preferred_name
-        profile["likes"] = likes[-20:]
-        profile["dislikes"] = dislikes[-20:]
-        profile["tone_notes"] = tone_notes[-20:]
+        profile["likes"] = likes[-24:]
+        profile["dislikes"] = dislikes[-24:]
+        profile["tone_notes"] = tone_notes[-30:]
         user_state["profile"] = profile
         self.save()
 
-    def get_profile_prompt(self, user_id: int) -> str:
-        manual = self.get_profile_manual_override(user_id)
-        if manual:
-            low_start = manual.lstrip().lower()
-            if low_start.startswith("user-specific context"):
-                return manual
-            return "User-specific context (manual):\n" + manual
+    def _format_manual_block(self, manual: str) -> str:
+        manual = (manual or "").strip()
+        if not manual:
+            return ""
+        low_start = manual.lstrip().lower()
+        if low_start.startswith("user-specific context"):
+            return manual
+        return "User-specific context (manual):\n" + manual
 
+    def _structured_profile_prompt(self, user_id: int) -> str:
         profile = self.get_profile(user_id)
         if not profile:
             return ""
-        lines = ["User-specific context (learned from this user):"]
+        lines = ["User-specific context (auto, learned from your messages):"]
         preferred_name = str(profile.get("preferred_name", "") or "").strip()
         if preferred_name:
             lines.append(f"- Preferred name: {preferred_name}")
         likes = profile.get("likes", []) or []
         if likes:
-            lines.append(f"- Likes: {', '.join(likes[:8])}")
+            lines.append(f"- Likes: {', '.join(likes[:12])}")
         dislikes = profile.get("dislikes", []) or []
         if dislikes:
-            lines.append(f"- Dislikes: {', '.join(dislikes[:8])}")
+            lines.append(f"- Dislikes: {', '.join(dislikes[:12])}")
         tone_notes = profile.get("tone_notes", []) or []
         if tone_notes:
-            lines.append(f"- Tone notes: {', '.join(tone_notes[:8])}")
+            lines.append(f"- Tone notes: {', '.join(tone_notes[:14])}")
         if len(lines) == 1:
             return ""
         lines.append("- Match the user's style naturally without being repetitive.")
         return "\n".join(lines)
+
+    def get_profile_prompt(self, user_id: int) -> str:
+        auto = self._structured_profile_prompt(user_id)
+        manual_raw = self.get_profile_manual_override(user_id)
+        if manual_raw:
+            manual = self._format_manual_block(manual_raw)
+            if auto:
+                return f"{manual}\n\n{auto}"
+            return manual
+        return auto
+
+    def apply_live_message_tune(self, user_id: int, text: str) -> None:
+        """Per-message nudge plus queue sample (aggressive adaptivity)."""
+        if not text or not self.is_enabled(user_id):
+            return
+        self.update_profile_from_message(user_id, text)
+        self.queue_user_message_for_tuning(user_id, text)
 
     def get_full_jarvis_system_addition(self, user_id: int) -> str:
         """Text appended to the base persona+chat system prompt when adaptive DM assistant is on (learned + fixed behaviour)."""
@@ -277,18 +359,25 @@ class JarvisManager:
         """Queue user-only samples for periodic tone tuning."""
         if not text:
             return
-        if self.get_profile_manual_override(user_id):
-            return
         user_state = self._get_user_state(user_id)
         queue = list(user_state.get("tone_tuning_queue", []) or [])
         cleaned = str(text).strip()
         if not cleaned:
             return
-        queue.append(cleaned[:240])
-        user_state["tone_tuning_queue"] = queue[-40:]
+        queue.append(cleaned[:TUNE_QUEUE_ENTRY_MAX])
+        user_state["tone_tuning_queue"] = queue[-TUNE_QUEUE_MAX_ITEMS:]
         self.save()
 
-    def should_run_tone_tuning(self, user_id: int, min_messages: int = 8, min_interval_seconds: int = 900) -> bool:
+    def should_run_tone_tuning(
+        self,
+        user_id: int,
+        min_messages: Optional[int] = None,
+        min_interval_seconds: Optional[int] = None,
+    ) -> bool:
+        min_messages = TUNE_MIN_MESSAGES if min_messages is None else int(min_messages)
+        min_interval_seconds = (
+            TUNE_MIN_INTERVAL_SECONDS if min_interval_seconds is None else int(min_interval_seconds)
+        )
         user_state = self._get_user_state(user_id)
         queue = user_state.get("tone_tuning_queue", []) or []
         last_ts = float(user_state.get("last_tone_tuning_ts", 0.0) or 0.0)
@@ -298,21 +387,33 @@ class JarvisManager:
 
     def run_tone_tuning_now(self, user_id: int, force: bool = False) -> bool:
         """Apply queued user samples to profile. Returns True when profile updated."""
-        if self.get_profile_manual_override(user_id):
-            return False
         user_state = self._get_user_state(user_id)
         queue = list(user_state.get("tone_tuning_queue", []) or [])
         if not queue:
             return False
         if (not force) and (not self.should_run_tone_tuning(user_id)):
             return False
-        merged = "\n".join(queue[-20:])
+        merged = "\n".join(queue[-24:])
         self.update_profile_from_message(user_id, merged)
         user_state["tone_tuning_queue"] = []
         user_state["last_tone_tuning_ts"] = time.time()
         user_state["tone_tuning_updates"] = int(user_state.get("tone_tuning_updates", 0) or 0) + 1
         self.save()
         return True
+
+    def has_exportable_adaptive(self, user_id: int) -> bool:
+        """True if this user has adaptive DM state worth syncing into personas.json."""
+        st = self._get_user_state(user_id)
+        if st.get("enabled"):
+            return True
+        if str(st.get("profile_manual_override", "") or "").strip():
+            return True
+        p = st.get("profile") or {}
+        if str(p.get("preferred_name", "") or "").strip():
+            return True
+        if p.get("likes") or p.get("dislikes") or p.get("tone_notes"):
+            return True
+        return False
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.save_file), exist_ok=True)
@@ -329,3 +430,66 @@ class JarvisManager:
 
 
 jarvis_manager = JarvisManager()
+
+
+def export_adaptive_to_personas(persona_manager) -> None:
+    """
+    Upsert adaptive DM bundles into personas.json as \"<Discord display name> adaptive\".
+    Drops legacy adaptive_dm_* keys and the previous export key if the display name changed.
+    """
+    try:
+        legacy_prefix = "adaptive_dm_"
+        used_keys: Set[str] = set()
+        keys_written: Dict[str, str] = {}
+        removed = False
+        state_dirty = False
+
+        for uid_str in list(jarvis_manager.state.keys()):
+            try:
+                uid = int(uid_str)
+            except (TypeError, ValueError):
+                continue
+            st = jarvis_manager._get_user_state(uid)
+            old_export = str(st.get("last_exported_persona_key", "") or "")
+
+            if not jarvis_manager.has_exportable_adaptive(uid):
+                if old_export and old_export in persona_manager.personas:
+                    del persona_manager.personas[old_export]
+                    removed = True
+                if old_export:
+                    st["last_exported_persona_key"] = ""
+                    state_dirty = True
+                continue
+
+            text = jarvis_manager.get_full_jarvis_system_addition(uid).strip()
+            if not text:
+                if old_export and old_export in persona_manager.personas:
+                    del persona_manager.personas[old_export]
+                    removed = True
+                if old_export:
+                    st["last_exported_persona_key"] = ""
+                    state_dirty = True
+                continue
+
+            new_key = jarvis_manager.adaptive_export_persona_key(uid, used_keys)
+            if old_export and old_export != new_key and old_export in persona_manager.personas:
+                del persona_manager.personas[old_export]
+                removed = True
+            keys_written[new_key] = text
+            if st.get("last_exported_persona_key") != new_key:
+                st["last_exported_persona_key"] = new_key
+                state_dirty = True
+
+        for k in list(persona_manager.personas.keys()):
+            if k.startswith(legacy_prefix):
+                del persona_manager.personas[k]
+                removed = True
+
+        for k, v in keys_written.items():
+            persona_manager.personas[k] = v
+        if state_dirty:
+            jarvis_manager.save()
+        if keys_written or removed:
+            persona_manager.save_personas()
+    except OSError:
+        pass

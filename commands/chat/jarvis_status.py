@@ -21,6 +21,8 @@ def register(client: discord.Client):
             return
 
         uid = interaction.user.id
+        label = (getattr(interaction.user, "global_name", None) or interaction.user.name or "").strip()
+        jarvis_manager.touch_adaptive_sync_display_name(uid, label)
         snap = jarvis_manager.get_status_snapshot(uid)
         full_addition = jarvis_manager.get_full_jarvis_system_addition(uid)
         if snap["enabled"]:
@@ -77,7 +79,10 @@ def register(client: discord.Client):
                 "The attached file is the **DM-specific** addition (user context + fixed behaviour). "
                 f"{desc_extra}\n\n"
                 "**Reply to this message** with an edited version of that text (or only the user-context part) to "
-                "set **manual** context; it overrides auto-learned bullets until you send **`reset manual`** here."
+                "set **manual** context (shown together with auto-learned notes). Auto tuning still updates in the background; "
+                "send **`reset manual`** here to drop only the manual block. "
+                "On each bot restart, this bundle is also written into **`personas.json`** as "
+                "**`<your Discord display name> adaptive`** (e.g. `.dubyu adaptive`), using your name from your last DM or slash command."
             ),
             color=discord.Color.blurple(),
         )

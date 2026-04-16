@@ -1,4 +1,9 @@
-"""Persona definitions and global persona setting. Persisted in personas.json; current persona in config.json."""
+"""Persona definitions and global persona setting. Persisted in personas.json; current persona in config.json.
+
+Adaptive exports use persona keys: the user's Discord display name plus a space and the word adaptive
+(for example .dubyu adaptive). The bot updates these on startup/shutdown (see jarvis.export_adaptive_to_personas).
+Legacy keys adaptive_dm_* are removed on export.
+"""
 import json
 import os
 
