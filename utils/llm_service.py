@@ -688,6 +688,8 @@ async def adaptive_dm_image_flow_refine_text_for_image(
     user_id: int,
     draft_reply: str,
     image_bytes: bytes,
+    *,
+    image_prompt: str = "",
 ) -> str:
     """Step 3: Vision — adjust draft if image mismatches; else return unchanged."""
     if not image_bytes:
@@ -704,8 +706,12 @@ async def adaptive_dm_image_flow_refine_text_for_image(
         "You are given the draft message text written as if that image was already sent.\n"
         "If the image matches the draft, output exactly: KEEP\n"
         "If the image differs (wrong subject, missing detail, wrong colors, bad text in image), output the FULL revised "
-        "message text only (same tone, still acknowledging you generated this image; max ~120 words). No explanation."
+        "message text only (same tone, still acknowledging you generated this image; max ~120 words). No explanation.\n"
+        "Output ONLY the message the user will see — one block of text. Do NOT append the image prompt, labels, "
+        "or any second paragraph of instructions."
     )
+    if (image_prompt or "").strip():
+        sys += "\nNever repeat or quote this internal image prompt in your output:\n" + (image_prompt or "")[:500]
     user_t = f"Draft:\n{(draft_reply or '')[:900]}"
     messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_t, "images": [b64]}]
     try:

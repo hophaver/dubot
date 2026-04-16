@@ -77,6 +77,12 @@ class BotClient(discord.Client):
         conversation_manager.save()
         reminder_manager.stop()
         news_manager.stop()
+        try:
+            from utils.dm_image_flow_temp import clear_all_temp_sessions_sync
+
+            clear_all_temp_sessions_sync()
+        except Exception:
+            pass
         await super().close()
 
     async def setup_hook(self):

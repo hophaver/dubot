@@ -14,17 +14,9 @@ from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from models import model_manager
-from utils.llm_service import (
-    ask_llm,
-    plan_command_from_text,
-    adaptive_dm_image_flow_compress_image_prompt,
-    adaptive_dm_image_flow_draft_reply,
-    adaptive_dm_image_flow_refine_text_for_image,
-)
-from utils.openrouter_image import (
-    OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
-    generate_openrouter_image_with_fallback,
-)
+from utils.llm_service import ask_llm, plan_command_from_text
+from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_file_pipeline
+from utils.dm_image_flow_temp import FINAL_NAME, read_text, remove_session_dir
 from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
@@ -344,47 +336,45 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
         await _send_chat_output(message, "Say what to generate (e.g. **imagine** a red panda in a spacesuit), or use **`/imagine`**.")
         return True
 
-    draft_reply = await adaptive_dm_image_flow_draft_reply(
-        uid,
-        message.channel.id,
-        str(message.author.name),
-        idea,
-    )
-    image_prompt = await adaptive_dm_image_flow_compress_image_prompt(uid, draft_reply, idea)
-
-    img_bytes, mime, _api_text, err = await generate_openrouter_image_with_fallback(
-        model_name,
-        image_prompt,
-        system_prompt=OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
-    )
-    if err:
-        await _send_chat_output(message, f"❌ {err}")
-        return True
-    if not img_bytes:
-        await _send_chat_output(message, "❌ No image came back from the model. Try another model or a clearer prompt.")
-        return True
-
-    final_text = await adaptive_dm_image_flow_refine_text_for_image(uid, draft_reply, img_bytes)
-    if not (final_text or "").strip():
-        final_text = draft_reply
-    if len(final_text) > 1900:
-        final_text = final_text[:1890].rstrip() + "…"
-
-    ext = _ext_for_generated_image_mime(mime)
-    file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
-    content = final_text.strip()
-
-    sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
+    session_dir = None
     try:
-        cid = message.channel.id
-        conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
-        conversation_manager.add_message(cid, "assistant", content)
-    except Exception:
-        pass
-    conversation_manager.set_last_bot_message(message.channel.id, sent.id)
-    conversation_manager.save()
-    _schedule_adaptive_post_reply_calibration(message, clean_content)
-    return True
+        session_dir, img_bytes, mime, err = await run_adaptive_dm_image_file_pipeline(
+            uid,
+            message.channel.id,
+            str(message.author.name),
+            idea,
+            model_name,
+        )
+        if err:
+            await _send_chat_output(message, f"❌ {err}")
+            return True
+        if not img_bytes:
+            await _send_chat_output(message, "❌ No image came back from the model. Try another model or a clearer prompt.")
+            return True
+
+        final_path = session_dir / FINAL_NAME
+        content = (await read_text(final_path)).strip()
+        if not content:
+            content = "Here’s the image."
+        if len(content) > 1900:
+            content = content[:1890].rstrip() + "…"
+
+        ext = _ext_for_generated_image_mime(mime)
+        file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
+
+        sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
+        try:
+            cid = message.channel.id
+            conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
+            conversation_manager.add_message(cid, "assistant", content)
+        except Exception:
+            pass
+        conversation_manager.set_last_bot_message(message.channel.id, sent.id)
+        conversation_manager.save()
+        _schedule_adaptive_post_reply_calibration(message, clean_content)
+        return True
+    finally:
+        await remove_session_dir(session_dir)
 
 
 def _looks_like_command_request(text: str) -> bool:
