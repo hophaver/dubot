@@ -43,7 +43,7 @@ from utils.llm_service import initialize_command_database
 from utils import home_log
 from utils import reliability_telemetry
 from commands.shared import send_long_to_channel, bot_embed_thumbnail_url, sanitize_discord_bot_content
-from jarvis import jarvis_manager
+from adaptive_dm import adaptive_dm_manager
 
 # Initialize command database
 initialize_command_database()
@@ -68,7 +68,7 @@ class BotClient(discord.Client):
         except Exception:
             pass
         try:
-            from jarvis import export_adaptive_to_personas
+            from adaptive_dm import export_adaptive_to_personas
             from personas import persona_manager as _persona_manager
 
             export_adaptive_to_personas(_persona_manager)
@@ -93,7 +93,7 @@ class BotClient(discord.Client):
         news_manager.set_client(self)
 
         try:
-            from jarvis import export_adaptive_to_personas
+            from adaptive_dm import export_adaptive_to_personas
             from personas import persona_manager as _persona_manager
 
             export_adaptive_to_personas(_persona_manager)
@@ -280,7 +280,7 @@ async def on_message(message):
         async def _guild_adaptive_tune():
             try:
                 await asyncio.to_thread(
-                    jarvis_manager.maybe_tune_from_guild_channel_message,
+                    adaptive_dm_manager.maybe_tune_from_guild_channel_message,
                     ag_cid,
                     ag_aid,
                     ag_content,

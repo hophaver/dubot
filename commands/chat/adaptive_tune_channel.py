@@ -3,7 +3,7 @@ from typing import Optional, Union
 import discord
 from discord import app_commands
 
-from jarvis import jarvis_manager
+from adaptive_dm import adaptive_dm_manager
 from whitelist import get_user_permission
 
 TextlikeChannel = Union[discord.TextChannel, discord.Thread]
@@ -18,7 +18,7 @@ def _textlike_channel(ch) -> Optional[TextlikeChannel]:
 def register(client: discord.Client):
     @client.tree.command(
         name="adaptive-tune-channel",
-        description="Tune your adaptive profile from a server channel (same profile as DMs; your messages only)",
+        description="Tune adaptive from a server channel (same profile as DMs; your messages only)",
     )
     @app_commands.describe(
         enabled="On: your messages in the saved channel also tune your profile. Off: only DMs tune (channel id kept unless you clear it).",
@@ -43,9 +43,9 @@ def register(client: discord.Client):
             resolved = _textlike_channel(interaction.channel)
 
         if enabled:
-            if not jarvis_manager.is_enabled(uid):
+            if not adaptive_dm_manager.is_enabled(uid):
                 await interaction.response.send_message(
-                    "Turn on adaptive assistant in DMs first (toggle with **`/jarvis`** enabled: on), then enable channel tuning.",
+                    "Turn **adaptive** on in DMs first (`/adaptive` → on), then enable this.",
                     ephemeral=True,
                 )
                 return
@@ -61,7 +61,7 @@ def register(client: discord.Client):
                     "❌ You need read access to that channel.", ephemeral=True
                 )
                 return
-            jarvis_manager.set_guild_tune_channel(
+            adaptive_dm_manager.set_guild_tune_channel(
                 uid,
                 enabled=True,
                 channel_id=resolved.id,
@@ -69,14 +69,13 @@ def register(client: discord.Client):
             )
             label = f"#{resolved.name}" if hasattr(resolved, "name") else str(resolved.id)
             await interaction.response.send_message(
-                f"✅ Channel tuning **on**. Your messages in **{label}** (`{resolved.id}`) update the **same** adaptive profile as your DMs. "
-                f"URLs are ignored for tuning.\n"
-                f"Turn off with **`/adaptive-tune-channel` enabled: false** (DM tuning continues).",
+                f"✅ **On** — `{label}` updates the same adaptive profile as your DMs (URLs ignored). "
+                f"Off: `/adaptive-tune-channel` with **enabled: false**.",
                 ephemeral=True,
             )
             return
 
-        jarvis_manager.set_guild_tune_channel(
+        adaptive_dm_manager.set_guild_tune_channel(
             uid,
             enabled=False,
             channel_id=None,
@@ -84,12 +83,11 @@ def register(client: discord.Client):
         )
         if clear_stored_channel:
             await interaction.response.send_message(
-                "✅ Channel tuning **off**, and the saved channel was cleared. DM tuning is unchanged.",
+                "✅ **Off** — saved channel cleared. DMs unchanged.",
                 ephemeral=True,
             )
         else:
             await interaction.response.send_message(
-                "✅ Channel tuning **off**. Your saved channel is kept—turn **enabled** back on to resume without picking again. "
-                "DM tuning continues.",
+                "✅ **Off** — channel id kept; turn **enabled** on again to resume. DMs unchanged.",
                 ephemeral=True,
             )

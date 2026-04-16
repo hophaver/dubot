@@ -13,7 +13,7 @@ from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
 from llm_function_prefs import get_function_persona_name
-from jarvis import jarvis_manager, ADAPTIVE_DM_BASE_PERSONA, ADAPTIVE_DM_SYSTEM_SUFFIX
+from adaptive_dm import adaptive_dm_manager, ADAPTIVE_DM_BASE_PERSONA, ADAPTIVE_DM_SYSTEM_SUFFIX
 from utils import home_log
 from utils import reliability_telemetry
 
@@ -209,11 +209,11 @@ def initialize_command_database():
     command_db.add_command("forget", "Clear chat history (admin only)", "General")
     command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
     command_db.add_command("dm-history", "DM only: view/set history cutoff for rolling summarization", "General")
-    command_db.add_command("jarvis", "DM only: toggle adaptive personal assistant for this DM", "General")
-    command_db.add_command("jarvis-tune", "DM only: manually update tone/preferences from recent messages", "General")
+    command_db.add_command("adaptive", "DMs: adaptive assistant on/off", "General")
+    command_db.add_command("adaptive-tune", "DMs: apply queued messages to adaptive profile", "General")
     command_db.add_command(
-        "jarvis-status",
-        "DM only: show adaptive DM context; reply to that message to set manual context (send reset manual to clear)",
+        "adaptive-status",
+        "DMs: adaptive context file; reply to set manual notes (reset manual to clear)",
         "General",
     )
     command_db.add_command(
@@ -588,7 +588,7 @@ async def ask_llm(
     location, city, country = await _get_runtime_location_cached()
     
     # Persona: adaptive DM mode uses a minimal base + user-built context only (no global persona).
-    adaptive_dm = bool(is_dm and jarvis_manager.is_enabled(user_id))
+    adaptive_dm = bool(is_dm and adaptive_dm_manager.is_enabled(user_id))
     if adaptive_dm:
         system_prompt = ADAPTIVE_DM_BASE_PERSONA
     else:
@@ -675,7 +675,7 @@ async def ask_llm(
         )
     enhanced_system_prompt = f"{system_prompt}\n\n{enhanced}"
     if adaptive_dm:
-        dm_profile_prompt = jarvis_manager.get_profile_prompt(user_id)
+        dm_profile_prompt = adaptive_dm_manager.get_profile_prompt(user_id)
         if dm_profile_prompt:
             enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{dm_profile_prompt}"
         enhanced_system_prompt += ADAPTIVE_DM_SYSTEM_SUFFIX

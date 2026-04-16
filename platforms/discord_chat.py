@@ -16,7 +16,7 @@ from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
-from jarvis import jarvis_manager
+from adaptive_dm import adaptive_dm_manager
 from commands.shared import sanitize_discord_bot_content
 
 
@@ -53,20 +53,20 @@ async def _send_with_retry(send_coro_factory, retries: int = 3):
     return None
 
 
-def _schedule_jarvis_post_reply_calibration(message: discord.Message, message_text: str):
+def _schedule_adaptive_post_reply_calibration(message: discord.Message, message_text: str):
     """Queue user-only samples and periodically update adaptive DM tone after replying."""
     user_id = getattr(message.author, "id", None)
     if user_id is None:
         return
     if not message_text:
         return
-    if not jarvis_manager.is_enabled(user_id):
+    if not adaptive_dm_manager.is_enabled(user_id):
         return
 
     async def _runner():
         try:
-            await asyncio.to_thread(jarvis_manager.apply_live_message_tune, user_id, message_text)
-            await asyncio.to_thread(jarvis_manager.run_tone_tuning_now, user_id, False)
+            await asyncio.to_thread(adaptive_dm_manager.apply_live_message_tune, user_id, message_text)
+            await asyncio.to_thread(adaptive_dm_manager.run_tone_tuning_now, user_id, False)
         except Exception:
             pass
 
@@ -684,14 +684,14 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
 
 
 async def _try_handle_dm_status_reply(client: discord.Client, message: discord.Message) -> bool:
-    """Apply manual user context when the user replies to the latest /jarvis-status message."""
+    """Apply manual user context when the user replies to the latest /adaptive-status message."""
     if not isinstance(message.channel, discord.DMChannel):
         return False
     ref = message.reference
     if not ref or not ref.message_id:
         return False
     uid = message.author.id
-    anchor = jarvis_manager.get_status_reply_anchor(uid)
+    anchor = adaptive_dm_manager.get_status_reply_anchor(uid)
     if not anchor:
         return False
     if message.channel.id != anchor["channel_id"] or ref.message_id != anchor["message_id"]:
@@ -711,11 +711,11 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
 
     low = text.lower()
     if low in ("reset", "reset manual", "clear", "clear manual"):
-        jarvis_manager.clear_profile_manual_override(uid)
+        adaptive_dm_manager.clear_profile_manual_override(uid)
         await _send_chat_output(message, "✅ Manual context cleared. Using automatic profile again.")
         return True
 
-    normalized = jarvis_manager.normalize_pasted_manual_context(text)
+    normalized = adaptive_dm_manager.normalize_pasted_manual_context(text)
     if not normalized:
         await _send_chat_output(
             message,
@@ -723,7 +723,7 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
         )
         return True
 
-    jarvis_manager.set_profile_manual_override(uid, normalized)
+    adaptive_dm_manager.set_profile_manual_override(uid, normalized)
     await _send_chat_output(
         message,
         "✅ Manual user context updated. It overrides auto-learned bullets until you send **reset manual** as a reply here.",
@@ -731,10 +731,10 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
     return True
 
 
-async def _handle_jarvis_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
+async def _handle_adaptive_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
     """DM-only natural-language command routing with explicit confirmation."""
     user_id = message.author.id
-    pending = jarvis_manager.get_pending_confirmation(user_id)
+    pending = adaptive_dm_manager.get_pending_confirmation(user_id)
     pref_update = _extract_no_confirm_preference(clean_content)
     if pref_update:
         cmd_name, enabled = pref_update
@@ -744,16 +744,16 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
             cmd_name = _normalize_command_name(str(pending_ref.get("command", "") or ""))
         if cmd_name:
             if enabled:
-                jarvis_manager.add_trusted_command(user_id, cmd_name)
+                adaptive_dm_manager.add_trusted_command(user_id, cmd_name)
                 await _send_chat_output(message, f"Cool, I will run `/{cmd_name}` without asking next time.")
             else:
-                jarvis_manager.remove_trusted_command(user_id, cmd_name)
+                adaptive_dm_manager.remove_trusted_command(user_id, cmd_name)
                 await _send_chat_output(message, f"Got it, I will ask before running `/{cmd_name}`.")
             # If user also confirmed in the same message, run pending command right away.
             if pending and _is_positive_confirmation(clean_content):
                 command_name = str(pending.get("command", "")).strip().lower()
                 args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
-                jarvis_manager.clear_pending_confirmation(user_id)
+                adaptive_dm_manager.clear_pending_confirmation(user_id)
                 return await _execute_planned_command(
                     client,
                     message,
@@ -771,7 +771,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
         if _is_positive_confirmation(clean_content):
             command_name = str(pending.get("command", "")).strip().lower()
             args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
-            jarvis_manager.clear_pending_confirmation(user_id)
+            adaptive_dm_manager.clear_pending_confirmation(user_id)
             return await _execute_planned_command(
                 client,
                 message,
@@ -783,9 +783,9 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
         if _looks_like_disable_confirmation_phrase(clean_content):
             command_name = str(pending.get("command", "")).strip().lower()
             if command_name:
-                jarvis_manager.add_trusted_command(user_id, command_name)
+                adaptive_dm_manager.add_trusted_command(user_id, command_name)
             args = pending.get("arguments", {}) if isinstance(pending.get("arguments"), dict) else {}
-            jarvis_manager.clear_pending_confirmation(user_id)
+            adaptive_dm_manager.clear_pending_confirmation(user_id)
             return await _execute_planned_command(
                 client,
                 message,
@@ -795,7 +795,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
                 failure_message="❌ Couldn't run",
             )
         if _is_negative_confirmation(clean_content):
-            jarvis_manager.clear_pending_confirmation(user_id)
+            adaptive_dm_manager.clear_pending_confirmation(user_id)
             await _send_chat_output(message, "No worries, cancelled.")
             return True
         await _send_chat_output(message, "Quick yes/no: should I run it?")
@@ -806,7 +806,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
         if command_obj is not None:
             himas_text = _normalize_himas_command_text(clean_content)
             args = {"command": himas_text}
-            if jarvis_manager.is_trusted_no_confirm(user_id, "himas"):
+            if adaptive_dm_manager.is_trusted_no_confirm(user_id, "himas"):
                 try:
                     kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
                     interaction = _MessageInteractionProxy(client, message, command_obj.name)
@@ -814,7 +814,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
                 except Exception as exc:
                     await _send_chat_output(message, f"❌ Couldn't run `/himas`: {str(exc)[:200]}")
                 return True
-            jarvis_manager.set_pending_confirmation(
+            adaptive_dm_manager.set_pending_confirmation(
                 user_id,
                 {"command": "himas", "arguments": args, "risk": "safe"},
             )
@@ -840,7 +840,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
     args = plan.get("arguments", {}) if isinstance(plan.get("arguments"), dict) else {}
     risk = str(plan.get("risk", "safe")).strip().lower()
     reason = str(plan.get("reason", "")).strip()
-    if jarvis_manager.is_trusted_no_confirm(user_id, command_obj.name):
+    if adaptive_dm_manager.is_trusted_no_confirm(user_id, command_obj.name):
         try:
             kwargs = _build_kwargs_from_plan(client, message, command_obj, args)
             interaction = _MessageInteractionProxy(client, message, command_obj.name)
@@ -849,7 +849,7 @@ async def _handle_jarvis_command_flow(client: discord.Client, message: discord.M
             await _send_chat_output(message, f"❌ Couldn't run `/{command_obj.name}`: {str(exc)[:200]}")
         return True
 
-    jarvis_manager.set_pending_confirmation(
+    adaptive_dm_manager.set_pending_confirmation(
         user_id,
         {"command": command_obj.name, "arguments": args, "risk": risk},
     )
@@ -887,7 +887,7 @@ async def process_discord_message(client, message, permission, conversation_mana
     if is_dm:
         try:
             label = (getattr(message.author, "global_name", None) or message.author.name or "").strip()
-            jarvis_manager.touch_adaptive_sync_display_name(message.author.id, label)
+            adaptive_dm_manager.touch_adaptive_sync_display_name(message.author.id, label)
         except Exception:
             pass
 
@@ -933,9 +933,9 @@ async def process_discord_message(client, message, permission, conversation_mana
     if is_dm and await _try_handle_dm_status_reply(client, message):
         return True
 
-    if is_dm and jarvis_manager.is_enabled(message.author.id):
+    if is_dm and adaptive_dm_manager.is_enabled(message.author.id):
         try:
-            if await _handle_jarvis_command_flow(client, message, clean_content):
+            if await _handle_adaptive_command_flow(client, message, clean_content):
                 return True
         except Exception:
             # If adaptive command routing fails, fall back to normal chat flow.
@@ -1020,7 +1020,7 @@ async def process_discord_message(client, message, permission, conversation_mana
         # Save conversations periodically
         conversation_manager.save()
         if is_dm:
-            _schedule_jarvis_post_reply_calibration(message, clean_content)
+            _schedule_adaptive_post_reply_calibration(message, clean_content)
         return True
 
 async def process_wakeword_download(client, message, link_or_empty):

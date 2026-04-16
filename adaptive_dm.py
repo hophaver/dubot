@@ -58,10 +58,16 @@ def text_for_adaptive_tuning(raw: Optional[str]) -> Optional[str]:
     return t
 
 
-class JarvisManager:
+class AdaptiveDmManager:
     """DM-only per-user adaptive assistant state."""
 
-    def __init__(self, save_file: str = "data/jarvis_state.json"):
+    def __init__(self, save_file: str = "data/adaptive_state.json"):
+        legacy = "data/jarvis_state.json"
+        if save_file == "data/adaptive_state.json" and os.path.isfile(legacy) and not os.path.isfile(save_file):
+            try:
+                os.replace(legacy, save_file)
+            except OSError:
+                pass
         self.save_file = save_file
         self.state: Dict[str, Dict[str, Any]] = defaultdict(dict)
         self._load()
@@ -358,8 +364,8 @@ class JarvisManager:
         self.update_profile_from_message(user_id, text)
         self.queue_user_message_for_tuning(user_id, text)
 
-    def get_full_jarvis_system_addition(self, user_id: int) -> str:
-        """Text appended to the base persona+chat system prompt when adaptive DM assistant is on (learned + fixed behaviour)."""
+    def get_full_adaptive_system_addition(self, user_id: int) -> str:
+        """Text appended to the base persona+chat system prompt when adaptive DM is on (learned + fixed behaviour)."""
         parts = []
         profile = self.get_profile_prompt(user_id)
         if profile:
@@ -495,7 +501,7 @@ class JarvisManager:
             pass
 
 
-jarvis_manager = JarvisManager()
+adaptive_dm_manager = AdaptiveDmManager()
 
 
 def export_adaptive_to_personas(persona_manager) -> None:
@@ -510,15 +516,15 @@ def export_adaptive_to_personas(persona_manager) -> None:
         removed = False
         state_dirty = False
 
-        for uid_str in list(jarvis_manager.state.keys()):
+        for uid_str in list(adaptive_dm_manager.state.keys()):
             try:
                 uid = int(uid_str)
             except (TypeError, ValueError):
                 continue
-            st = jarvis_manager._get_user_state(uid)
+            st = adaptive_dm_manager._get_user_state(uid)
             old_export = str(st.get("last_exported_persona_key", "") or "")
 
-            if not jarvis_manager.has_exportable_adaptive(uid):
+            if not adaptive_dm_manager.has_exportable_adaptive(uid):
                 if old_export and old_export in persona_manager.personas:
                     del persona_manager.personas[old_export]
                     removed = True
@@ -527,7 +533,7 @@ def export_adaptive_to_personas(persona_manager) -> None:
                     state_dirty = True
                 continue
 
-            text = jarvis_manager.get_full_jarvis_system_addition(uid).strip()
+            text = adaptive_dm_manager.get_full_adaptive_system_addition(uid).strip()
             if not text:
                 if old_export and old_export in persona_manager.personas:
                     del persona_manager.personas[old_export]
@@ -537,7 +543,7 @@ def export_adaptive_to_personas(persona_manager) -> None:
                     state_dirty = True
                 continue
 
-            new_key = jarvis_manager.adaptive_export_persona_key(uid, used_keys)
+            new_key = adaptive_dm_manager.adaptive_export_persona_key(uid, used_keys)
             if old_export and old_export != new_key and old_export in persona_manager.personas:
                 del persona_manager.personas[old_export]
                 removed = True
@@ -554,7 +560,7 @@ def export_adaptive_to_personas(persona_manager) -> None:
         for k, v in keys_written.items():
             persona_manager.personas[k] = v
         if state_dirty:
-            jarvis_manager.save()
+            adaptive_dm_manager.save()
         if keys_written or removed:
             persona_manager.save_personas()
     except OSError:
