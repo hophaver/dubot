@@ -12,6 +12,7 @@ from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date
 from conversations import conversation_manager
 from personas import persona_manager
 from models import model_manager
+from llm_function_prefs import get_function_persona_name
 from jarvis import jarvis_manager, ADAPTIVE_DM_BASE_PERSONA, ADAPTIVE_DM_SYSTEM_SUFFIX
 from utils import home_log
 from utils import reliability_telemetry
@@ -237,11 +238,14 @@ def initialize_command_database():
     )
 
     # Persona Commands
-    command_db.add_command("persona", "View or set global AI persona (set/remove: admin only)", "Persona")
     command_db.add_command("persona-create", "[Admin] Create a new persona", "Persona")
     
     # Model Commands
-    command_db.add_command("model", "View and switch AI model (basic commands always run on local Ollama)", "Model")
+    command_db.add_command(
+        "llm-settings",
+        "Per-function model (local/cloud) and persona; default chat model; adaptive DM unchanged",
+        "Model",
+    )
     command_db.add_command("pull-model", "Install local model or validate cloud model", "Model")
     
     # Download Commands
@@ -308,9 +312,12 @@ def initialize_command_database():
     command_db.add_alias("explain", "map")
     command_db.add_alias("remind", "reminder")
     command_db.add_alias("reminders", "my reminders")
-    command_db.add_alias("persona", "personas")
-    command_db.add_alias("model", "models")
-    command_db.add_alias("model", "currentmodel")
+    command_db.add_alias("llm-settings", "llm")
+    command_db.add_alias("llm-settings", "persona")
+    command_db.add_alias("llm-settings", "personas")
+    command_db.add_alias("llm-settings", "model")
+    command_db.add_alias("llm-settings", "models")
+    command_db.add_alias("llm-settings", "currentmodel")
     command_db.add_alias("analyze", "analyze-file")
     command_db.add_alias("analyze", "file-analysis")
     command_db.add_alias("ocr", "extract-text")
@@ -486,9 +493,9 @@ async def compact_dm_history_for_channel(user_id: int, channel_id: int, username
         f"New older messages to merge:\n{joined}"
     )
     messages = [{"role": "user", "content": summary_prompt}]
-    model_info = model_manager.get_user_model_info(user_id)
-    requested_model = model_info.get("model", "qwen2.5:7b")
-    provider = model_info.get("provider", "local")
+    eff = model_manager.get_effective_model_for_function(user_id, "dm_summary")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
     _, summary = await _try_models_with_fallback(
         requested_model=requested_model,
         messages=messages,
@@ -528,9 +535,9 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
         f"Command schema:\n{schema_json}\n\n"
         f"User message:\n{message_text}"
     )
-    model_info = model_manager.get_user_model_info(user_id)
-    requested_model = model_info.get("model", "qwen2.5:7b")
-    provider = model_info.get("provider", "local")
+    eff = model_manager.get_effective_model_for_function(user_id, "command_planner")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
     _, raw = await _try_models_with_fallback(
         requested_model=requested_model,
         messages=[{"role": "user", "content": planner_prompt}],
@@ -568,16 +575,21 @@ async def ask_llm(
     
     # Persona: adaptive DM mode uses a minimal base + user-built context only (no global persona).
     adaptive_dm = bool(is_dm and jarvis_manager.is_enabled(user_id))
-    persona_name = persona_manager.get_user_persona(user_id)
     if adaptive_dm:
         system_prompt = ADAPTIVE_DM_BASE_PERSONA
     else:
-        system_prompt = persona_manager.get_persona(persona_name)
+        fn_persona = get_function_persona_name("chat")
+        system_prompt = persona_manager.get_persona(fn_persona)
     
-    # Get model
-    model_info = model_manager.get_user_model_info(user_id)
-    requested_model = model_info.get("model", "llama3.2:1b")
-    provider = model_info.get("provider", "local")
+    # Get model (adaptive DM keeps the user's default chat model, not per-function chat override)
+    if adaptive_dm:
+        model_info = model_manager.get_user_model_info(user_id)
+        requested_model = model_info.get("model", "llama3.2:1b")
+        provider = model_info.get("provider", "local")
+    else:
+        eff = model_manager.get_effective_model_for_function(user_id, "chat")
+        requested_model = eff.get("model", "llama3.2:1b")
+        provider = eff.get("provider", "local")
     
     # Check if user is asking for commands or help
     user_message_lower = message_text.lower()
@@ -754,7 +766,9 @@ def _clean_response(text):
 async def ask_llm_shitpost(user_id: int, word: str) -> str:
     """One-shot LLM reply for shitpost: max 2 words confirming/continuing the word. Returns empty on error."""
     system_prompt = get_enhanced_prompt("shitpost")
-    requested_model = model_manager.get_last_local_model(user_id, refresh_local=True)
+    eff = model_manager.get_effective_model_for_function(user_id, "shitpost")
+    requested_model = eff.get("model") or model_manager.get_last_local_model(user_id, refresh_local=True)
+    provider = eff.get("provider", "local")
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": word},
@@ -764,7 +778,7 @@ async def ask_llm_shitpost(user_id: int, word: str) -> str:
             requested_model,
             messages,
             images=False,
-            provider="local",
+            provider=provider,
         )
         cleaned = _clean_response(response_text or "")
         if cleaned.startswith("Error:"):
@@ -810,7 +824,7 @@ def _format_vision_help_message() -> str:
     models = model_manager.list_all_models(refresh_local=True)
     if not models:
         return "No vision-capable model could process this image. No models are available. Use **/pull-model local model_name** to install one (e.g. `llava` or `llama3.2:3b`)."
-    lines = ["No vision-capable model could process this image. Use **/model** to switch or **/pull-model local model_name** to install one.", "", "**Available models** (✅ = typically vision-capable):", ""]
+    lines = ["No vision-capable model could process this image. Use **/llm-settings** or **/pull-model local model_name** to install one.", "", "**Available models** (✅ = typically vision-capable):", ""]
     for m in models:
         mark = "✅" if _is_vision_capable(m) else "○"
         lines.append(f"{mark} `{m}`")
@@ -1119,7 +1133,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
     )
     return "Error: Cannot connect to Ollama server."
 
-async def validate_and_set_model(user_id, provider, model_name):
+async def probe_model(provider: str, model_name: str) -> Tuple[bool, str]:
+    """Return (ok, message) after a minimal completion probe (does not persist)."""
     provider = (provider or "local").strip().lower()
     if provider not in {"local", "cloud"}:
         return False, "Provider must be 'local' or 'cloud'."
@@ -1129,20 +1144,35 @@ async def validate_and_set_model(user_id, provider, model_name):
     else:
         response = await _make_ollama_request(model_name, test_messages)
     if response and not response.startswith("Error:"):
+        return True, f"Model '{model_name}' OK ({provider})."
+    return False, f"Cannot use model '{model_name}'. {response}"
+
+
+async def validate_and_set_model(user_id, provider, model_name):
+    ok, msg = await probe_model(provider, model_name)
+    if ok:
         model_manager.set_user_model(user_id, model_name, provider=provider)
         return True, f"Model '{model_name}' set ({provider})."
-    return False, f"Cannot use model '{model_name}'. {response}"
+    return False, msg
+
+
+async def validate_and_set_function_model(user_id, function_key: str, provider: str, model_name: str) -> Tuple[bool, str]:
+    ok, msg = await probe_model(provider, model_name)
+    if ok:
+        model_manager.set_function_model(user_id, function_key, model_name, provider=provider)
+        return True, f"Saved for this function: `{model_name}` ({provider})."
+    return False, msg
 
 async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: bytes, user_prompt: str = "", username: str = "", vision_mode: str = "concise", return_only_text: bool = False) -> str:
     """vision_mode: concise (short), examine (detailed), interrogate (very short). return_only_text: if True, return only extracted/response text (no header)."""
     date, time = update_system_time_date()
     
-    # Get persona and model
-    persona_name = persona_manager.get_user_persona(user_id)
-    system_prompt = persona_manager.get_persona(persona_name)
-    model_info = model_manager.get_user_model_info(user_id)
-    model_name = model_info.get("model", "llama3.2:3b")
-    provider = model_info.get("provider", "local")
+    # Get persona and model (non-adaptive paths; file analysis uses per-function prefs)
+    persona_key = get_function_persona_name("file_analysis")
+    system_prompt = persona_manager.get_persona(persona_key)
+    eff = model_manager.get_effective_model_for_function(user_id, "file_analysis")
+    model_name = eff.get("model", "llama3.2:3b")
+    provider = eff.get("provider", "local")
     
     # Determine file type
     file_type = FileProcessor.get_file_type(filename)
@@ -1241,12 +1271,11 @@ async def compare_files(user_id: int, channel_id: int, files: List[Dict], user_p
     # Get system info
     date, time = update_system_time_date()
     
-    # Get persona and model
-    persona_name = persona_manager.get_user_persona(user_id)
-    system_prompt = persona_manager.get_persona(persona_name)
-    model_info = model_manager.get_user_model_info(user_id)
-    model_name = model_info.get("model", "llama3.2:3b")
-    provider = model_info.get("provider", "local")
+    persona_key = get_function_persona_name("compare_files")
+    system_prompt = persona_manager.get_persona(persona_key)
+    eff = model_manager.get_effective_model_for_function(user_id, "compare_files")
+    model_name = eff.get("model", "llama3.2:3b")
+    provider = eff.get("provider", "local")
     
     # Extract text from all files
     file_contents = []

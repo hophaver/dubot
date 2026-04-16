@@ -66,7 +66,7 @@ def register(client: discord.Client):
         if snap["enabled"]:
             desc_extra = (
                 "With adaptive assistant **on**, the model uses a **minimal base assistant** plus the `chat_adaptive_dm` "
-                "template from `system_prompts.json` (commands, date, etc.)—**not** your global `/persona`."
+                "template from `system_prompts.json` (commands, date, etc.)—**not** your non-adaptive `/llm-settings` personas."
             )
         else:
             desc_extra = (

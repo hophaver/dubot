@@ -108,7 +108,7 @@ class JarvisManager:
 
     def adaptive_export_persona_key(self, user_id: int, used_keys: Set[str]) -> str:
         """
-        Personas.json key shown in /persona: \"<display_name> adaptive\" (e.g. \".dubyu adaptive\").
+        Personas.json key shown in /llm-settings persona list: \"<display_name> adaptive\" (e.g. \".dubyu adaptive\").
         If that label is already taken, uses \"<display_name> adaptive (<user_id>)\".
         """
         raw = str(self._get_user_state(user_id).get("adaptive_sync_display_name", "") or "").strip() or "user"

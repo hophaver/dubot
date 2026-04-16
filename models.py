@@ -2,7 +2,7 @@
 import json
 import os
 import requests
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from integrations import OLLAMA_URL
 from utils import home_log
 
@@ -43,11 +43,13 @@ class ModelManager:
         if not isinstance(cloud_history, list):
             cloud_history = []
         cloud_history = [str(m).strip() for m in cloud_history if str(m).strip()]
+        fm = self._normalize_function_models(current.get("function_models"))
         entry = {
             "provider": provider,
             "model": model_name,
             "last_local_model": current.get("last_local_model", "qwen2.5:7b"),
             "cloud_history": cloud_history,
+            "function_models": fm,
         }
         if provider == "local":
             entry["last_local_model"] = model_name
@@ -55,6 +57,75 @@ class ModelManager:
             history = [m for m in cloud_history if m != model_name]
             history.insert(0, model_name)
             entry["cloud_history"] = history[:25]
+        self.user_models[key] = entry
+        self.save_models()
+
+    def _normalize_function_models(self, raw: Any) -> Dict[str, Dict[str, str]]:
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, Dict[str, str]] = {}
+        for k, v in raw.items():
+            if not isinstance(v, dict):
+                continue
+            prov = str(v.get("provider", "local")).strip().lower()
+            if prov not in {"local", "cloud"}:
+                prov = "local"
+            m = str(v.get("model", "") or "").strip()
+            if not m:
+                continue
+            out[str(k)] = {"provider": prov, "model": m}
+        return out
+
+    def get_function_model_override(self, user_id, function_key: str) -> Optional[Tuple[str, str]]:
+        """Return (provider, model) if this function has an override, else None."""
+        key = str(user_id)
+        entry = self.user_models.get(key)
+        if not isinstance(entry, dict):
+            return None
+        fm = self._normalize_function_models(entry.get("function_models"))
+        slot = fm.get(str(function_key))
+        if not slot:
+            return None
+        return slot["provider"], slot["model"]
+
+    def set_function_model(self, user_id, function_key: str, model_name: str, provider: str = "local") -> None:
+        provider = (provider or "local").strip().lower()
+        if provider not in {"local", "cloud"}:
+            provider = "local"
+        key = str(user_id)
+        current = self.user_models.get(key, {}) if isinstance(self.user_models.get(key), dict) else {}
+        cloud_history = current.get("cloud_history", [])
+        if not isinstance(cloud_history, list):
+            cloud_history = []
+        cloud_history = [str(m).strip() for m in cloud_history if str(m).strip()]
+        fm = self._normalize_function_models(current.get("function_models"))
+        fm[str(function_key)] = {"provider": provider, "model": model_name}
+        entry = {
+            "provider": current.get("provider", "local"),
+            "model": current.get("model", "qwen2.5:7b"),
+            "last_local_model": current.get("last_local_model", "qwen2.5:7b"),
+            "cloud_history": cloud_history,
+            "function_models": fm,
+        }
+        if provider == "local":
+            entry["last_local_model"] = model_name
+        else:
+            history = [m for m in cloud_history if m != model_name]
+            history.insert(0, model_name)
+            entry["cloud_history"] = history[:25]
+        self.user_models[key] = entry
+        self.save_models()
+
+    def clear_function_model(self, user_id, function_key: str) -> None:
+        key = str(user_id)
+        entry = self.user_models.get(key)
+        if not isinstance(entry, dict):
+            return
+        fm = self._normalize_function_models(entry.get("function_models"))
+        fk = str(function_key)
+        if fk in fm:
+            del fm[fk]
+        entry["function_models"] = fm
         self.user_models[key] = entry
         self.save_models()
 
@@ -79,20 +150,39 @@ class ModelManager:
             last_local_model = model_name if provider == "local" else default["last_local_model"]
         if provider == "local":
             last_local_model = model_name
+        fm = self._normalize_function_models(model_info.get("function_models"))
+        prev_fm = self._normalize_function_models(model_info.get("function_models"))
         if (
             provider != model_info.get("provider")
             or model_name != model_info.get("model")
             or last_local_model != model_info.get("last_local_model")
             or cloud_history != model_info.get("cloud_history")
+            or fm != prev_fm
         ):
             self.user_models[str(user_id)] = {
                 "provider": provider,
                 "model": model_name,
                 "last_local_model": last_local_model,
                 "cloud_history": cloud_history,
+                "function_models": fm,
             }
             self.save_models()
-        return {"provider": provider, "model": model_name, "last_local_model": last_local_model, "cloud_history": cloud_history}
+        return {
+            "provider": provider,
+            "model": model_name,
+            "last_local_model": last_local_model,
+            "cloud_history": cloud_history,
+            "function_models": fm,
+        }
+
+    def get_effective_model_for_function(self, user_id, function_key: str) -> Dict[str, str]:
+        """Provider + model for a logical LLM function (per-function override or user default)."""
+        base = self.get_user_model_info(user_id)
+        ov = self.get_function_model_override(user_id, function_key)
+        if ov:
+            p, m = ov
+            return {"provider": p, "model": m}
+        return {"provider": base["provider"], "model": base["model"]}
 
     def get_recent_cloud_models(self, user_id: int) -> List[str]:
         info = self.get_user_model_info(user_id)

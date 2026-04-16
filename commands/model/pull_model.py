@@ -94,7 +94,7 @@ def register(client: discord.Client):
                 await interaction.edit_original_response(content=final)
             else:
                 await interaction.edit_original_response(
-                    content=final.rstrip() + "\n\n✅ **Done.** Use **/model** to switch to this model."
+                    content=final.rstrip() + "\n\n✅ **Done.** Use **/llm-settings** to pick this model for chat or another function."
                 )
         except requests.exceptions.Timeout:
             await interaction.followup.send("❌ Pull timed out. Try again or check Ollama.")
