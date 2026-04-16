@@ -1377,6 +1377,55 @@ async def probe_model(provider: str, model_name: str) -> Tuple[bool, str]:
     return False, f"Cannot use model '{model_name}'. {response}"
 
 
+async def merge_adaptive_manual_guidance_into_profile(
+    user_id: int,
+    *,
+    current_profile: Dict[str, Any],
+    manual_guidance: str,
+) -> Tuple[bool, Dict[str, Any], str]:
+    """
+    Use the command_planner model to fold manual guidance into the structured adaptive profile.
+    Does not persist. Returns (ok, new_profile_dict, error_message).
+    """
+    eff = model_manager.get_effective_model_for_function(user_id, "command_planner")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
+    sys = (
+        "You update an adaptive Discord DM user profile JSON.\n"
+        "Given current_profile and manual_guidance (user edits from a context export), produce an UPDATED profile "
+        "that heavily incorporates the guidance into likes/dislikes/tone_notes/preferred_name.\n"
+        "Do NOT copy the manual text verbatim into a single field—distill into short bullets.\n"
+        "Preserve unrelated existing facts unless guidance contradicts them.\n"
+        "Return JSON ONLY with keys: preferred_name (string), likes (array of strings), dislikes (array of strings), "
+        "tone_notes (array of strings). Max 24 likes, 24 dislikes, 30 tone_notes entries total."
+    )
+    user_payload = json.dumps(
+        {"current_profile": current_profile, "manual_guidance": (manual_guidance or "")[:8000]},
+        ensure_ascii=False,
+    )
+    messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_payload}]
+    try:
+        _, raw = await _try_models_with_fallback(
+            requested_model,
+            messages,
+            images=False,
+            provider=provider,
+            request_options={"num_predict": 512, "temperature": 0.35},
+        )
+        parsed = _extract_json_object(_clean_response(raw or ""))
+        if not parsed:
+            return False, dict(current_profile), "merge_parse_failed"
+        out: Dict[str, Any] = {
+            "preferred_name": str(parsed.get("preferred_name", "") or "").strip(),
+            "likes": [str(x).strip() for x in (parsed.get("likes") or []) if str(x).strip()][:24],
+            "dislikes": [str(x).strip() for x in (parsed.get("dislikes") or []) if str(x).strip()][:24],
+            "tone_notes": [str(x).strip() for x in (parsed.get("tone_notes") or []) if str(x).strip()][:30],
+        }
+        return True, out, ""
+    except Exception as e:
+        return False, dict(current_profile), str(e)[:200]
+
+
 async def validate_and_set_model(user_id, provider, model_name):
     ok, msg = await probe_model(provider, model_name)
     if ok:

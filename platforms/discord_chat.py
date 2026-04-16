@@ -10,11 +10,17 @@ import shlex
 import re
 from typing import Optional, Any, Dict, List, Tuple, get_args, get_origin
 from discord import app_commands
+from discord.ui import View, Button
 from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from models import model_manager
-from utils.llm_service import ask_llm, plan_command_from_text, _strip_leaked_image_placeholders
+from utils.llm_service import (
+    ask_llm,
+    plan_command_from_text,
+    _strip_leaked_image_placeholders,
+    merge_adaptive_manual_guidance_into_profile,
+)
 from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_file_pipeline
 from utils.dm_image_flow_temp import FINAL_NAME, read_text, remove_session_dir
 from utils.ha_integration import ask_home_assistant
@@ -863,6 +869,72 @@ async def _process_admin_bang_slash_command(client, message: discord.Message, ba
     return True
 
 
+class AdaptiveManualMergeConfirmView(View):
+    """Confirm or revert LLM-merged adaptive profile after /adaptive-status reply."""
+
+    def __init__(self, owner_id: int, timeout: float = 600):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Only you can use these buttons.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        try:
+            adaptive_dm_manager.clear_pending_manual_merge(self.owner_id)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: Button):
+        pending = adaptive_dm_manager.get_pending_manual_merge(self.owner_id)
+        if not pending or pending.get("kind") != "manual_merge":
+            await interaction.response.send_message("Nothing to confirm anymore — run **`/adaptive-status`** again.", ephemeral=True)
+            self.stop()
+            return
+        new_prof = pending.get("new_profile")
+        if not isinstance(new_prof, dict):
+            await interaction.response.send_message("Invalid pending state.", ephemeral=True)
+            self.stop()
+            return
+        await interaction.response.defer()
+        adaptive_dm_manager.replace_profile_data(self.owner_id, new_prof)
+        adaptive_dm_manager.clear_profile_manual_override(self.owner_id)
+        try:
+            from adaptive_dm import export_adaptive_to_personas
+            from personas import persona_manager as _pm
+
+            export_adaptive_to_personas(_pm)
+        except Exception:
+            pass
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(view=self)
+        await interaction.followup.send("✅ Applied. Auto-tuning from your messages continues.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Revert", style=discord.ButtonStyle.danger)
+    async def revert(self, interaction: discord.Interaction, button: Button):
+        pending = adaptive_dm_manager.get_pending_manual_merge(self.owner_id)
+        if not pending or pending.get("kind") != "manual_merge":
+            await interaction.response.send_message("Nothing to revert.", ephemeral=True)
+            self.stop()
+            return
+        prev = pending.get("previous_profile")
+        if isinstance(prev, dict):
+            adaptive_dm_manager.replace_profile_data(self.owner_id, prev)
+        adaptive_dm_manager.clear_pending_manual_merge(self.owner_id)
+        await interaction.response.defer()
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(view=self)
+        await interaction.followup.send("↩️ Reverted to your profile before this edit.", ephemeral=True)
+        self.stop()
+
+
 async def _read_first_txt_attachment(message: discord.Message) -> Optional[str]:
     for att in list(getattr(message, "attachments", []) or []):
         fn = (att.filename or "").lower()
@@ -926,19 +998,49 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
             "missing_suffix": "Your paste is missing the **fixed behaviour** block at the end — use the full file, unmodified at the bottom.",
             "bad_suffix": "The file must end with the **exact** fixed-behaviour block from the export. Do not delete or shorten the tail.",
             "auto_mismatch": (
-                "The **auto-learned** section must match your current profile (middle of the file). "
-                "Run **`/adaptive-status`** again, then replace only the **manual** section at the top — "
-                "or clear manual with **`reset manual`** first."
+                "The **auto-learned** section must match the **latest** export from **`/adaptive-status`** (middle of the file). "
+                "Run **`/adaptive-status`** again, edit only the **manual** block at the top, then reply with the full file."
             ),
         }
         msg = hints.get(err_code, "Use the complete `adaptive-dm-context.txt` from **`/adaptive-status`** without stripping the tail.")
         await _send_chat_output(message, f"❌ {msg}")
         return True
 
-    adaptive_dm_manager.set_profile_manual_override(uid, manual_inner)
+    prev_snapshot = adaptive_dm_manager.get_profile_data_copy(uid)
+    merge_ok, new_profile, merge_err = await merge_adaptive_manual_guidance_into_profile(
+        uid,
+        current_profile=prev_snapshot,
+        manual_guidance=manual_inner,
+    )
+    if not merge_ok:
+        await _send_chat_output(
+            message,
+            f"❌ Could not merge your guidance into the profile ({merge_err}). Try a shorter edit or try again.",
+        )
+        return True
+
+    preview_body = adaptive_dm_manager.build_full_addition_for_profile_dict(uid, new_profile)
+    file_header = "Preview — merged auto-learned profile (not applied until you tap **Confirm**):\n\n"
+    file_bytes = (file_header + preview_body).encode("utf-8")
+    if len(file_bytes) > 7_900_000:
+        await _send_chat_output(message, "❌ Preview file too large for Discord. Shorten your manual notes.")
+        return True
+
+    adaptive_dm_manager.set_pending_manual_merge(
+        uid,
+        {
+            "kind": "manual_merge",
+            "previous_profile": prev_snapshot,
+            "new_profile": new_profile,
+        },
+    )
+    view = AdaptiveManualMergeConfirmView(owner_id=uid, timeout=600.0)
     await _send_chat_output(
         message,
-        "✅ Manual context replaced from your full export. Auto-learned tuning from your messages continues as before.",
+        "Here is the **proposed** adaptive context after folding in your edits (auto-learned block only — manual text is not stored as-is). "
+        "**Confirm** to apply, **Revert** to keep your previous profile.",
+        file=discord.File(io.BytesIO(file_bytes), filename="adaptive-dm-context-preview.txt"),
+        view=view,
     )
     return True
 

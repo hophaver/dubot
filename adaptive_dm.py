@@ -117,6 +117,7 @@ class AdaptiveDmManager:
                 "last_exported_persona_key": "",
                 "tune_guild_channel_id": None,
                 "tune_guild_channel_enabled": False,
+                "pending_manual_merge": None,
             }
         return self.state[key]
 
@@ -159,6 +160,50 @@ class AdaptiveDmManager:
     def get_profile(self, user_id: int) -> Dict[str, Any]:
         return self._get_user_state(user_id).get("profile", {})
 
+    def get_profile_data_copy(self, user_id: int) -> Dict[str, Any]:
+        """Deep copy of profile dict for snapshots."""
+        p = self.get_profile(user_id)
+        if not isinstance(p, dict):
+            return {
+                "preferred_name": "",
+                "likes": [],
+                "dislikes": [],
+                "tone_notes": [],
+            }
+        return {
+            "preferred_name": str(p.get("preferred_name", "") or ""),
+            "likes": list(p.get("likes", []) or []),
+            "dislikes": list(p.get("dislikes", []) or []),
+            "tone_notes": list(p.get("tone_notes", []) or []),
+        }
+
+    def replace_profile_data(self, user_id: int, profile: Dict[str, Any]) -> None:
+        """Replace adaptive profile dict (preferred_name, likes, dislikes, tone_notes) and save."""
+        st = self._get_user_state(user_id)
+        pn = str((profile or {}).get("preferred_name", "") or "").strip()
+        likes = [str(x).strip() for x in ((profile or {}).get("likes") or []) if str(x).strip()][-24:]
+        dislikes = [str(x).strip() for x in ((profile or {}).get("dislikes") or []) if str(x).strip()][-24:]
+        tones = [str(x).strip() for x in ((profile or {}).get("tone_notes") or []) if str(x).strip()][-30:]
+        st["profile"] = {
+            "preferred_name": pn,
+            "likes": likes,
+            "dislikes": dislikes,
+            "tone_notes": tones,
+        }
+        self.save()
+
+    def set_pending_manual_merge(self, user_id: int, payload: Optional[Dict[str, Any]]) -> None:
+        st = self._get_user_state(user_id)
+        st["pending_manual_merge"] = payload
+        self.save()
+
+    def get_pending_manual_merge(self, user_id: int) -> Optional[Dict[str, Any]]:
+        raw = self._get_user_state(user_id).get("pending_manual_merge")
+        return raw if isinstance(raw, dict) else None
+
+    def clear_pending_manual_merge(self, user_id: int) -> None:
+        self.set_pending_manual_merge(user_id, None)
+
     def set_status_reply_anchor(self, user_id: int, channel_id: int, message_id: int) -> None:
         user_state = self._get_user_state(user_id)
         user_state["status_reply_anchor"] = {"channel_id": int(channel_id), "message_id": int(message_id)}
@@ -191,6 +236,7 @@ class AdaptiveDmManager:
     def clear_profile_manual_override(self, user_id: int) -> None:
         user_state = self._get_user_state(user_id)
         user_state["profile_manual_override"] = ""
+        user_state["pending_manual_merge"] = None
         self.save()
 
     @staticmethod
@@ -408,9 +454,9 @@ class AdaptiveDmManager:
             return manual
         return "User-specific context (manual):\n" + manual
 
-    def _structured_profile_prompt(self, user_id: int) -> str:
-        profile = self.get_profile(user_id)
-        if not profile:
+    @staticmethod
+    def _structured_profile_prompt_from_dict(profile: Optional[Dict[str, Any]]) -> str:
+        if not profile or not isinstance(profile, dict):
             return ""
         lines = ["User-specific context (auto, learned from your messages):"]
         preferred_name = str(profile.get("preferred_name", "") or "").strip()
@@ -418,17 +464,29 @@ class AdaptiveDmManager:
             lines.append(f"- Preferred name: {preferred_name}")
         likes = profile.get("likes", []) or []
         if likes:
-            lines.append(f"- Likes: {', '.join(likes[:12])}")
+            lines.append(f"- Likes: {', '.join(str(x) for x in likes[:12])}")
         dislikes = profile.get("dislikes", []) or []
         if dislikes:
-            lines.append(f"- Dislikes: {', '.join(dislikes[:12])}")
+            lines.append(f"- Dislikes: {', '.join(str(x) for x in dislikes[:12])}")
         tone_notes = profile.get("tone_notes", []) or []
         if tone_notes:
-            lines.append(f"- Tone notes: {', '.join(tone_notes[:14])}")
+            lines.append(f"- Tone notes: {', '.join(str(x) for x in tone_notes[:14])}")
         if len(lines) == 1:
             return ""
         lines.append("- Match the user's style naturally without being repetitive.")
         return "\n".join(lines)
+
+    def _structured_profile_prompt(self, user_id: int) -> str:
+        return self._structured_profile_prompt_from_dict(self.get_profile(user_id))
+
+    def build_full_addition_for_profile_dict(self, user_id: int, profile_dict: Dict[str, Any]) -> str:
+        """Full adaptive addition (auto block + fixed suffix) for a hypothetical profile; ignores manual override."""
+        parts = []
+        auto = self._structured_profile_prompt_from_dict(profile_dict)
+        if auto:
+            parts.append(auto)
+        parts.append(ADAPTIVE_DM_SYSTEM_SUFFIX.strip())
+        return "\n\n".join(parts)
 
     def get_profile_prompt(self, user_id: int) -> str:
         auto = self._structured_profile_prompt(user_id)
