@@ -214,7 +214,7 @@ def initialize_command_database():
     command_db.add_command("adaptive-tune", "DMs: apply queued messages to adaptive profile", "General")
     command_db.add_command(
         "adaptive-tune-batch",
-        "DMs: tune adaptive from newline-separated message samples (one message per line)",
+        "DMs: tune adaptive from a message link or .txt corpus (preserves newlines)",
         "General",
     )
     command_db.add_command(

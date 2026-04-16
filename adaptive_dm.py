@@ -3,7 +3,7 @@ import os
 import re
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Minimal base instructions when adaptive DM assistant is on (replaces global persona for that DM).
 ADAPTIVE_DM_BASE_PERSONA = (
@@ -53,6 +53,25 @@ def text_for_adaptive_tuning(raw: Optional[str]) -> Optional[str]:
     t = str(raw).strip()
     t = _TUNING_URL_RE.sub("", t)
     t = re.sub(r"\s+", " ", t).strip()
+    if len(t) < 3:
+        return None
+    return t
+
+
+def text_for_adaptive_tuning_batch(raw: Optional[str]) -> Optional[str]:
+    """Like text_for_adaptive_tuning but keeps newlines (only strips URLs and normalizes spaces per line)."""
+    if not raw or not str(raw).strip():
+        return None
+    t = str(raw).strip()
+    t = _TUNING_URL_RE.sub("", t)
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    lines_out: List[str] = []
+    for line in t.split("\n"):
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        lines_out.append(line)
+    t = "\n".join(lines_out).strip()
+    while "\n\n\n" in t:
+        t = t.replace("\n\n\n", "\n\n")
     if len(t) < 3:
         return None
     return t
@@ -241,12 +260,8 @@ class AdaptiveDmManager:
             return
         self.apply_live_message_tune(author_id, content or "")
 
-    def update_profile_from_message(self, user_id: int, text: str) -> None:
-        """Lightweight preference/tone extraction from DM user text (runs even when manual context is set)."""
-        cleaned = text_for_adaptive_tuning(text)
-        if not cleaned:
-            return
-        text = cleaned
+    def _update_profile_from_cleaned_text(self, user_id: int, text: str) -> None:
+        """Apply heuristics to already-normalized text (single-line or multiline)."""
         user_state = self._get_user_state(user_id)
         profile = user_state.setdefault("profile", {})
         likes: List[str] = list(profile.get("likes", []))
@@ -315,6 +330,27 @@ class AdaptiveDmManager:
         profile["tone_notes"] = tone_notes[-30:]
         user_state["profile"] = profile
         self.save()
+
+    def update_profile_from_message(self, user_id: int, text: str) -> None:
+        """Lightweight preference/tone extraction from DM user text (runs even when manual context is set)."""
+        cleaned = text_for_adaptive_tuning(text)
+        if not cleaned:
+            return
+        self._update_profile_from_cleaned_text(user_id, cleaned)
+
+    def apply_batch_tuning_text(self, user_id: int, raw: str) -> Tuple[bool, str]:
+        """Ingest multiline / pasted corpus into the adaptive profile. Returns (ok, reason_code)."""
+        if not self.is_enabled(user_id):
+            return False, "adaptive_off"
+        cleaned = text_for_adaptive_tuning_batch(raw)
+        if not cleaned:
+            return False, "empty"
+        self._update_profile_from_cleaned_text(user_id, cleaned)
+        st = self._get_user_state(user_id)
+        st["tone_tuning_updates"] = int(st.get("tone_tuning_updates", 0) or 0) + 1
+        st["last_tone_tuning_ts"] = time.time()
+        self.save()
+        return True, "ok"
 
     def _format_manual_block(self, manual: str) -> str:
         manual = (manual or "").strip()
