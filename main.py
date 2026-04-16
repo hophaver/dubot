@@ -230,15 +230,36 @@ async def _awake_interaction_gate(interaction: discord.Interaction) -> bool:
 _auto_conversation_state = {}
 
 # Event handlers
-async def _run_startup_checks(client):
-    """Collect all startup check results for the embed. Returns (errors, checks_dict)."""
-    errors = getattr(client, "_startup_errors", [])
+def _fmt_credit_amount(n: float) -> str:
+    if abs(n - round(n)) < 1e-6:
+        return f"{int(round(n)):,}"
+    return f"{n:,.2f}".rstrip("0").rstrip(".")
 
-    # Commands
-    cmd_status = "Ready" if not errors else f"Issues: {', '.join(errors)[:180]}"
 
-    # Models
+def _discord_relative(ts: int) -> str:
+    if not ts or ts <= 0:
+        return "—"
+    return f"<t:{int(ts)}:R>"
+
+
+async def _build_startup_embed(client) -> tuple[list, discord.Embed]:
+    """Build the home-channel startup embed. Returns (errors, embed)."""
+    errors = list(getattr(client, "_startup_errors", []) or [])
+    boot_ts = int(time.time())
+
+    from integrations import (
+        HA_URL,
+        HA_ACCESS_TOKEN,
+        LOCATION,
+        OLLAMA_URL,
+        OPENROUTER_CHAT_API_KEY,
+        OPENROUTER_MANAGEMENT_API_KEY,
+    )
     from models import model_manager
+    from services.status_server import PORT as STATUS_PORT
+    from utils.openrouter import fetch_credits
+    from utils.update_state import update_state_manager
+
     model_owner_id = PERMANENT_ADMIN
     model_info = model_manager.get_user_model_info(model_owner_id)
     chat_provider = str(model_info.get("provider", "local")).strip().lower() or "local"
@@ -249,83 +270,118 @@ async def _run_startup_checks(client):
     news_model = None
     try:
         from services.news_service import get_news_model
+
         news_provider, news_model = get_news_model()
     except Exception:
         pass
-
     if news_model:
-        news_model_status = f"{news_model} ({news_provider})"
+        news_line = f"`{news_model}` ({news_provider})"
     else:
-        news_model_status = f"{chat_model} ({chat_provider}) · inherited from chat model"
+        news_line = f"same as chat (`{chat_model}`)"
 
     local_models = model_manager.list_all_models(refresh_local=False)
-    local_status = f"{len(local_models)} available" if local_models else "0 available"
+    n_local = len(local_models)
 
-    # Persona
-    persona_status = get_current_persona()
-
-    # Home Assistant
-    ha_status = "○ Not configured"
+    ha_line = "Not configured"
     try:
-        from integrations import HA_URL, HA_ACCESS_TOKEN
-        if HA_URL and HA_URL.strip() and HA_ACCESS_TOKEN:
+        if HA_URL and str(HA_URL).strip() and HA_ACCESS_TOKEN:
             from utils.ha_integration import ha_manager
+
             entities = await ha_manager.get_all_entities()
-            ha_status = "✅ Connected" if entities else "⚠️ Disconnected"
+            ha_line = "Connected" if entities else "Unreachable"
         elif not HA_ACCESS_TOKEN:
-            ha_status = "○ Not configured"
+            ha_line = "Not configured"
     except Exception:
-        ha_status = "⚠️ Disconnected"
+        ha_line = "Unreachable"
 
-    # Location
     try:
-        from integrations import LOCATION
-        location_status = LOCATION if (LOCATION and LOCATION != "Unknown") else "○ Unknown"
+        loc = LOCATION if (LOCATION and str(LOCATION) != "Unknown") else "Unknown"
     except Exception:
-        location_status = "○ Unknown"
+        loc = "Unknown"
 
-    # Wake word
-    wake_status = get_wake_word()
+    wake = get_wake_word()
+    home_line = "Set" if get_startup_channel_id() else "Not set"
 
-    # Home channel
-    home_status = "✅ Set" if get_startup_channel_id() else "○ Not set"
+    state = update_state_manager.get_state()
+    last_update_at = int(state.get("last_update_at") or 0)
+    updated_rel = _discord_relative(last_update_at) if last_update_at > 0 else "never (no `/update` yet)"
 
-    # Status API (started before client.run)
-    from services.status_server import PORT as STATUS_PORT
-    status_api = f"http://localhost:{STATUS_PORT}/status"
-    services_status = "✅ reminder, news, status API"
-
-    # Provider/API keys
-    from integrations import OPENROUTER_CHAT_API_KEY, OPENROUTER_MANAGEMENT_API_KEY, OLLAMA_URL
-    if OPENROUTER_CHAT_API_KEY and OPENROUTER_MANAGEMENT_API_KEY:
-        cloud_status = "✅ key set (+ optional overrides)"
-    elif OPENROUTER_CHAT_API_KEY:
-        cloud_status = "✅ key set"
-    elif OPENROUTER_MANAGEMENT_API_KEY:
-        cloud_status = "✅ key set (override)"
+    credits_line = None
+    if OPENROUTER_MANAGEMENT_API_KEY or OPENROUTER_CHAT_API_KEY:
+        data, err = await asyncio.to_thread(fetch_credits)
+        if data:
+            total = float(data["total_credits"])
+            rem = float(data["remaining"])
+            credits_line = f"Credits **{_fmt_credit_amount(rem)}** / **{_fmt_credit_amount(total)}**"
+        else:
+            credits_line = f"Unavailable ({(err or 'error')[:100]})"
     else:
-        cloud_status = "○ keys missing"
-    ollama_status = f"{OLLAMA_URL}\n{local_status}"
+        credits_line = "Not configured (no API key)"
 
-    # Admin (global ping)
-    admin_status = f"<@{PERMANENT_ADMIN}>"
+    key_parts = []
+    if OPENROUTER_CHAT_API_KEY:
+        key_parts.append("chat")
+    if OPENROUTER_MANAGEMENT_API_KEY:
+        key_parts.append("management")
+    keys_line = ", ".join(key_parts) if key_parts else "none"
 
-    return errors, {
-        "🧩 Commands": cmd_status,
-        "🤖 Chat Model": f"{chat_model} ({chat_provider})",
-        "⚙️ Basic Command Model": f"`{basic_local_model}` (always local Ollama)",
-        "📰 News Model": news_model_status,
-        "🎭 Persona": persona_status,
-        "🏠 Home Assistant": ha_status,
-        "📍 Location": location_status,
-        "🔔 Wake Word": f"`{wake_status}`",
-        "📣 Home Channel": home_status,
-        "🦙 Ollama": ollama_status,
-        "☁️ OpenRouter": cloud_status,
-        "🛠️ Services": services_status,
-        "📡 Status API": status_api,
-        "🛡️ Admin": admin_status,
-    }
+    openrouter_value = f"{credits_line}\nConfigured keys: {keys_line}"
+
+    ollama_line = f"{OLLAMA_URL} · {n_local} local model(s)" if n_local else f"{OLLAMA_URL} · no local models"
+
+    cmd_line = "All packages loaded" if not errors else ", ".join(errors)[:900]
+
+    desc_lines = [
+        f"**Updated** {updated_rel}",
+        f"**Last boot** {_discord_relative(boot_ts)}",
+        f"**Admin** <@{PERMANENT_ADMIN}>",
+    ]
+    if errors:
+        desc_lines.insert(0, "Some command packages did not load.")
+
+    embed = discord.Embed(
+        title="Online" if not errors else "Online with warnings",
+        description="\n".join(desc_lines),
+        color=discord.Color.green() if not errors else discord.Color.orange(),
+    )
+    _thumb = bot_embed_thumbnail_url(client.user)
+    if _thumb:
+        embed.set_thumbnail(url=_thumb)
+
+    embed.add_field(name="OpenRouter", value=openrouter_value[:1024], inline=False)
+    embed.add_field(
+        name="Models",
+        value=(
+            f"**Chat** `{chat_model}` ({chat_provider})\n"
+            f"**Local default** `{basic_local_model}`\n"
+            f"**News** {news_line}"
+        )[:1024],
+        inline=False,
+    )
+    embed.add_field(
+        name="Configuration",
+        value=(
+            f"**Persona** `{get_current_persona()}`\n"
+            f"**Wake word** `{wake}` · **Home channel** {home_line}"
+        )[:1024],
+        inline=False,
+    )
+    embed.add_field(
+        name="Environment",
+        value=f"**Home Assistant** {ha_line}\n**Location** {loc}"[:1024],
+        inline=False,
+    )
+    embed.add_field(
+        name="Platform",
+        value=(
+            f"**Ollama** {ollama_line}\n"
+            f"**Background services** reminders, news, local status API (`http://localhost:{STATUS_PORT}/status`)\n"
+            f"**Commands** {cmd_line}"
+        )[:1024],
+        inline=False,
+    )
+
+    return errors, embed
 
 
 @client.event
@@ -339,20 +395,7 @@ async def on_ready():
     activity = discord.Activity(type=discord.ActivityType.listening, name=status_text)
     await client.change_presence(activity=activity)
 
-    errors, checks = await _run_startup_checks(client)
-    has_issues = bool(errors)
-
-    embed = discord.Embed(
-        title="🤖 Bot started" if not has_issues else "🤖 Bot started (with issues)",
-        color=discord.Color.green() if not has_issues else discord.Color.orange(),
-        description="Startup diagnostics completed.",
-    )
-    _thumb = bot_embed_thumbnail_url(client.user)
-    if _thumb:
-        embed.set_thumbnail(url=_thumb)
-    for name, value in checks.items():
-        embed.add_field(name=name, value=value[:1024], inline=False if "Model" in name else True)
-    embed.set_footer(text=f"Startup time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    _errors, embed = await _build_startup_embed(client)
 
     sent = await home_log.send_to_home(embed=embed)
     if get_startup_channel_id() and not sent:

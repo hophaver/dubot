@@ -16,6 +16,7 @@ class UpdateStateManager:
             "previous_commit": "",
             "last_update_from": "",
             "last_update_to": "",
+            "last_update_at": 0,
             "safe_marked_at": 0,
             "last_rollback_at": 0,
         }
@@ -35,6 +36,7 @@ class UpdateStateManager:
             self.state["last_update_from"] = before
         if after:
             self.state["last_update_to"] = after
+        self.state["last_update_at"] = int(time.time())
         self.save()
 
     def set_safe_commit(self, commit_sha: str) -> None:
