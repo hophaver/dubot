@@ -108,12 +108,28 @@ def _model_pick_label(pairs: List[Optional[Tuple[str, str]]], idx: Optional[int]
     return f"{p}: `{m}`"
 
 
-def _persona_pick_label(val: Optional[str]) -> str:
-    if not val:
-        return "(unchanged)"
-    if val == "__global_default__":
-        return "Global default persona"
-    return f"`{val}`"
+_PENDING_FIELD_MAX = 1024
+
+
+def _format_pending_persona_block(pending_persona: Optional[str]) -> str:
+    """
+    Persona line for 'Pending for this message': name + full system prompt text when a menu choice is selected.
+    """
+    if not pending_persona:
+        return "**Persona:** (unchanged)"
+    if pending_persona == "__global_default__":
+        cur = get_current_persona()
+        body = (persona_manager.get_persona(cur) or "").strip()
+        head = f"**Persona:** Global default persona (`{cur}`)"
+        if not body:
+            return head
+        return f"{head}\n{body}"
+    name = pending_persona.strip()
+    body = (persona_manager.get_persona(name) or "").strip()
+    head = f"**Persona:** `{name}`"
+    if not body:
+        return head
+    return f"{head}\n{body}"
 
 
 def _build_embed(
@@ -141,13 +157,17 @@ def _build_embed(
     )
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
+    pending_lines = [
+        f"**Function:** {function_label(fn_key)}",
+        f"**Model:** {_model_pick_label(pairs, pending_model_idx)}",
+        _format_pending_persona_block(pending_persona),
+    ]
+    pending_val = "\n".join(pending_lines)
+    if len(pending_val) > _PENDING_FIELD_MAX:
+        pending_val = pending_val[: _PENDING_FIELD_MAX - 1].rstrip() + "…"
     embed.add_field(
         name="Pending for this message",
-        value=(
-            f"**Function:** {function_label(fn_key)}\n"
-            f"**Model:** {_model_pick_label(pairs, pending_model_idx)}\n"
-            f"**Persona:** {_persona_pick_label(pending_persona)}"
-        ),
+        value=pending_val,
         inline=False,
     )
     if footer:
