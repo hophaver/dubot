@@ -14,7 +14,7 @@ from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from models import model_manager
-from utils.llm_service import ask_llm, plan_command_from_text
+from utils.llm_service import ask_llm, plan_command_from_text, _strip_leaked_image_placeholders
 from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_file_pipeline
 from utils.dm_image_flow_temp import FINAL_NAME, read_text, remove_session_dir
 from utils.ha_integration import ask_home_assistant
@@ -251,7 +251,7 @@ def _ext_for_generated_image_mime(mime: str) -> str:
 
 def _adaptive_dm_explicit_image_intent(text: str) -> bool:
     """
-    Strict gate: natural-language image generation in adaptive DMs only when clearly requested.
+    Natural-language image generation in adaptive DMs when the user clearly wants a visual.
     Slash /imagine is handled by the adaptive command planner, not here.
     """
     raw = (text or "").strip()
@@ -266,6 +266,13 @@ def _adaptive_dm_explicit_image_intent(text: str) -> bool:
     patterns = (
         r"\b(generate|create|make|draw|render)\s+(?:me\s+)?(?:an?\s+)?(image|picture|photo|diagram|illustration|mockup|mock-up)\b",
         r"\b(show|give)\s+me\s+(?:an?\s+)?(image|picture|photo|diagram)\b",
+        r"\bshow\s+me\s+what\b",
+        r"\bwhat\s+(?:it|this|that|the\s+\w+)\s+could\s+look\s+like\b",
+        r"\bwhat\s+would\s+(?:it|this|that)\s+look\s+like\b",
+        r"\bwhat\s+would\s+.+\s+look\s+like\b",
+        r"\bvisualize\b",
+        r"\bvisualise\b",
+        r"\bsketch\b",
         r"\bimage\s+of\b",
         r"\bpicture\s+of\b",
         r"\bdiagram\s+of\b",
@@ -273,7 +280,16 @@ def _adaptive_dm_explicit_image_intent(text: str) -> bool:
         r"\bvisual\s+reference\b",
         r"\breference\s+(?:image|picture|render)\b",
     )
-    return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
+    if any(re.search(p, t, flags=re.IGNORECASE) for p in patterns):
+        return True
+    # "show me" + look/visual/finished device etc. (avoid bare "show me the code")
+    if re.search(r"\bshow\s+me\b", t) and re.search(
+        r"\b(look|looks|looking|visual|render|layout|device|finished|prototype|mockup|design)\b",
+        t,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
 
 
 async def _build_wake_message_reply_context(
@@ -357,7 +373,7 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
                 return True
 
             final_path = session_dir / FINAL_NAME
-            content = (await read_text(final_path)).strip()
+            content = _strip_leaked_image_placeholders((await read_text(final_path)).strip())
             if not content:
                 content = "Here’s the image."
             if len(content) > 1900:

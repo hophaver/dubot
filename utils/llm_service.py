@@ -558,7 +558,7 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
         "Rules:\n"
         "- should_execute=false when the message is general chat, question, or unclear.\n"
         "- For command `imagine`: should_execute=true ONLY when the user explicitly wants a generated image "
-        "(e.g. draw/picture/image/diagram/mockup/wireframe/visual/reference render). "
+        "(e.g. draw/picture/image/diagram/mockup/wireframe/visual/reference render, or \"show me what X could look like\"). "
         "If they only say \"imagine\" figuratively or intent is ambiguous, should_execute=false.\n"
         "- Map the user's image description to the `idea` argument for `imagine`.\n"
         "- Use only command names from schema.\n"
@@ -866,7 +866,8 @@ async def ask_llm(
                 or (
                     "You can generate images for this user when they clearly ask for a visual (they have an image model configured). "
                     "Do not claim you are text-only or cannot draw/render if they ask for a picture—offer `/imagine` or acknowledge images can be produced in this DM.\n"
-                    "When you recently sent an image here, the transcript may include **[Sent a generated image]** — treat that as an image you shared; reference it only if needed."
+                    "If the transcript notes you sent an image earlier, treat that as context only; reference it when relevant. "
+                    "Never write bracketed placeholders or pretend to attach images in text—the user only sees real attachments."
                 )
             )
             enhanced_system_prompt += "\n\n" + note
@@ -882,7 +883,8 @@ async def ask_llm(
                 or (
                     "This user has an **image generation** model configured. "
                     "Do not claim you are text-only or cannot produce images if they ask for a picture—point them to **`/imagine`**.\n"
-                    "If the transcript includes **[Sent a generated image]**, you previously sent an image in this DM; refer to it only when relevant."
+                    "If the transcript notes you sent an image earlier, refer to it only when relevant. "
+                    "Never output bracketed placeholders for images."
                 )
             )
             enhanced_system_prompt += "\n\n" + note
@@ -951,6 +953,8 @@ async def ask_llm(
     
     # Clean response
     response_text = _clean_response(response_text)
+    if adaptive_dm and str(model_manager.get_effective_model_for_function(user_id, "image_generation").get("model") or "").strip():
+        response_text = _strip_leaked_image_placeholders(response_text)
     
     # Store conversation if successful (channel-based; user identity is in formatted_message)
     if response_text and not response_text.startswith("Error:"):
@@ -960,6 +964,15 @@ async def ask_llm(
         
     
     return response_text
+
+def _strip_leaked_image_placeholders(text: str) -> str:
+    """Remove fake image-attachment text some models emit; never show to users."""
+    if not (text or "").strip():
+        return text or ""
+    t = str(text)
+    t = re.sub(r"\[Sent a generated image:\s*[^\]]*\]", "", t, flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
 
 def _clean_response(text):
     """Clean up LLM response"""
