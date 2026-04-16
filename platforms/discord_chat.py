@@ -8,14 +8,22 @@ import asyncio
 import inspect
 import shlex
 import re
-from typing import Optional, Any, Dict, get_args, get_origin
+from typing import Optional, Any, Dict, List, Tuple, get_args, get_origin
 from discord import app_commands
 from config import get_config, get_wake_word, set_bot_awake
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from models import model_manager
-from utils.llm_service import ask_llm, plan_command_from_text, commentary_for_generated_image
-from utils.openrouter_image import generate_openrouter_image_with_fallback
+from utils.llm_service import (
+    ask_llm,
+    plan_command_from_text,
+    commentary_for_generated_image,
+    summarize_dm_thread_for_image_prompt,
+)
+from utils.openrouter_image import (
+    OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
+    generate_openrouter_image_with_fallback,
+)
 from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
@@ -275,6 +283,46 @@ def _adaptive_dm_explicit_image_intent(text: str) -> bool:
     return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
 
 
+async def _build_wake_message_reply_context(
+    client: discord.Client, message: discord.Message
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """
+    When the user replies to any message and activates the bot with wake word / mention,
+    include the referenced message (text and/or image) plus the activating line.
+    Returns (context_block, extra_attachments_for_llm).
+    """
+    ref = message.reference
+    if not ref or not ref.message_id:
+        return None, []
+    try:
+        ref_msg = ref.resolved
+        if ref_msg is None:
+            ref_msg = await message.channel.fetch_message(ref.message_id)
+    except Exception:
+        return None, []
+    if ref_msg is None:
+        return None, []
+    author = getattr(ref_msg.author, "display_name", None) or getattr(ref_msg.author, "name", "user")
+    body = (ref_msg.content or "").strip()
+    lines = ["[User is replying to this earlier message — use it as primary context]"]
+    lines.append(f"Referenced message from {author}: {body or '(no text)'}")
+    imgs = [a for a in (ref_msg.attachments or []) if (a.filename or "").lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))]
+    extra_attachments = []
+    for att in imgs[:3]:
+        try:
+            data = await att.read()
+            extra_attachments.append({"filename": att.filename, "data": data})
+        except Exception:
+            pass
+    wake = (get_config().get("wake_word", "robot") or "robot").strip()
+    trigger = (message.content or "").strip()
+    if wake and trigger.lower().startswith(wake.lower()):
+        trigger = trigger[len(wake) :].strip()
+    lines.append(f"User's new message (after wake word): {trigger}")
+    block = "\n".join(lines)
+    return block, extra_attachments
+
+
 async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
     """Return True when handled (including errors)."""
     uid = message.author.id
@@ -295,7 +343,24 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
         await _send_chat_output(message, "Say what to generate (e.g. **imagine** a red panda in a spacesuit), or use **`/imagine`**.")
         return True
 
-    img_bytes, mime, api_text, err = await generate_openrouter_image_with_fallback(model_name, idea)
+    brief = await summarize_dm_thread_for_image_prompt(
+        uid,
+        message.channel.id,
+        str(message.author.name),
+        idea,
+    )
+    image_user_prompt = (
+        "Conversation summary (for context — visualize what fits this thread):\n"
+        f"{brief}\n\n"
+        "Latest explicit request from the user (prioritize this):\n"
+        f"{idea}"
+    )
+
+    img_bytes, mime, api_text, err = await generate_openrouter_image_with_fallback(
+        model_name,
+        image_user_prompt,
+        system_prompt=OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
+    )
     if err:
         await _send_chat_output(message, f"❌ {err}")
         return True
@@ -1072,6 +1137,13 @@ async def process_discord_message(client, message, permission, conversation_mana
         
         # Build attachments list (for files/images with wake word or mentions)
         attachments = await _read_message_attachments(message)
+        reply_context_block: Optional[str] = None
+        if (is_wake_word or is_mentioned) and message.reference:
+            rcb, extra_ref = await _build_wake_message_reply_context(client, message)
+            if rcb:
+                reply_context_block = rcb
+            if extra_ref:
+                attachments = (attachments or []) + extra_ref
         
         # Include recent channel context for continuity and non-LLM bot messages (e.g. news posts).
         context = None
@@ -1095,6 +1167,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                     attachments=attachments if attachments else None,
                     is_dm=is_dm,
                     fast_reply=fast_reply_enabled,
+                    reply_context_block=reply_context_block,
                 ),
                 timeout=150,
             )

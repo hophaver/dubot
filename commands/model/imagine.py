@@ -5,8 +5,7 @@ import discord
 from discord import app_commands
 
 from models import model_manager
-from utils.llm_service import commentary_for_generated_image
-from utils.openrouter_image import generate_openrouter_image_with_fallback
+from utils.openrouter_image import OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT, generate_openrouter_image_with_fallback
 from whitelist import get_user_permission
 
 
@@ -44,7 +43,12 @@ def register(client: discord.Client):
             return
 
         await interaction.response.defer()
-        img_bytes, mime, api_text, err = await generate_openrouter_image_with_fallback(model_name, p)
+        img_bytes, mime, _api_text, err = await generate_openrouter_image_with_fallback(
+            model_name,
+            p,
+            system_prompt=OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT,
+            drop_assistant_text=True,
+        )
         if err:
             await interaction.followup.send(f"❌ {err}", ephemeral=True)
             return
@@ -59,24 +63,4 @@ def register(client: discord.Client):
         filename = f"imagine{ext}"
         file = discord.File(io.BytesIO(img_bytes), filename=filename)
 
-        caption = (api_text or "").strip()
-        if len(caption) > 1900:
-            caption = caption[:1890] + "…"
-
-        note = await commentary_for_generated_image(
-            interaction.user.id,
-            p,
-            f"OpenRouter `{model_name}`",
-            img_bytes,
-            mime,
-        )
-        parts = []
-        if caption:
-            parts.append(caption)
-        if note:
-            if parts:
-                parts.append("")
-            parts.append(note)
-        content = "\n".join(parts).strip() or None
-
-        await interaction.followup.send(content=content, file=file)
+        await interaction.followup.send(file=file)

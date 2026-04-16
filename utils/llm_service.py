@@ -589,6 +589,68 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
     }
     return plan
 
+async def summarize_dm_thread_for_image_prompt(
+    user_id: int,
+    channel_id: int,
+    username: str,
+    user_trigger: str,
+    max_brief_chars: int = 1400,
+) -> str:
+    """
+    Compact summary of recent user/assistant turns for image generation (OpenRouter prompt).
+    Falls back to a short manual excerpt if the LLM fails.
+    """
+    hist = conversation_manager.get_conversation(channel_id) or []
+    lines: List[str] = []
+    for m in hist[-18:]:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            continue
+        text = str(m.get("content", "") or "").strip()
+        if not text:
+            continue
+        role = "User" if m.get("role") == "user" else "Assistant"
+        if len(text) > 420:
+            text = text[:400].rstrip() + "…"
+        lines.append(f"- {role}: {text}")
+    if not lines:
+        return f"User request (only recent message): {(user_trigger or '')[:800]}"
+    transcript = "\n".join(lines[-16:])
+    eff = model_manager.get_effective_model_for_function(user_id, "command_planner")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
+    prompt = (
+        "You compress Discord DM thread excerpts for an IMAGE generation model.\n"
+        "Output ONE plain-text block (no JSON, no bullets) that:\n"
+        "1) States the main topic and concrete visual subject the user and assistant discussed.\n"
+        "2) Keeps critical physical details (layout, colors, object names, materials, angles) needed to draw it.\n"
+        "3) Drops small talk. Max ~180 words.\n"
+        f"The user's explicit image request is: {(user_trigger or '')[:600]}\n\n"
+        "Recent conversation (oldest to newest within this excerpt):\n"
+        f"{transcript}"
+    )
+    try:
+        _, raw = await _try_models_with_fallback(
+            requested_model,
+            [{"role": "user", "content": prompt}],
+            images=False,
+            provider=provider,
+        )
+        brief = _clean_response(raw or "")
+        if brief and not brief.startswith("Error:") and not brief.startswith("⚠️"):
+            if len(brief) > max_brief_chars:
+                brief = brief[: max_brief_chars - 1].rstrip() + "…"
+            return brief.strip()
+    except Exception:
+        pass
+    fallback = transcript[-max_brief_chars:]
+    if len(fallback) > max_brief_chars:
+        fallback = "…" + fallback[-(max_brief_chars - 1) :]
+    return (
+        f"Conversation context (fallback): {fallback}\n\n"
+        f"User image request: {(user_trigger or '')[:600]}"
+    )
+
+
 async def ask_llm(
     user_id,
     channel_id,
@@ -600,6 +662,8 @@ async def ask_llm(
     attachments=None,
     is_dm=False,
     fast_reply=False,
+    reply_context_block: Optional[str] = None,
+    image_gen_capability_note: Optional[str] = None,
 ):
     """Main LLM interface for all platforms with file support"""
     # Get system info
@@ -665,6 +729,10 @@ async def ask_llm(
     else:
         formatted_message = f"{username} says: {message_text}"
     persisted_user_message = f"{username} says: {message_text}"
+    rcb = (reply_context_block or "").strip()
+    if rcb:
+        formatted_message = f"{rcb}\n\n{formatted_message}"
+        persisted_user_message = f"{rcb}\n\n{persisted_user_message}"
     
     # Add attachment context to message
     if attachment_context:
@@ -698,11 +766,33 @@ async def ask_llm(
         if dm_profile_prompt:
             enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{dm_profile_prompt}"
         enhanced_system_prompt += ADAPTIVE_DM_SYSTEM_SUFFIX
+        eff_img = model_manager.get_effective_model_for_function(user_id, "image_generation")
+        if str(eff_img.get("model") or "").strip():
+            note = (
+                image_gen_capability_note
+                or (
+                    "You can generate images for this user when they clearly ask for a visual (they have an image model configured). "
+                    "Do not claim you are text-only or cannot draw/render if they ask for a picture—offer `/imagine` or acknowledge images can be produced in this DM.\n"
+                    "When you recently sent an image here, the transcript may include **[Sent a generated image]** — treat that as an image you shared; reference it only if needed."
+                )
+            )
+            enhanced_system_prompt += "\n\n" + note
     elif is_dm:
         enhanced_system_prompt += (
             "\n\nThis is a direct DM chat. Use a relaxed, natural tone. "
             "Keep it human and concise, and avoid overly formal phrasing."
         )
+        eff_img = model_manager.get_effective_model_for_function(user_id, "image_generation")
+        if str(eff_img.get("model") or "").strip():
+            note = (
+                image_gen_capability_note
+                or (
+                    "This user has an **image generation** model configured. "
+                    "Do not claim you are text-only or cannot produce images if they ask for a picture—point them to **`/imagine`**.\n"
+                    "If the transcript includes **[Sent a generated image]**, you previously sent an image in this DM; refer to it only when relevant."
+                )
+            )
+            enhanced_system_prompt += "\n\n" + note
     if fast_reply:
         enhanced_system_prompt += (
             "\n\nFast reply mode is enabled. Be concise and quick: "
