@@ -12,6 +12,7 @@ class ChatCommands(CommandBase):
             dm_history,
             adaptive,
             adaptive_tune,
+            adaptive_tune_batch,
             adaptive_status,
             adaptive_tune_channel,
             fast_reply,
@@ -23,6 +24,7 @@ class ChatCommands(CommandBase):
         dm_history.register(self.client)
         adaptive.register(self.client)
         adaptive_tune.register(self.client)
+        adaptive_tune_batch.register(self.client)
         adaptive_status.register(self.client)
         adaptive_tune_channel.register(self.client)
         fast_reply.register(self.client)

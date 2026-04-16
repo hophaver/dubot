@@ -212,6 +212,11 @@ def initialize_command_database():
     command_db.add_command("adaptive", "DMs: adaptive assistant on/off", "General")
     command_db.add_command("adaptive-tune", "DMs: apply queued messages to adaptive profile", "General")
     command_db.add_command(
+        "adaptive-tune-batch",
+        "DMs: tune adaptive from newline-separated message samples (one message per line)",
+        "General",
+    )
+    command_db.add_command(
         "adaptive-status",
         "DMs: adaptive context file; reply to set manual notes (reset manual to clear)",
         "General",

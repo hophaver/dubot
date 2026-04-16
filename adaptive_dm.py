@@ -364,6 +364,27 @@ class AdaptiveDmManager:
         self.update_profile_from_message(user_id, text)
         self.queue_user_message_for_tuning(user_id, text)
 
+    def apply_batch_message_tune(self, user_id: int, batch_text: str) -> Dict[str, int]:
+        """
+        Ingest newline-separated samples like separate user messages (blank lines skipped; URLs stripped per line).
+        Returns counts: messages (non-empty lines), applied (lines that contributed after normalization).
+        """
+        if not self.is_enabled(user_id):
+            return {"messages": 0, "applied": 0}
+        raw = (batch_text or "").replace("\r\n", "\n")
+        messages = 0
+        applied = 0
+        for line in raw.split("\n"):
+            segment = line.strip()
+            if not segment:
+                continue
+            messages += 1
+            if text_for_adaptive_tuning(segment) is None:
+                continue
+            self.apply_live_message_tune(user_id, segment)
+            applied += 1
+        return {"messages": messages, "applied": applied}
+
     def get_full_adaptive_system_addition(self, user_id: int) -> str:
         """Text appended to the base persona+chat system prompt when adaptive DM is on (learned + fixed behaviour)."""
         parts = []
