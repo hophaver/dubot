@@ -13,6 +13,16 @@ import requests
 from integrations import OPENROUTER_API_KEY
 from utils import home_log
 
+# System instructions for the image model (natural-language + contextual prompts).
+OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT = (
+    "You are an image generation assistant on Discord. "
+    "Follow the user's latest request and the conversation context you are given. "
+    "Produce a single clear image that fits the ongoing discussion—visualize what they are trying to see "
+    "(product, diagram, scene, UI mockup, etc.) when that is what the context calls for. "
+    "Stay safe and on-topic; no gratuitous text in the image unless the user asked for labeled text. "
+    "Photorealistic or illustrative style should match what the context implies."
+)
+
 
 def _parse_data_url(data_url: str) -> Optional[Tuple[bytes, str]]:
     """Return (raw_bytes, mime) from data:image/...;base64,..."""
@@ -90,6 +100,7 @@ async def generate_openrouter_image_with_fallback(
     *,
     system_prompt: Optional[str] = None,
     timeout: int = 120,
+    drop_assistant_text: bool = False,
 ) -> Tuple[Optional[bytes], str, str, str]:
     """
     Try modality combos in an order that works for both image-only models (e.g. Seedream) and
@@ -109,6 +120,8 @@ async def generate_openrouter_image_with_fallback(
             timeout=timeout,
         )
         if b:
+            if drop_assistant_text:
+                text = ""
             return b, mime, text, err
         last_err = err or ""
         last_text = text or ""
