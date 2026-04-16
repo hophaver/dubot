@@ -201,6 +201,11 @@ def initialize_command_database():
         "DM only: show adaptive DM context; reply to that message to set manual context (send reset manual to clear)",
         "General",
     )
+    command_db.add_command(
+        "adaptive-tune-channel",
+        "Tune adaptive profile from a server channel (same as DMs; your messages only; URLs ignored for tuning)",
+        "General",
+    )
     command_db.add_command("fast-reply", "DM only: temporarily enable faster, shorter replies", "General")
     command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
     command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")

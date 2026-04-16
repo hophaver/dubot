@@ -17,6 +17,7 @@ from utils import home_log
 from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
 from jarvis import jarvis_manager
+from commands.shared import sanitize_discord_bot_content
 
 
 def _is_transient_http_error(exc: Exception) -> bool:
@@ -1092,7 +1093,7 @@ async def process_wakeword_download(client, message, link_or_empty):
                 attachments=attachments,
                 is_dm=isinstance(channel, discord.DMChannel),
             )
-            await _send_chat_output(message, reply)
+            await _send_chat_output(message, sanitize_discord_bot_content(reply or ""))
         else:
             from io import BytesIO
             await _send_chat_output(

@@ -19,7 +19,8 @@ ADAPTIVE_DM_SYSTEM_SUFFIX = (
     "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
     "Be proactive, keep continuity, and match the user's style. "
     "Use normal punctuation (periods, commas, question marks) in your replies even when the user omits it. "
-    "Avoid AI tells (over-explaining, numbered lists unless asked, 'happy to help', 'let me know if you need anything else')."
+    "Avoid AI tells (over-explaining, numbered lists unless asked, 'happy to help', 'let me know if you need anything else'). "
+    "Never use LaTeX or dollar-math ($...$); this chat is plain Discord text—use Unicode (× ≈ °) and words for units and values."
 )
 
 # Aggressive tuning: batch queue + frequent structured nudges from single messages.
@@ -37,6 +38,24 @@ _MANUAL_PASTE_HEADER_PREFIXES = (
     "adaptive assistant is currently off",
     "the following is what would be appended",
 )
+
+# Strip URLs / angle-wrapped links so tuning ignores link-only noise.
+_TUNING_URL_RE = re.compile(
+    r"<https?://[^>\s]+>|https?://[^\s>]+|discord(?:app)?\.com/channels/\d+/\d+(?:/\d+)?",
+    re.IGNORECASE,
+)
+
+
+def text_for_adaptive_tuning(raw: Optional[str]) -> Optional[str]:
+    """Normalize user text for adaptive tuning: drop URLs, collapse whitespace, min length."""
+    if not raw or not str(raw).strip():
+        return None
+    t = str(raw).strip()
+    t = _TUNING_URL_RE.sub("", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) < 3:
+        return None
+    return t
 
 
 class JarvisManager:
@@ -71,6 +90,8 @@ class JarvisManager:
                 "status_reply_anchor": None,
                 "adaptive_sync_display_name": "",
                 "last_exported_persona_key": "",
+                "tune_guild_channel_id": None,
+                "tune_guild_channel_enabled": False,
             }
         return self.state[key]
 
@@ -173,10 +194,53 @@ class JarvisManager:
             t = t[: -len(suffix)].rstrip()
         return t.strip()
 
+    def set_guild_tune_channel(
+        self,
+        user_id: int,
+        *,
+        enabled: bool,
+        channel_id: Optional[int] = None,
+        clear_channel_id: bool = False,
+    ) -> None:
+        """Guild channel messages from this user may tune the same adaptive profile when enabled."""
+        st = self._get_user_state(user_id)
+        st["tune_guild_channel_enabled"] = bool(enabled)
+        if clear_channel_id and not enabled:
+            st["tune_guild_channel_id"] = None
+        elif channel_id is not None:
+            st["tune_guild_channel_id"] = int(channel_id)
+        self.save()
+
+    def get_guild_tune_channel_config(self, user_id: int) -> Dict[str, Any]:
+        st = self._get_user_state(user_id)
+        return {
+            "channel_id": st.get("tune_guild_channel_id"),
+            "enabled": bool(st.get("tune_guild_channel_enabled", False)),
+        }
+
+    def maybe_tune_from_guild_channel_message(
+        self,
+        channel_id: int,
+        author_id: int,
+        content: Optional[str],
+    ) -> None:
+        """If this user enabled guild-channel tuning and this is that channel, ingest (URLs ignored)."""
+        if not self.is_enabled(author_id):
+            return
+        st = self._get_user_state(author_id)
+        if not st.get("tune_guild_channel_enabled"):
+            return
+        tid = st.get("tune_guild_channel_id")
+        if tid is None or int(tid) != int(channel_id):
+            return
+        self.apply_live_message_tune(author_id, content or "")
+
     def update_profile_from_message(self, user_id: int, text: str) -> None:
         """Lightweight preference/tone extraction from DM user text (runs even when manual context is set)."""
-        if not text:
+        cleaned = text_for_adaptive_tuning(text)
+        if not cleaned:
             return
+        text = cleaned
         user_state = self._get_user_state(user_id)
         profile = user_state.setdefault("profile", {})
         likes: List[str] = list(profile.get("likes", []))
@@ -288,8 +352,8 @@ class JarvisManager:
         return auto
 
     def apply_live_message_tune(self, user_id: int, text: str) -> None:
-        """Per-message nudge plus queue sample (aggressive adaptivity)."""
-        if not text or not self.is_enabled(user_id):
+        """Per-message nudge plus queue sample (aggressive adaptivity). URLs stripped inside."""
+        if not self.is_enabled(user_id):
             return
         self.update_profile_from_message(user_id, text)
         self.queue_user_message_for_tuning(user_id, text)
@@ -315,6 +379,10 @@ class JarvisManager:
             "tone_tuning_updates": int(st.get("tone_tuning_updates", 0) or 0),
             "last_tone_tuning_ts": float(st.get("last_tone_tuning_ts", 0.0) or 0.0),
             "has_manual_override": bool(self.get_profile_manual_override(user_id)),
+            "guild_tune_channel_id": self._get_user_state(user_id).get("tune_guild_channel_id"),
+            "guild_tune_channel_enabled": bool(
+                self._get_user_state(user_id).get("tune_guild_channel_enabled", False)
+            ),
         }
 
     def set_pending_confirmation(self, user_id: int, payload: Optional[Dict[str, Any]]) -> None:
@@ -357,13 +425,11 @@ class JarvisManager:
 
     def queue_user_message_for_tuning(self, user_id: int, text: str) -> None:
         """Queue user-only samples for periodic tone tuning."""
-        if not text:
+        cleaned = text_for_adaptive_tuning(text)
+        if not cleaned:
             return
         user_state = self._get_user_state(user_id)
         queue = list(user_state.get("tone_tuning_queue", []) or [])
-        cleaned = str(text).strip()
-        if not cleaned:
-            return
         queue.append(cleaned[:TUNE_QUEUE_ENTRY_MAX])
         user_state["tone_tuning_queue"] = queue[-TUNE_QUEUE_MAX_ITEMS:]
         self.save()

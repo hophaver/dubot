@@ -71,7 +71,9 @@ def register(client: discord.Client):
                     interaction.user.id, channel.id, "Describe or analyze this image.", str(interaction.user.name),
                     is_continuation=False, platform="discord", attachments=[{"filename": filename, "data": data}],
                 )
-                await interaction.followup.send(reply)
+                from commands.shared import sanitize_discord_bot_content
+
+                await interaction.followup.send(sanitize_discord_bot_content(reply or ""))
             except Exception as e:
                 await interaction.followup.send(f"❌ Error analyzing image: {e}")
         else:

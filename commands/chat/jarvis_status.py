@@ -95,6 +95,15 @@ def register(client: discord.Client):
         embed.add_field(name="Tone tuning runs", value=str(snap["tone_tuning_updates"]), inline=True)
         embed.add_field(name="Last tone tuning", value=last_tune, inline=True)
         embed.add_field(name="Messages queued for tuning", value=str(snap["tone_queue_len"]), inline=True)
+        gc = snap.get("guild_tune_channel_id")
+        ge = snap.get("guild_tune_channel_enabled")
+        if gc and ge:
+            gstr = f"on · `<#{gc}>` (`{gc}`)"
+        elif gc and not ge:
+            gstr = f"off · saved channel id `{gc}` (re-enable with **`/adaptive-tune-channel`**)"
+        else:
+            gstr = "off · no channel saved"
+        embed.add_field(name="Server channel tuning", value=gstr[:1020], inline=False)
         embed.add_field(name="Trusted no-confirm commands", value=trusted_str, inline=False)
         embed.add_field(name="Pending confirmation", value=pending_str, inline=False)
 

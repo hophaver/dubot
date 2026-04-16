@@ -43,7 +43,8 @@ from commands.shitpost import handle_shitpost
 from utils.llm_service import initialize_command_database
 from utils import home_log
 from utils import reliability_telemetry
-from commands.shared import send_long_to_channel, bot_embed_thumbnail_url
+from commands.shared import send_long_to_channel, bot_embed_thumbnail_url, sanitize_discord_bot_content
+from jarvis import jarvis_manager
 
 # Initialize command database
 initialize_command_database()
@@ -379,6 +380,24 @@ async def on_message(message):
     if not is_bot_awake():
         return
 
+    if message.guild:
+        ag_cid = message.channel.id
+        ag_aid = message.author.id
+        ag_content = message.content
+
+        async def _guild_adaptive_tune():
+            try:
+                await asyncio.to_thread(
+                    jarvis_manager.maybe_tune_from_guild_channel_message,
+                    ag_cid,
+                    ag_aid,
+                    ag_content,
+                )
+            except Exception:
+                pass
+
+        asyncio.create_task(_guild_adaptive_tune())
+
     # Check if bot is mentioned and has file attachments
     if client.user.mentioned_in(message) and message.attachments:
         # Clean the message content (remove mention)
@@ -554,7 +573,7 @@ async def _handle_auto_conversation(message: discord.Message) -> None:
 
     # Send as a regular message (no reply)
     try:
-        await message.channel.send(answer)
+        await message.channel.send(sanitize_discord_bot_content(answer))
     except Exception as e:
         await home_log.log(f"Error sending auto-conversation reply: {e}", also_send=False)
 
