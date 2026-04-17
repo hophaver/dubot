@@ -1313,6 +1313,15 @@ async def process_discord_message(client, message, permission, conversation_mana
         clean_content = raw_content[1:].strip()
     else:
         clean_content = message.content.replace(f'<@{client.user.id}>', '').strip()
+
+    # Reply to /adaptive-status may be attachment-only; handle before the generic "analyze this file" fallback.
+    if is_dm:
+        try:
+            if await _try_handle_dm_status_reply(client, message):
+                return True
+        except Exception:
+            pass
+
     if not clean_content and message.attachments:
         clean_content = "Please analyze this file and use it as context for our conversation."
     if not clean_content:
@@ -1344,9 +1353,6 @@ async def process_discord_message(client, message, permission, conversation_mana
     if is_dm and _looks_like_download_request(clean_content):
         if await process_wakeword_download(client, message, clean_content):
             return True
-
-    if is_dm and await _try_handle_dm_status_reply(client, message):
-        return True
 
     if is_dm and adaptive_dm_manager.is_enabled(message.author.id):
         try:
