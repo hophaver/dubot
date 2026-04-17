@@ -120,6 +120,7 @@ class AdaptiveDmManager:
                 "tune_guild_channel_id": None,
                 "tune_guild_channel_enabled": False,
                 "pending_manual_merge": None,
+                "context_manual_prefix": "",
             }
         return self.state[key]
 
@@ -238,7 +239,25 @@ class AdaptiveDmManager:
     def clear_profile_manual_override(self, user_id: int) -> None:
         user_state = self._get_user_state(user_id)
         user_state["profile_manual_override"] = ""
+        user_state["context_manual_prefix"] = ""
         user_state["pending_manual_merge"] = None
+        self.save()
+
+    def get_context_manual_prefix(self, user_id: int) -> str:
+        return str(self._get_user_state(user_id).get("context_manual_prefix", "") or "").strip()
+
+    def set_context_manual_prefix(self, user_id: int, text: str) -> None:
+        """Fixed manual layer before live auto-learned block; not updated by message tuning."""
+        st = self._get_user_state(user_id)
+        cleaned = (text or "").strip()
+        if len(cleaned) > _MANUAL_CONTEXT_MAX_LEN:
+            cleaned = cleaned[:_MANUAL_CONTEXT_MAX_LEN]
+        st["context_manual_prefix"] = cleaned
+        self.save()
+
+    def clear_context_manual_prefix(self, user_id: int) -> None:
+        st = self._get_user_state(user_id)
+        st["context_manual_prefix"] = ""
         self.save()
 
     @staticmethod
@@ -515,13 +534,44 @@ class AdaptiveDmManager:
 
     def get_profile_prompt(self, user_id: int) -> str:
         auto = self._structured_profile_prompt(user_id)
+        parts: List[str] = []
+        fixed_prefix = self.get_context_manual_prefix(user_id)
+        if fixed_prefix:
+            parts.append(fixed_prefix)
         manual_raw = self.get_profile_manual_override(user_id)
         if manual_raw:
             manual = self._format_manual_block(manual_raw)
-            if auto:
-                return f"{manual}\n\n{auto}"
-            return manual
-        return auto
+            parts.append(manual)
+        if auto:
+            parts.append(auto)
+        if not parts:
+            return ""
+        return "\n\n".join(parts)
+
+    def validate_full_context_file_replace(self, user_id: int, pasted: str) -> Tuple[bool, str, str]:
+        """
+        User sends a full adaptive-dm-context body ending with the fixed suffix.
+        Returns (ok, err_code, prefix_before_auto) where prefix is stored as context_manual_prefix.
+        """
+        suffix = ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
+        body = self.strip_status_export_file_headers(pasted).strip()
+        if not body:
+            return False, "empty", ""
+        if not suffix or not body.endswith(suffix):
+            return False, "bad_suffix", ""
+        core = body[: -len(suffix)].rstrip()
+        auto_expected = (self._structured_profile_prompt(user_id) or "").strip()
+        if auto_expected and core.endswith(auto_expected):
+            prefix = core[: -len(auto_expected)].rstrip()
+            return True, "", prefix
+        marker = "\nUser-specific context (auto, learned from your messages):"
+        pos = core.find(marker)
+        if pos != -1:
+            prefix = core[:pos].rstrip()
+            return True, "", prefix
+        if core.lstrip().lower().startswith("user-specific context (auto, learned from your messages):"):
+            return True, "", ""
+        return True, "", core.strip()
 
     def apply_live_message_tune(self, user_id: int, text: str) -> None:
         """Per-message nudge plus queue sample (aggressive adaptivity). URLs stripped inside."""
@@ -551,6 +601,18 @@ class AdaptiveDmManager:
             applied += 1
         return {"messages": messages, "applied": applied}
 
+    def preview_full_addition_after_replace(self, user_id: int, new_fixed_prefix: str) -> str:
+        """Preview file body: proposed fixed prefix + current auto block + suffix (ignores pending replace)."""
+        parts: List[str] = []
+        pfx = (new_fixed_prefix or "").strip()
+        if pfx:
+            parts.append(pfx)
+        auto = self._structured_profile_prompt(user_id)
+        if auto:
+            parts.append(auto)
+        parts.append(ADAPTIVE_DM_SYSTEM_SUFFIX.strip())
+        return "\n\n".join(parts)
+
     def get_full_adaptive_system_addition(self, user_id: int) -> str:
         """Text appended to the base persona+chat system prompt when adaptive DM is on (learned + fixed behaviour)."""
         parts = []
@@ -571,7 +633,8 @@ class AdaptiveDmManager:
             "tone_queue_len": len(st.get("tone_tuning_queue", []) or []),
             "tone_tuning_updates": int(st.get("tone_tuning_updates", 0) or 0),
             "last_tone_tuning_ts": float(st.get("last_tone_tuning_ts", 0.0) or 0.0),
-            "has_manual_override": bool(self.get_profile_manual_override(user_id)),
+            "has_manual_override": bool(self.get_profile_manual_override(user_id))
+            or bool(self.get_context_manual_prefix(user_id)),
             "guild_tune_channel_id": self._get_user_state(user_id).get("tune_guild_channel_id"),
             "guild_tune_channel_enabled": bool(
                 self._get_user_state(user_id).get("tune_guild_channel_enabled", False)
@@ -666,6 +729,8 @@ class AdaptiveDmManager:
         if st.get("enabled"):
             return True
         if str(st.get("profile_manual_override", "") or "").strip():
+            return True
+        if str(st.get("context_manual_prefix", "") or "").strip():
             return True
         p = st.get("profile") or {}
         if str(p.get("preferred_name", "") or "").strip():
