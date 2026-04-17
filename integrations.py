@@ -150,6 +150,24 @@ CURSOR_USER_API_KEY = _get_secret("CURSOR_USER_API_KEY")
 # Backward-compatible alias for older env setups
 CURSOR_API_KEY = _get_secret("CURSOR_API_KEY")
 
+# External Trader FastAPI (slash /trader + optional webhook listener)
+# TRADER_BASE_URL: e.g. https://trader.example.com:8443 (no trailing path)
+# TRADER_AUTH_TOKEN: shared secret; sent as X-Trader-Auth-Token on every bot→trader request
+# TRADER_WEBHOOK_CHANNEL_ID: Discord channel ID for inbound trader POSTs (falls back to startup channel)
+# TRADER_WEBHOOK_PORT: if >0, bot listens on 0.0.0.0:PORT for POST /trader/webhook (requires aiohttp)
+TRADER_BASE_URL = _env_raw("TRADER_BASE_URL")
+TRADER_AUTH_TOKEN = _get_secret("TRADER_AUTH_TOKEN", "TRADER_SHARED_SECRET", "TRADER_SECRET")
+_TRADER_WH_RAW = _DOTENV_VALUES.get("TRADER_WEBHOOK_CHANNEL_ID") or os.environ.get("TRADER_WEBHOOK_CHANNEL_ID", "")
+try:
+    TRADER_WEBHOOK_CHANNEL_ID = int(str(_TRADER_WH_RAW).strip()) if str(_TRADER_WH_RAW or "").strip() else None
+except (TypeError, ValueError):
+    TRADER_WEBHOOK_CHANNEL_ID = None
+_TRADER_PORT_RAW = _DOTENV_VALUES.get("TRADER_WEBHOOK_PORT") or os.environ.get("TRADER_WEBHOOK_PORT", "0")
+try:
+    TRADER_WEBHOOK_PORT = int(str(_TRADER_PORT_RAW).strip() or "0")
+except (TypeError, ValueError):
+    TRADER_WEBHOOK_PORT = 0
+
 # Permanent admin by user ID
 PERMANENT_ADMIN = 266952987128233985
 

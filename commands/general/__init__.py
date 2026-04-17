@@ -5,6 +5,7 @@ from . import openrouter_check
 from . import cursor
 from . import sleep_mode
 from . import reliability
+from . import trader_slash
 
 
 class GeneralCommands:
@@ -19,3 +20,4 @@ class GeneralCommands:
         cursor.register(self.client)
         sleep_mode.register(self.client)
         reliability.register(self.client)
+        trader_slash.register(self.client)
