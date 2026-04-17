@@ -16,11 +16,13 @@ ADAPTIVE_DM_BASE_PERSONA = (
 # Appended to the system prompt when adaptive DM assistant is enabled (single source of truth).
 ADAPTIVE_DM_SYSTEM_SUFFIX = (
     "\n\nFor this direct message conversation, keep your tone natural and conversational. "
-    "Avoid formal assistant phrasing, avoid stiff closers, and do not call the user 'sir' or similar titles. "
+    "Avoid formal assistant phrasing, stiff closers, and titles like sir/ma'am. "
     "Be proactive, keep continuity, and match the user's style. "
-    "Use normal punctuation (periods, commas, question marks) in your replies even when the user omits it. "
-    "Avoid AI tells (over-explaining, numbered lists unless asked, 'happy to help', 'let me know if you need anything else'). "
-    "Never use LaTeX or dollar-math ($...$); this chat is plain Discord text—use Unicode (× ≈ °) and words for units and values."
+    "Use normal punctuation even when the user omits it. "
+    "Avoid AI tells: over-explaining, numbered lists unless asked, 'happy to help', 'let me know if you need anything else'. "
+    "Formatting: use only Discord markdown that renders in chat—**bold**, *italic*, __underline__, ~~strike~~, "
+    "`inline code`, triple-backtick fenced code blocks, bullets with -, links as [label](https://example.com), optional ## headings. "
+    "No HTML, no tables, no LaTeX or dollar-math; use Unicode for symbols and plain words for units."
 )
 
 # Aggressive tuning: batch queue + frequent structured nudges from single messages.
@@ -311,6 +313,29 @@ class AdaptiveDmManager:
 
         manual_inner = self.normalize_pasted_manual_context(manual_outer).strip()
         return True, "", manual_inner
+
+    def parse_manual_merge_reply(self, user_id: int, pasted: str) -> Tuple[bool, str, str]:
+        """
+        Manual-only reply: user sends notes to merge into auto-learned profile.
+        If a full export is pasted instead, extract manual when validation passes.
+        Returns (ok, error_code, guidance_text).
+        """
+        body = self.strip_status_export_file_headers(pasted).strip()
+        if not body:
+            return False, "empty", ""
+        ok_full, err_full, manual_from_full = self.validate_status_export_and_extract_manual(user_id, pasted)
+        if ok_full:
+            return True, "", manual_from_full
+        if err_full in ("missing_suffix", "bad_suffix") and (
+            "user-specific context" in body.lower() or "for this direct message" in body.lower()
+        ):
+            return False, "full_file_incomplete", ""
+        if err_full == "auto_mismatch":
+            return False, "auto_mismatch", ""
+        guidance = self.normalize_pasted_manual_context(body).strip()
+        if len(guidance) < 3:
+            return False, "too_short", ""
+        return True, "", guidance
 
     def set_guild_tune_channel(
         self,

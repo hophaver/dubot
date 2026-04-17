@@ -10,7 +10,7 @@ from whitelist import get_user_permission
 def register(client: discord.Client):
     @client.tree.command(
         name="adaptive-status",
-        description="DMs: export context; reply with full adaptive-dm-context.txt to tune auto-learned (confirm/revert)",
+        description="DMs: export adaptive context; reply with manual notes to merge into auto-learned (confirm/revert)",
     )
     async def adaptive_status(interaction: discord.Interaction):
         if not get_user_permission(interaction.user.id):
@@ -25,11 +25,7 @@ def register(client: discord.Client):
         adaptive_dm_manager.touch_adaptive_sync_display_name(uid, label)
         snap = adaptive_dm_manager.get_status_snapshot(uid)
         full_addition = adaptive_dm_manager.get_full_adaptive_system_addition(uid)
-        if snap["enabled"]:
-            file_header = "DM-specific addition (learned profile + fixed behaviour):\n\n"
-        else:
-            file_header = "Adaptive is **off** — this is what would be added when you turn it on:\n\n"
-        file_body = file_header + full_addition
+        file_body = full_addition
         attachment = discord.File(
             io.BytesIO(file_body.encode("utf-8")),
             filename="adaptive-dm-context.txt",
@@ -64,10 +60,10 @@ def register(client: discord.Client):
         embed = discord.Embed(
             title="Adaptive (DM)",
             description=(
-                f"**Attachment:** full context block. {desc_extra}\n\n"
-                "**Reply here** with the **entire** `adaptive-dm-context.txt` (paste or attach `.txt`): "
-                "edit the **manual** section at the top; keep the **auto-learned** block and **fixed behaviour** tail exactly as exported. "
-                "Your edits are **merged into the auto-learned profile** (not stored verbatim). You will get a **preview** file with **Confirm** / **Revert**. "
+                f"**Attachment:** `adaptive-dm-context.txt` — auto-learned + fixed behaviour. {desc_extra}\n\n"
+                "**Reply here** with **only your manual notes** to fold into the auto-learned profile; they are **not** stored verbatim. "
+                "You will get a **preview** file and **Confirm** / **Revert**. "
+                "Optional: paste the full export if you still use that workflow. "
                 "**`reset manual`** clears legacy manual text and any pending preview. "
                 "On restart this syncs to **`personas.json`** as **`<your name> adaptive`**."
             ),

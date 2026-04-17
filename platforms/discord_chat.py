@@ -949,7 +949,7 @@ async def _read_first_txt_attachment(message: discord.Message) -> Optional[str]:
 
 
 async def _try_handle_dm_status_reply(client: discord.Client, message: discord.Message) -> bool:
-    """Apply manual user context when the user replies to the latest /adaptive-status with the full export file."""
+    """Merge manual notes into adaptive auto-learned profile; optional full-export paste still supported."""
     if not isinstance(message.channel, discord.DMChannel):
         return False
     ref = message.reference
@@ -980,29 +980,32 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
     if not pasted:
         await _send_chat_output(
             message,
-            "Reply with the **full** `adaptive-dm-context.txt` from the status message (paste the whole file, or attach the `.txt`). "
-            "Say **`reset manual`** to clear manual context only.",
+            "Reply with **your manual notes** only, or attach a `.txt` with those notes. "
+            "Say **`reset manual`** to clear legacy manual text and pending previews.",
         )
         return True
 
     low = pasted.lower()
     if low in ("reset", "reset manual", "clear", "clear manual"):
         adaptive_dm_manager.clear_profile_manual_override(uid)
-        await _send_chat_output(message, "✅ Manual context cleared. Using automatic profile again.")
+        await _send_chat_output(message, "✅ Cleared. Legacy manual text and any pending preview removed.")
         return True
 
-    ok, err_code, manual_inner = adaptive_dm_manager.validate_status_export_and_extract_manual(uid, pasted)
+    ok, err_code, manual_inner = adaptive_dm_manager.parse_manual_merge_reply(uid, pasted)
     if not ok:
         hints = {
-            "empty": "Paste or attach the **entire** `adaptive-dm-context.txt` (download from the status message).",
-            "missing_suffix": "Your paste is missing the **fixed behaviour** block at the end — use the full file, unmodified at the bottom.",
-            "bad_suffix": "The file must end with the **exact** fixed-behaviour block from the export. Do not delete or shorten the tail.",
+            "empty": "Send some text with your notes, or attach a `.txt`.",
+            "too_short": "Your notes are too short to merge meaningfully.",
+            "full_file_incomplete": (
+                "That looks like a **full export** but the tail is wrong or truncated. "
+                "Either send **only your manual notes**, or paste the complete file including the fixed tail from **`/adaptive-status`**."
+            ),
             "auto_mismatch": (
-                "The **auto-learned** section must match the **latest** export from **`/adaptive-status`** (middle of the file). "
-                "Run **`/adaptive-status`** again, edit only the **manual** block at the top, then reply with the full file."
+                "Full export’s auto-learned block does not match your current profile. "
+                "Run **`/adaptive-status`** again, or reply with **manual notes only**."
             ),
         }
-        msg = hints.get(err_code, "Use the complete `adaptive-dm-context.txt` from **`/adaptive-status`** without stripping the tail.")
+        msg = hints.get(err_code, "Could not use that reply. Try manual notes only, or a complete export.")
         await _send_chat_output(message, f"❌ {msg}")
         return True
 
@@ -1020,8 +1023,7 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
         return True
 
     preview_body = adaptive_dm_manager.build_full_addition_for_profile_dict(uid, new_profile)
-    file_header = "Preview — merged auto-learned profile (not applied until you tap **Confirm**):\n\n"
-    file_bytes = (file_header + preview_body).encode("utf-8")
+    file_bytes = preview_body.encode("utf-8")
     if len(file_bytes) > 7_900_000:
         await _send_chat_output(message, "❌ Preview file too large for Discord. Shorten your manual notes.")
         return True
