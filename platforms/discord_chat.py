@@ -34,7 +34,7 @@ from utils import home_log
 from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
 from adaptive_dm import ADAPTIVE_DM_SYSTEM_SUFFIX, adaptive_dm_manager, is_adaptive_context_export_filename
-from commands.shared import sanitize_discord_bot_content
+from commands.shared import sanitize_discord_bot_content, _CHUNK_SEND_DELAY, _chunk_message, MAX_MESSAGE_LENGTH
 
 
 def _is_transient_http_error(exc: Exception) -> bool:
@@ -1644,7 +1644,6 @@ async def process_discord_message(client, message, permission, conversation_mana
             )
             return True
         
-        from commands.shared import _chunk_message, MAX_MESSAGE_LENGTH
         chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
         response = None
         for i, chunk in enumerate(chunks):
@@ -1654,7 +1653,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                 response = await _send_with_retry(lambda: message.channel.send(chunk))
             conversation_manager.set_last_bot_message(message.channel.id, response.id)
             if i < len(chunks) - 1:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(_CHUNK_SEND_DELAY)
         
         # Save conversations periodically
         conversation_manager.save()
