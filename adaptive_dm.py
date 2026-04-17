@@ -33,6 +33,12 @@ TUNE_QUEUE_MAX_ITEMS = 60
 
 _MANUAL_CONTEXT_MAX_LEN = 12000
 _CONTEXT_OVERRIDE_MAX_LEN = 48000
+ADAPTIVE_CONTEXT_EXPORT_FILENAME = "adaptive-dm-context.txt"
+_DEFAULT_AUTO_TAIL_LINE = "- Match the user's style naturally without being repetitive."
+
+
+def is_adaptive_context_export_filename(name: Optional[str]) -> bool:
+    return (name or "").strip().lower() == ADAPTIVE_CONTEXT_EXPORT_FILENAME.lower()
 
 
 # Lines at the start of exported status files to strip when pasting back.
@@ -298,7 +304,7 @@ class AdaptiveDmManager:
                 "dislikes": [],
                 "tone_notes": [],
             }
-        cleaned = (body_core or "").strip()
+        cleaned = self.strip_default_auto_tail_lines(body_core or "")
         if len(cleaned) > _CONTEXT_OVERRIDE_MAX_LEN:
             cleaned = cleaned[:_CONTEXT_OVERRIDE_MAX_LEN]
         st["context_override_body"] = cleaned
@@ -582,7 +588,6 @@ class AdaptiveDmManager:
             lines.append(f"- Tone notes: {', '.join(str(x) for x in tone_notes[:14])}")
         if len(lines) == 1:
             return ""
-        lines.append("- Match the user's style naturally without being repetitive.")
         return "\n".join(lines)
 
     def _structured_profile_prompt(self, user_id: int) -> str:
@@ -605,9 +610,7 @@ class AdaptiveDmManager:
         auto = self._structured_profile_prompt(user_id)
         override = self.get_context_override_body(user_id)
         if override:
-            if auto:
-                return f"{override}\n\n{auto}"
-            return override
+            return override.strip()
         parts: List[str] = []
         fixed_prefix = self.get_context_manual_prefix(user_id)
         if fixed_prefix:
@@ -642,10 +645,14 @@ class AdaptiveDmManager:
         low = core.lower()
         if "user-specific context (auto, learned from your messages)" not in low:
             return False, "missing_auto_header", ""
+        core = self.strip_default_auto_tail_lines(core)
         return True, "", core
 
     def _refresh_auto_in_context_override(self, user_id: int) -> None:
-        """Re-embed live auto-learned block into stored full-context override after tuning."""
+        """Re-embed live auto-learned block into stored full-context override after tuning (only when profile has data)."""
+        auto = (self._structured_profile_prompt(user_id) or "").strip()
+        if not auto:
+            return
         ov = self.get_context_override_body(user_id)
         if not ov:
             return
@@ -655,12 +662,21 @@ class AdaptiveDmManager:
         if idx == -1:
             return
         prefix = ov[:idx].rstrip()
-        auto = (self._structured_profile_prompt(user_id) or "").strip()
-        if auto:
-            new_ov = f"{prefix}\n\n{auto}".strip() if prefix else auto
-        else:
-            new_ov = prefix
+        new_ov = f"{prefix}\n\n{auto}".strip() if prefix else auto
         self.set_context_override_body(user_id, new_ov)
+
+    @staticmethod
+    def strip_default_auto_tail_lines(text: str) -> str:
+        """Remove boilerplate auto-block closing line from exports / pasted files."""
+        if not (text or "").strip():
+            return text or ""
+        lines = []
+        for line in (text or "").replace("\r\n", "\n").split("\n"):
+            stripped = line.strip()
+            if stripped == _DEFAULT_AUTO_TAIL_LINE.strip():
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     def apply_live_message_tune(self, user_id: int, text: str) -> None:
         """Per-message nudge plus queue sample (aggressive adaptivity). URLs stripped inside."""

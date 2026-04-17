@@ -43,7 +43,7 @@ from utils.llm_service import initialize_command_database
 from utils import home_log
 from utils import reliability_telemetry
 from commands.shared import send_long_to_channel, bot_embed_thumbnail_url, sanitize_discord_bot_content
-from adaptive_dm import adaptive_dm_manager
+from adaptive_dm import adaptive_dm_manager, is_adaptive_context_export_filename
 
 # Initialize command database
 initialize_command_database()
@@ -308,6 +308,8 @@ async def on_message(message):
         # Process each attachment
         for attachment in message.attachments:
             try:
+                if is_adaptive_context_export_filename(attachment.filename):
+                    continue
                 # Check file size (limit to 8MB for Discord API)
                 if attachment.size > 8 * 1024 * 1024:
                     await message.channel.send(f"⚠️ File {attachment.filename} is too large (>8MB). Please use smaller files.")

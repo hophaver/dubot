@@ -14,7 +14,12 @@ from personas import persona_manager
 from models import model_manager
 from llm_function_prefs import get_function_persona_name
 from utils.openrouter_image import generate_openrouter_image, probe_openrouter_image_model
-from adaptive_dm import adaptive_dm_manager, ADAPTIVE_DM_BASE_PERSONA, ADAPTIVE_DM_SYSTEM_SUFFIX
+from adaptive_dm import (
+    adaptive_dm_manager,
+    ADAPTIVE_DM_BASE_PERSONA,
+    ADAPTIVE_DM_SYSTEM_SUFFIX,
+    is_adaptive_context_export_filename,
+)
 from utils import home_log
 from utils import reliability_telemetry
 
@@ -805,13 +810,19 @@ async def ask_llm(
     if attachments:
         attachment_context = "\n\nUser has uploaded the following files:\n"
         for i, attachment in enumerate(attachments, 1):
-            file_type = FileProcessor.get_file_type(attachment['filename'])
-            attachment_context += f"{i}. {attachment['filename']} ({file_type} file, {len(attachment['data'])} bytes)\n"
+            fn = attachment.get("filename") or ""
+            if is_adaptive_context_export_filename(fn):
+                attachment_context += (
+                    f"{i}. {fn} (skipped — use **`/adaptive-status`** in DMs and reply to that message with this file to replace adaptive context)\n"
+                )
+                continue
+            file_type = FileProcessor.get_file_type(fn)
+            attachment_context += f"{i}. {fn} ({file_type} file, {len(attachment['data'])} bytes)\n"
             
             # Prepare images for vision models
             if file_type == "image":
                 try:
-                    img_data = FileProcessor.prepare_image_for_llm(attachment['data'], attachment['filename'])
+                    img_data = FileProcessor.prepare_image_for_llm(attachment['data'], fn)
                     images_data.append(img_data)
                 except Exception as e:
                     attachment_context += f"   ⚠️ Failed to process image: {str(e)}\n"
@@ -1517,6 +1528,12 @@ async def commentary_for_generated_image(
 
 async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: bytes, user_prompt: str = "", username: str = "", vision_mode: str = "concise", return_only_text: bool = False) -> str:
     """vision_mode: concise (short), examine (detailed), interrogate (very short). return_only_text: if True, return only extracted/response text (no header)."""
+    if is_adaptive_context_export_filename(filename):
+        return (
+            "That file is reserved for **`/adaptive-status`** replies in DMs. "
+            "Reply to the status message with **`adaptive-dm-context.txt`** attached to replace your adaptive context — "
+            "do not use **`/analyze`** for it."
+        )
     date, time = update_system_time_date()
     
     # Get persona and model (non-adaptive paths; file analysis uses per-function prefs)

@@ -3,7 +3,7 @@ import json
 
 import discord
 
-from adaptive_dm import adaptive_dm_manager
+from adaptive_dm import AdaptiveDmManager, adaptive_dm_manager
 from whitelist import get_user_permission
 
 
@@ -25,7 +25,7 @@ def register(client: discord.Client):
         adaptive_dm_manager.touch_adaptive_sync_display_name(uid, label)
         snap = adaptive_dm_manager.get_status_snapshot(uid)
         full_addition = adaptive_dm_manager.get_full_adaptive_system_addition(uid)
-        file_body = full_addition
+        file_body = AdaptiveDmManager.strip_default_auto_tail_lines(full_addition)
         attachment = discord.File(
             io.BytesIO(file_body.encode("utf-8")),
             filename="adaptive-dm-context.txt",

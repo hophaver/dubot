@@ -27,7 +27,7 @@ from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
-from adaptive_dm import ADAPTIVE_DM_SYSTEM_SUFFIX, adaptive_dm_manager
+from adaptive_dm import ADAPTIVE_DM_SYSTEM_SUFFIX, adaptive_dm_manager, is_adaptive_context_export_filename
 from commands.shared import sanitize_discord_bot_content
 
 
@@ -118,6 +118,8 @@ async def _execute_planned_command(
 async def _read_message_attachments(message: discord.Message):
     attachments = []
     for att in list(getattr(message, "attachments", []) or []):
+        if is_adaptive_context_export_filename(getattr(att, "filename", None)):
+            continue
         try:
             data = await att.read()
             attachments.append({"filename": att.filename, "data": data})
@@ -988,7 +990,7 @@ async def _read_adaptive_context_txt_attachment(message: discord.Message) -> Tup
     """Return (filename, text) for exact adaptive-dm-context.txt attachment."""
     for att in list(getattr(message, "attachments", []) or []):
         fn = (att.filename or "").strip()
-        if fn.lower() != "adaptive-dm-context.txt":
+        if not is_adaptive_context_export_filename(fn):
             continue
         try:
             raw = await att.read()
