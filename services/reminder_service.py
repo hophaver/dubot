@@ -7,15 +7,10 @@ from typing import Dict, List, Optional
 import discord
 
 from utils import home_log
-try:
-    from telegram.error import Forbidden as TelegramForbidden
-except ImportError:
-    TelegramForbidden = Exception
 
 
 def _runtime_platform() -> str:
-    platform = os.environ.get("DUBOT_RUNTIME", "discord").strip().lower()
-    return platform if platform in {"discord", "telegram"} else "discord"
+    return "discord"
 
 
 class Reminder:
@@ -67,7 +62,6 @@ class ReminderManager:
         self.running = False
         self.thread = None
         self.client = None
-        self.telegram_bot = None
         self.platform = _runtime_platform()
         self.loop = None
         self.load()
@@ -75,16 +69,8 @@ class ReminderManager:
     def set_client(self, client):
         """Set Discord client for sending notifications"""
         self.client = client
-        self.telegram_bot = None
         self.platform = "discord"
         self.loop = client.loop if client else None
-
-    def set_telegram_bot(self, bot):
-        """Set Telegram bot for sending notifications."""
-        self.telegram_bot = bot
-        self.client = None
-        self.loop = None
-        self.platform = "telegram"
     
     def add_reminder(self, user_id: int, channel_id: int, message: str, delay_minutes: int, is_dm: bool = False) -> str:
         """Add a new reminder"""
@@ -121,6 +107,8 @@ class ReminderManager:
                     data = json.load(f)
                     for reminder_data in data.get("reminders", []):
                         reminder = Reminder.from_dict(reminder_data)
+                        if getattr(reminder, "platform", "") == "telegram":
+                            reminder.platform = "discord"
                         # Only load future reminders
                         if reminder.trigger_time > datetime.now():
                             self.reminders[reminder.id] = reminder
@@ -146,15 +134,12 @@ class ReminderManager:
                 del self.reminders[reminder_id]
         
         if triggered:
-            if self.platform == "discord" and self.loop and self.client:
+            if self.loop and self.client:
                 for reminder in triggered:
                     asyncio.run_coroutine_threadsafe(
                         self._send_reminder(reminder),
                         self.loop
                     )
-            elif self.platform == "telegram" and self.telegram_bot:
-                for reminder in triggered:
-                    asyncio.run(self._send_reminder(reminder))
         
         if triggered:
             self.save()
@@ -162,14 +147,6 @@ class ReminderManager:
     async def _send_reminder(self, reminder: Reminder):
         """Send a single reminder notification"""
         try:
-            if self.platform == "telegram" and self.telegram_bot:
-                target_chat_id = reminder.user_id if reminder.is_dm else reminder.channel_id
-                await self.telegram_bot.send_message(
-                    chat_id=target_chat_id,
-                    text=f"⏰ Reminder: {reminder.message}",
-                )
-                return
-
             if reminder.is_dm:
                 user = await self.client.fetch_user(reminder.user_id)
                 await user.send(f"⏰ **Reminder:** {reminder.message}")
@@ -177,8 +154,6 @@ class ReminderManager:
                 channel = self.client.get_channel(reminder.channel_id)
                 if channel:
                     await channel.send(f"<@{reminder.user_id}> ⏰ **Reminder:** {reminder.message}")
-        except TelegramForbidden:
-            home_log.log_sync(f"Cannot message Telegram user {reminder.user_id}")
         except Exception as e:
             home_log.log_sync(f"Error sending reminder: {e}")
     

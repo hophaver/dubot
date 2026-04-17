@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 import discord
 from discord import app_commands
@@ -7,6 +8,8 @@ from ._shared import defer_and_read_file
 
 
 def register(client: discord.Client):
+    if os.environ.get("DUBOT_HIDE_UTILITY_SLASH", "").strip().lower() in {"1", "true", "yes"}:
+        return
     @client.tree.command(name="code-review", description="Review and analyze code files")
     @app_commands.describe(file="Code file to review", focus_areas="What to focus on (e.g., security, performance)")
     async def code_review(interaction: discord.Interaction, file: discord.Attachment, focus_areas: Optional[str] = ""):

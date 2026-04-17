@@ -2,6 +2,8 @@ import sys
 import os
 
 os.environ["DUBOT_RUNTIME"] = "discord"
+# Utility flows are invoked from adaptive DMs without slash commands; keep handlers for internal use.
+os.environ.setdefault("DUBOT_HIDE_UTILITY_SLASH", "1")
 
 try:
     from utils.bootstrap_deps import ensure_discord_dependencies, ensure_news_dependencies
@@ -62,6 +64,12 @@ class BotClient(discord.Client):
         self.commands_registered = False
 
     async def close(self):
+        try:
+            from utils import dm_background
+
+            await dm_background.wait_all(timeout=120.0)
+        except Exception:
+            pass
         try:
             from services.clone_service import revert_if_active
             await revert_if_active(self)
@@ -526,6 +534,13 @@ def signal_handler(signum, frame):
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        try:
+            import asyncio as _asyncio
+            from utils import dm_background as _dm_bg
+
+            _asyncio.run(_dm_bg.wait_all(timeout=60.0))
+        except Exception:
+            pass
         conversation_manager.save()
         reminder_manager.stop()
         news_manager.stop()

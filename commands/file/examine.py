@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 import discord
 from discord import app_commands
@@ -5,6 +6,8 @@ from ._shared import run_image_command
 
 
 def register(client: discord.Client):
+    if os.environ.get("DUBOT_HIDE_UTILITY_SLASH", "").strip().lower() in {"1", "true", "yes"}:
+        return
     @client.tree.command(name="examine", description="Detailed image analysis (full description)")
     @app_commands.describe(file="Image file", prompt="Optional instructions")
     async def examine(interaction: discord.Interaction, file: discord.Attachment, prompt: Optional[str] = ""):

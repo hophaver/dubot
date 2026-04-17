@@ -573,7 +573,7 @@ class AdaptiveDmManager:
     def _structured_profile_prompt_from_dict(profile: Optional[Dict[str, Any]]) -> str:
         if not profile or not isinstance(profile, dict):
             return ""
-        lines = ["User-specific context (auto, learned from your messages):"]
+        lines = ["User-specific context (auto):"]
         preferred_name = str(profile.get("preferred_name", "") or "").strip()
         if preferred_name:
             lines.append(f"- Preferred name: {preferred_name}")
@@ -643,7 +643,7 @@ class AdaptiveDmManager:
             return False, "bad_suffix", ""
         core = body[: -len(suffix)].rstrip()
         low = core.lower()
-        if "user-specific context (auto, learned from your messages)" not in low:
+        if "user-specific context (auto" not in low:
             return False, "missing_auto_header", ""
         core = self.strip_default_auto_tail_lines(core)
         return True, "", core
@@ -657,7 +657,7 @@ class AdaptiveDmManager:
         if not ov:
             return
         low = ov.lower()
-        marker = "user-specific context (auto, learned from your messages):"
+        marker = "user-specific context (auto):"
         idx = low.find(marker)
         if idx == -1:
             return

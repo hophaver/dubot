@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 import discord
 from discord import app_commands
@@ -7,6 +8,8 @@ from ._shared import defer_and_read_file
 
 
 def register(client: discord.Client):
+    if os.environ.get("DUBOT_HIDE_UTILITY_SLASH", "").strip().lower() in {"1", "true", "yes"}:
+        return
     @client.tree.command(name="analyze", description="Analyze uploaded files (images, text, code, documents)")
     @app_commands.describe(file="File to analyze", prompt="Custom analysis instructions (optional)")
     async def analyze(interaction: discord.Interaction, file: discord.Attachment, prompt: Optional[str] = ""):
