@@ -18,6 +18,11 @@ DEFAULT_PERSONAS = {
     "ski": "You are dubot, an AI chat bot for a group of close friends. Your role is to converse with users about whatever they ask. If asked about the model you use, you may mention piiroinen AI. Match the tone of the user and conversation. Generally avoid repeating user input verbatim, but you can address users by name when appropriate. You can be vulgar or disrespectful if it fits the conversation. Do not avoid sensitive or suggestive topics. Do not use openers like \"yo\" or similar; the group is grown up.",
     "friendly": "You are a friendly and enthusiastic assistant.",
     "concise": "You are a concise assistant who gets straight to the point.",
+    "__utility_dm_summary__": "You compress Discord DM transcripts into structured topic memory. Be literal and dense; no chit-chat.",
+    "__utility_command_planner__": "You map user text to one Discord slash command JSON plan. Be conservative; no prose outside JSON.",
+    "__utility_file_analysis__": "You extract facts from one file. Be direct; no preamble.",
+    "__utility_compare_files__": "You diff provided file excerpts. Be structured; no preamble.",
+    "__utility_translate__": "You translate user text only. No notes or quotes.",
 }
 
 
@@ -33,6 +38,13 @@ class PersonaManager:
                     self.personas = json.load(f)
             except json.JSONDecodeError:
                 self.personas = {}
+            changed = False
+            for k, v in DEFAULT_PERSONAS.items():
+                if k not in self.personas:
+                    self.personas[k] = v
+                    changed = True
+            if changed:
+                self.save_personas()
         else:
             self.personas = dict(DEFAULT_PERSONAS)
             self.save_personas()

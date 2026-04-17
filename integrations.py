@@ -115,7 +115,6 @@ def _get_secret(*keys: str) -> str:
 
 
 DISCORD_BOT_TOKEN = _get_secret("DISCORD_BOT_TOKEN")
-TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
 HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or 'http://192.168.0.149:8123'
 HA_ACCESS_TOKEN = _get_secret("HA_ACCESS_TOKEN")
 OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.environ.get("OLLAMA_URL", "")) or 'http://localhost:11434'
@@ -171,18 +170,13 @@ def validate_tokens():
     errors = []
 
     discord_missing = not DISCORD_BOT_TOKEN
-    telegram_missing = not TELEGRAM_BOT_TOKEN
 
-    if discord_missing and telegram_missing:
-        errors.append("❌ Neither DISCORD_BOT_TOKEN nor TELEGRAM_BOT_TOKEN is set in environment variables or .env file")
-    elif not discord_missing and (
+    if discord_missing:
+        errors.append("❌ DISCORD_BOT_TOKEN is not set in environment variables or .env file")
+    elif (
         DISCORD_BOT_TOKEN == 'your_actual_discord_token_here' or 'YOUR_TOKEN' in DISCORD_BOT_TOKEN
     ):
         errors.append("❌ DISCORD_BOT_TOKEN is still set to the default/placeholder value")
-    elif not telegram_missing and (
-        TELEGRAM_BOT_TOKEN == 'your_actual_telegram_token_here' or 'YOUR_TOKEN' in TELEGRAM_BOT_TOKEN
-    ):
-        errors.append("❌ TELEGRAM_BOT_TOKEN is still set to the default/placeholder value")
     
     if not HA_ACCESS_TOKEN:
         errors.append("⚠️  HA_ACCESS_TOKEN is not set (Home Assistant commands will not work)")
@@ -282,12 +276,13 @@ if token_errors:
         print(error)
     print("="*50 + "\n")
     
-    if "Neither DISCORD_BOT_TOKEN nor TELEGRAM_BOT_TOKEN" in str(token_errors[0]):
-        print("❌ Cannot start without at least one valid bot token")
+    if "DISCORD_BOT_TOKEN is not set" in str(token_errors[0]) or "DISCORD_BOT_TOKEN is still set" in str(
+        token_errors[0]
+    ):
+        print("❌ Cannot start without a valid Discord bot token")
         print("\nTo fix this:")
-        print("1. For Discord: set DISCORD_BOT_TOKEN in .env")
-        print("2. For Telegram: set TELEGRAM_BOT_TOKEN in .env")
-        print("3. Run the bot again")
+        print("1. Set DISCORD_BOT_TOKEN in .env")
+        print("2. Run the bot again")
         sys.exit(1)
 
 # Initialize the variables

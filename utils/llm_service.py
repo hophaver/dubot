@@ -22,6 +22,7 @@ from adaptive_dm import (
 )
 from utils import home_log
 from utils import reliability_telemetry
+from utils import dm_background
 
 def _get_fallback_chain():
     from utils.model_fallback import get_fallback_chain
@@ -540,131 +541,252 @@ def _heuristic_merge_manual_into_profile(current: Dict[str, Any], guidance: str)
     }
 
 
-async def compact_dm_history_for_channel(user_id: int, channel_id: int, username: str, force: bool = False) -> Dict[str, Any]:
-    """Summarize old DM messages and trim in-memory history to reduce token usage."""
+def _dm_summary_line_from_message(item: Dict[str, Any]) -> str:
+    role = str(item.get("role", "user") or "user")
+    content = str(item.get("content", "") or "").strip()
+    if not content:
+        return ""
+    content = re.sub(
+        r"Recent messages in this channel:\n[\s\S]*?\n[\w.\- ]+ says:\s*",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    ).strip()
+    lower = content.lower()
+    if any(
+        marker in lower
+        for marker in [
+            "news briefing",
+            "daily digest",
+            "breaking news",
+            "top stories",
+            "rss",
+            "source:",
+            "headline:",
+        ]
+    ):
+        return ""
+    cap = 160 if role == "user" else 100
+    if len(content) > cap:
+        content = content[: cap - 1].rstrip() + "…"
+    return f"{role}: {content}"
+
+
+def _dm_build_old_transcript_chunk(old_messages: List[Dict[str, Any]], max_lines: int = 36) -> str:
+    old_text: List[str] = []
+    for item in old_messages[-72:]:
+        line = _dm_summary_line_from_message(item)
+        if line:
+            old_text.append(line)
+        if len(old_text) >= max_lines:
+            break
+    return "\n".join(old_text).strip()
+
+
+async def _dm_llm_merge_topic_summaries(
+    user_id: int,
+    channel_id: int,
+    joined_old_transcript: str,
+) -> None:
+    """Background: merge rolled-off DM lines into per-topic summaries (JSON)."""
+    if not joined_old_transcript.strip():
+        return
+    conversation_manager.prune_stale_dm_topics(channel_id)
+    existing = conversation_manager.get_dm_topics(channel_id)
+    eff = model_manager.get_effective_model_for_function(user_id, "dm_summary")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
+    sys_p = get_enhanced_prompt("dm_summary_topics")
+    persona_key = get_function_persona_name("dm_summary")
+    base = persona_manager.get_persona(persona_key).strip()
+    full_sys = f"{base}\n\n{sys_p}" if base else sys_p
+    user_block = (
+        f"existing_topics_json:\n{json.dumps(existing[-14:], ensure_ascii=False)}\n\n"
+        f"older_transcript:\n{joined_old_transcript[:12000]}"
+    )
+    messages = [{"role": "system", "content": full_sys}, {"role": "user", "content": user_block}]
+    try:
+        _, raw = await _try_models_with_fallback(
+            requested_model,
+            messages,
+            images=False,
+            provider=provider,
+            request_options={"num_predict": 420, "temperature": 0.2},
+        )
+    except Exception:
+        return
+    parsed = _extract_json_object_loose(raw or "")
+    topics_out = parsed.get("topics")
+    if not isinstance(topics_out, list):
+        return
+    now = time.time()
+    by_id: Dict[str, Dict[str, Any]] = {str(t.get("id", "")): t for t in existing if str(t.get("id", "")).strip()}
+    for item in topics_out:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("id", "") or "").strip() or f"t{int(now)}_{len(by_id)}"
+        label = str(item.get("label", "") or "").strip()[:120]
+        summary = str(item.get("summary", "") or "").strip()
+        if not summary:
+            continue
+        try:
+            last_ts = float(item.get("last_ts", now))
+        except (TypeError, ValueError):
+            last_ts = now
+        by_id[tid] = {"id": tid[:64], "label": (label or tid)[:120], "summary": summary[:900], "last_ts": last_ts}
+    merged = sorted(by_id.values(), key=lambda x: float(x.get("last_ts", 0)), reverse=True)
+    conversation_manager.set_dm_topics(channel_id, merged)
+    conversation_manager.save()
+
+
+async def _dm_llm_refresh_brief_profile(user_id: int, channel_id: int) -> None:
+    """Background: refresh dm_profile_llm from recent user lines (separate from adaptive structured profile)."""
+    hist = conversation_manager.get_conversation(channel_id) or []
+    user_bits: List[str] = []
+    for m in hist[-14:]:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        t = str(m.get("content", "") or "").strip()
+        if not t:
+            continue
+        t = re.sub(r"^[\w.\- ]+\s+says:\s*", "", t, flags=re.IGNORECASE).strip()
+        if len(t) > 220:
+            t = t[:218] + "…"
+        user_bits.append(t)
+    if not user_bits:
+        return
+    prev = conversation_manager.get_dm_profile_llm(channel_id)
+    eff = model_manager.get_effective_model_for_function(user_id, "dm_summary")
+    requested_model = eff.get("model", "qwen2.5:7b")
+    provider = eff.get("provider", "local")
+    sys_p = get_enhanced_prompt("dm_user_profile_brief")
+    persona_key = get_function_persona_name("dm_summary")
+    base = persona_manager.get_persona(persona_key).strip()
+    full_sys = f"{base}\n\n{sys_p}" if base else sys_p
+    payload = "previous_profile:\n" + (prev or "(none)") + "\n\nrecent_user_lines:\n" + "\n---\n".join(user_bits[-8:])
+    try:
+        _, raw = await _try_models_with_fallback(
+            requested_model,
+            [{"role": "system", "content": full_sys}, {"role": "user", "content": payload[:8000]}],
+            images=False,
+            provider=provider,
+            request_options={"num_predict": 200, "temperature": 0.15},
+        )
+    except Exception:
+        return
+    out = _clean_response(raw or "").strip()
+    if not out or out.startswith("Error:") or out.startswith("⚠️"):
+        return
+    conversation_manager.set_dm_profile_llm(channel_id, out)
+    conversation_manager.save()
+
+
+def schedule_dm_adaptive_background_tasks(user_id: int, channel_id: int) -> None:
+    """After an adaptive DM reply: profile refresh in background (history merge is scheduled separately)."""
+    if not adaptive_dm_manager.is_enabled(user_id):
+        return
+    conversation_manager.set_dm_adaptive_user(channel_id, user_id)
+    dm_background.spawn(_dm_llm_refresh_brief_profile(user_id, channel_id), name=f"dm_prof_{channel_id}")
+
+
+async def compact_dm_history_for_channel(
+    user_id: int, channel_id: int, username: str, force: bool = False
+) -> Dict[str, Any]:
+    """Trim DM transcript aggressively; merge rolled-off lines into topic summaries (LLM in background unless force)."""
     conversation = conversation_manager.get_conversation(channel_id)
-    cutoff = conversation_manager.get_dm_history_cutoff(channel_id, default_cutoff=16)
-    max_messages = max(8, cutoff * 2)
+    cutoff = conversation_manager.get_dm_history_cutoff(channel_id, default_cutoff=10)
+    max_messages = max(6, cutoff * 2)
     if not force and len(conversation) <= max_messages:
         return {"compacted": False, "reason": "under-cutoff", "cutoff": cutoff}
     if len(conversation) <= 4:
         return {"compacted": False, "reason": "not-enough-messages", "cutoff": cutoff}
 
-    old_messages = conversation[:-max_messages] if len(conversation) > max_messages else conversation[:-2]
-    recent_messages = conversation[-max_messages:] if len(conversation) > max_messages else conversation[-2:]
+    if len(conversation) > max_messages:
+        old_messages = conversation[:-max_messages]
+        recent_messages = conversation[-max_messages:]
+    elif force and len(conversation) > 6:
+        old_messages = conversation[:-6]
+        recent_messages = conversation[-6:]
+    else:
+        return {"compacted": False, "reason": "nothing-to-compact", "cutoff": cutoff}
+
     if not old_messages:
         return {"compacted": False, "reason": "nothing-to-compact", "cutoff": cutoff}
 
-    previous_summary = conversation_manager.get_dm_summary_text(channel_id)
-    def _summary_line_from_message(item: Dict[str, Any]) -> str:
-        role = str(item.get("role", "user") or "user")
-        content = str(item.get("content", "") or "").strip()
-        if not content:
-            return ""
-        # Strip bulky contextual preambles that blow up tokens.
-        content = re.sub(
-            r"Recent messages in this channel:\n[\s\S]*?\n[\w.\- ]+ says:\s*",
-            "",
-            content,
-            flags=re.IGNORECASE,
-        ).strip()
-        # Exclude likely news digests/alerts from compaction memory.
-        lower = content.lower()
-        if any(
-            marker in lower
-            for marker in [
-                "news briefing",
-                "daily digest",
-                "breaking news",
-                "top stories",
-                "rss",
-                "source:",
-                "headline:",
-            ]
-        ):
-            return ""
-        # Keep user signal compact; assistant messages need less length.
-        cap = 220 if role == "user" else 140
-        if len(content) > cap:
-            content = content[:cap].rstrip() + "…"
-        return f"{role}: {content}"
-
-    old_text = []
-    for item in old_messages[-80:]:
-        line = _summary_line_from_message(item)
-        if line:
-            old_text.append(line)
-        if len(old_text) >= 48:
-            break
-    joined = "\n".join(old_text)
+    joined = _dm_build_old_transcript_chunk(old_messages, max_lines=40)
     if not joined.strip():
-        return {"compacted": False, "reason": "empty-source", "cutoff": cutoff}
+        conversation_manager.replace_conversation(channel_id, recent_messages)
+        conversation_manager.save()
+        return {"compacted": True, "cutoff": cutoff, "merged_messages": len(old_messages), "remaining_messages": len(recent_messages), "reason": "empty-source-trimmed"}
 
-    summary_prompt = (
-        "You are maintaining compact long-term memory for a Discord DM assistant.\n"
-        "Create a concise summary that preserves:\n"
-        "1) user preferences and dislikes,\n"
-        "2) key ongoing tasks or commitments,\n"
-        "3) important context/events that future replies need.\n"
-        "Output plain text bullets only, max 130 words.\n\n"
-        f"Existing memory summary:\n{previous_summary or '(none)'}\n\n"
-        f"New older messages to merge:\n{joined}"
-    )
-    messages = [{"role": "user", "content": summary_prompt}]
-    eff = model_manager.get_effective_model_for_function(user_id, "dm_summary")
-    requested_model = eff.get("model", "qwen2.5:7b")
-    provider = eff.get("provider", "local")
-    _, summary = await _try_models_with_fallback(
-        requested_model=requested_model,
-        messages=messages,
-        images=False,
-        provider=provider,
-    )
-    summary = _clean_response(summary or "")
-    if not summary or summary.startswith("Error:") or summary.startswith("⚠️"):
-        return {"compacted": False, "reason": "summary-failed", "cutoff": cutoff}
-
-    conversation_manager.append_dm_summary(channel_id, summary, merged_messages=len(old_messages))
     conversation_manager.replace_conversation(channel_id, recent_messages)
     conversation_manager.save()
+
+    if force:
+        await _dm_llm_merge_topic_summaries(user_id, channel_id, joined)
+        return {
+            "compacted": True,
+            "cutoff": cutoff,
+            "merged_messages": len(old_messages),
+            "remaining_messages": len(recent_messages),
+        }
+
+    dm_background.spawn(
+        _dm_llm_merge_topic_summaries(user_id, channel_id, joined),
+        name=f"dm_sum_{channel_id}",
+    )
     return {
         "compacted": True,
         "cutoff": cutoff,
         "merged_messages": len(old_messages),
         "remaining_messages": len(recent_messages),
+        "async": True,
     }
 
 
+ADAPTIVE_PLANNER_EXCLUDED_COMMANDS = frozenset(
+    {
+        "translate",
+        "analyze",
+        "ocr",
+        "code-review",
+        "examine",
+        "interrogate",
+        "compare-files",
+        "dm-history",
+    }
+)
+
+
+def build_adaptive_command_schema(full_schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Planner schema without utility commands that are handled directly in adaptive DMs."""
+    out: List[Dict[str, Any]] = []
+    for cmd in full_schema or []:
+        name = str((cmd or {}).get("name", "") or "").strip().lower()
+        if name in ADAPTIVE_PLANNER_EXCLUDED_COMMANDS:
+            continue
+        out.append(cmd)
+    return out
+
+
 async def plan_command_from_text(user_id: int, message_text: str, command_schema: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Infer a slash command plan from natural language in DMs."""
+    """Infer a slash command plan from natural language in DMs (utility commands are excluded from schema)."""
     if not message_text or not command_schema:
         return {"should_execute": False}
     schema_json = json.dumps(command_schema, ensure_ascii=True)
-    planner_prompt = (
-        "Convert the user's natural language into a bot command plan.\n"
-        "Return strict JSON only with keys:\n"
-        "should_execute (bool), command (string), arguments (object), reason (string), risk (safe|risky|dangerous).\n"
-        "Rules:\n"
-        "- should_execute=false when the message is general chat, question, or unclear.\n"
-        "- For command `imagine`: should_execute=true ONLY when the user explicitly wants a generated image "
-        "(e.g. draw/picture/image/diagram/mockup/wireframe/visual/reference render, or \"show me what X could look like\"). "
-        "If they only say \"imagine\" figuratively or intent is ambiguous, should_execute=false.\n"
-        "- Map the user's image description to the `idea` argument for `imagine`.\n"
-        "- Use only command names from schema.\n"
-        "- Fill only known argument names for that command.\n"
-        "- Keep arguments as plain strings/numbers/booleans.\n"
-        "- risk must be dangerous for restart/kill/update/purge/clone/run/profanity/remover/setwake/sethome/setstatus/whitelist.\n\n"
-        f"Command schema:\n{schema_json}\n\n"
-        f"User message:\n{message_text}"
-    )
+    planner_prompt = get_enhanced_prompt("command_planner_adaptive", schema_json=schema_json, user_message=message_text)
     eff = model_manager.get_effective_model_for_function(user_id, "command_planner")
     requested_model = eff.get("model", "qwen2.5:7b")
     provider = eff.get("provider", "local")
+    persona_key = get_function_persona_name("command_planner")
+    base = persona_manager.get_persona(persona_key).strip()
+    sys_parts = [base, planner_prompt] if base else [planner_prompt]
     _, raw = await _try_models_with_fallback(
-        requested_model=requested_model,
-        messages=[{"role": "user", "content": planner_prompt}],
+        requested_model,
+        messages=[{"role": "system", "content": "\n\n".join(sys_parts)}],
         images=False,
         provider=provider,
+        request_options={"num_predict": 320, "temperature": 0.1},
     )
     parsed = _extract_json_object(raw or "")
     if not parsed:
@@ -953,6 +1075,12 @@ async def ask_llm(
         dm_profile_prompt = adaptive_dm_manager.get_profile_prompt(user_id)
         if dm_profile_prompt:
             enhanced_system_prompt = f"{enhanced_system_prompt}\n\n{dm_profile_prompt}"
+        llm_prof = conversation_manager.get_dm_profile_llm(channel_id)
+        if llm_prof:
+            enhanced_system_prompt += (
+                "\n\nBrief user profile (for tone/personalization only; do not mention unless clearly relevant):\n"
+                f"{llm_prof}"
+            )
         enhanced_system_prompt += ADAPTIVE_DM_SYSTEM_SUFFIX
         eff_img = model_manager.get_effective_model_for_function(user_id, "image_generation")
         if str(eff_img.get("model") or "").strip():
@@ -1000,15 +1128,18 @@ async def ask_llm(
         if not history:
             history = [{"role": "system", "content": enhanced_system_prompt}]
     else:
-        conversation_manager.clear_conversation(channel_id)
+        if is_dm and adaptive_dm:
+            conversation_manager.reset_dm_transcript_only(channel_id)
+        else:
+            conversation_manager.clear_conversation(channel_id)
         history = [{"role": "system", "content": enhanced_system_prompt}]
     
     # Build messages
     messages = history.copy()
-    if is_dm and len(messages) > 24:
-        # DM responses should stay snappy; summaries preserve long-term context.
-        messages = messages[-24:]
-    if is_dm and is_continuation:
+    if is_dm and len(messages) > 14:
+        # Keep active window small; topic summaries + profile hold older context.
+        messages = messages[-14:]
+    if is_dm:
         dm_summary = conversation_manager.get_dm_summary_text(channel_id)
         if dm_summary:
             messages.insert(
@@ -1016,7 +1147,8 @@ async def ask_llm(
                 {
                     "role": "system",
                     "content": (
-                        "Long-term memory summary from older DM messages:\n"
+                        "Older DM context (topic notes; may be stale—use only when clearly relevant; "
+                        "do not bring up unrelated past topics):\n"
                         f"{dm_summary}"
                     ),
                 },
@@ -1056,8 +1188,9 @@ async def ask_llm(
         conversation_manager.add_message(channel_id, "user", persisted_user_message)
         conversation_manager.add_message(channel_id, "assistant", response_text)
         conversation_manager.save()
-        
-    
+        if adaptive_dm:
+            schedule_dm_adaptive_background_tasks(user_id, channel_id)
+
     return response_text
 
 def _strip_leaked_image_placeholders(text: str) -> str:
@@ -1626,7 +1759,18 @@ async def commentary_for_generated_image(
         return ""
     return text.strip()
 
-async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: bytes, user_prompt: str = "", username: str = "", vision_mode: str = "concise", return_only_text: bool = False) -> str:
+async def analyze_file(
+    user_id: int,
+    channel_id: int,
+    filename: str,
+    file_data: bytes,
+    user_prompt: str = "",
+    username: str = "",
+    vision_mode: str = "concise",
+    return_only_text: bool = False,
+    *,
+    record_in_conversation: bool = True,
+) -> str:
     """vision_mode: concise (short), examine (detailed), interrogate (very short). return_only_text: if True, return only extracted/response text (no header)."""
     if is_adaptive_context_export_filename(filename):
         return (
@@ -1723,11 +1867,15 @@ async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: 
     # Clean and format response
     response = _clean_response(response)
     
-    # Store in conversation history
-    conversation_manager.add_message(channel_id, "user", f"{username} says: [File Upload: {filename}] {user_prompt or 'Analyze this file'}")
-    conversation_manager.add_message(channel_id, "assistant", response)
-    conversation_manager.save()
-    
+    if record_in_conversation:
+        conversation_manager.add_message(
+            channel_id,
+            "user",
+            f"{username} says: [File Upload: {filename}] {user_prompt or 'Analyze this file'}",
+        )
+        conversation_manager.add_message(channel_id, "assistant", response)
+        conversation_manager.save()
+
     if return_only_text:
         return response
     final_response = f"📄 **File Analysis: {filename}**\n"
@@ -1735,7 +1883,15 @@ async def analyze_file(user_id: int, channel_id: int, filename: str, file_data: 
     final_response += response
     return final_response
 
-async def compare_files(user_id: int, channel_id: int, files: List[Dict], user_prompt: str = "", username: str = "") -> str:
+async def compare_files(
+    user_id: int,
+    channel_id: int,
+    files: List[Dict],
+    user_prompt: str = "",
+    username: str = "",
+    *,
+    record_in_conversation: bool = True,
+) -> str:
     """Compare multiple text files"""
     # Get system info
     date, time = update_system_time_date()
@@ -1798,10 +1954,14 @@ async def compare_files(user_id: int, channel_id: int, files: List[Dict], user_p
     
     final_response = header + "\n" + response
     
-    # Store in conversation history
-    file_names = ", ".join([f['filename'] for f in files])
-    conversation_manager.add_message(channel_id, "user", f"{username} says: [File Comparison: {file_names}] {user_prompt or 'Compare these files'}")
-    conversation_manager.add_message(channel_id, "assistant", response)
-    conversation_manager.save()
-    
+    if record_in_conversation:
+        file_names = ", ".join([f["filename"] for f in files])
+        conversation_manager.add_message(
+            channel_id,
+            "user",
+            f"{username} says: [File Comparison: {file_names}] {user_prompt or 'Compare these files'}",
+        )
+        conversation_manager.add_message(channel_id, "assistant", response)
+        conversation_manager.save()
+
     return final_response

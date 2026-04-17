@@ -60,8 +60,8 @@ def register(client: discord.Client):
         embed = discord.Embed(
             title="Adaptive (DM)",
             description=(
-                f"**Attachment:** `adaptive-dm-context.txt` — auto-learned + fixed behaviour. {desc_extra}\n\n"
-                "**Reply** with **manual notes** to merge into the auto-learned profile, or attach a file named exactly **`adaptive-dm-context.txt`** to replace the whole export (same tail + auto header required). "
+                f"**Attachment:** `adaptive-dm-context.txt` — auto block + fixed behaviour. {desc_extra}\n\n"
+                "**Reply** with **manual notes** to merge into the auto profile, or attach a file named exactly **`adaptive-dm-context.txt`** to replace the whole export (same tail + auto header required). "
                 "You will get a **preview** and **Confirm** / **Revert**. "
                 "**`reset manual`** clears legacy manual text and any pending preview. "
                 "On restart this syncs to **`personas.json`** as **`<your name> adaptive`**."

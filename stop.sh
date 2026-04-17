@@ -1,13 +1,11 @@
 #!/usr/bin/env sh
 # Stop the bot: kill process from .bot.pid and remove PID file.
-# (No venv to deactivate in this script; the bot process is stopped.)
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 PID_FILE="${SCRIPT_DIR}/.bot.pid"
 PIDS_FILE="${SCRIPT_DIR}/.bot.pids"
 DISCORD_LOG_FILE="${SCRIPT_DIR}/bot-discord.log"
-TELEGRAM_LOG_FILE="${SCRIPT_DIR}/bot-telegram.log"
 COMBINED_LOG_FILE="${SCRIPT_DIR}/bot.log"
 
 stop_one() {
@@ -50,7 +48,6 @@ if [ -f "$PIDS_FILE" ]; then
     fi
     echo "Logs are at:"
     echo "  - $DISCORD_LOG_FILE"
-    echo "  - $TELEGRAM_LOG_FILE"
     echo "  - $COMBINED_LOG_FILE (legacy)"
     exit 0
 fi
@@ -65,5 +62,4 @@ rm -f "$PID_FILE"
 stop_one "bot" "$PID"
 echo "Logs are at:"
 echo "  - $DISCORD_LOG_FILE"
-echo "  - $TELEGRAM_LOG_FILE"
 echo "  - $COMBINED_LOG_FILE (legacy)"

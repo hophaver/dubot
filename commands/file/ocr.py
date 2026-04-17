@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 import discord
 from discord import app_commands
@@ -7,6 +8,8 @@ from ._shared import defer_and_read_file
 
 
 def register(client: discord.Client):
+    if os.environ.get("DUBOT_HIDE_UTILITY_SLASH", "").strip().lower() in {"1", "true", "yes"}:
+        return
     @client.tree.command(name="ocr", description="Extract text from images or documents (output is text only)")
     @app_commands.describe(file="Image or document file", language="Language hint (eng, spa, fra, deu, etc.)")
     async def ocr(interaction: discord.Interaction, file: discord.Attachment, language: Optional[str] = "eng"):

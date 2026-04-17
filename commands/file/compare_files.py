@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 import discord
 from discord import app_commands
@@ -7,6 +8,8 @@ from commands.shared import send_long_message
 
 
 def register(client: discord.Client):
+    if os.environ.get("DUBOT_HIDE_UTILITY_SLASH", "").strip().lower() in {"1", "true", "yes"}:
+        return
     @client.tree.command(name="compare-files", description="Compare two or more text files")
     @app_commands.describe(file1="First file", file2="Second file", file3="Optional", file4="Optional", prompt="Instructions (optional)")
     async def compare_files_cmd(

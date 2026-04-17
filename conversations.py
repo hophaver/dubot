@@ -5,6 +5,11 @@ from collections import defaultdict
 from config import get_chat_history
 
 
+DM_SESSION_GAP_SECONDS = 36 * 3600  # treat as fresh session after this idle (unless reply-to-bot)
+_TOPIC_STALE_SECONDS = 30 * 86400  # forget topic summaries not touched in ~30 days
+_DM_TOPICS_MAX = 14
+
+
 class ConversationManager:
     """One thread per channel. Reply to bot = continue that chat; wake word or /chat = new chat."""
 
@@ -15,7 +20,11 @@ class ConversationManager:
         self.last_bot_message = {}
         self.recent_bot_message_ids = defaultdict(list)  # per channel, last 10 bot message ids (in-memory only)
         self.dm_history_cutoff = {}
-        self.dm_summaries = defaultdict(list)
+        self.dm_summaries = defaultdict(list)  # legacy flat summaries (migrated to dm_topics)
+        self.dm_topics = defaultdict(list)  # list of dicts: id, label, summary, last_ts
+        self.dm_profile_llm = {}  # channel_id -> brief text (LLM-built; separate from adaptive heuristics)
+        self.dm_last_user_ts = {}  # channel_id -> last user message unix time (for session gap)
+        self.dm_adaptive_user_id = {}  # channel_id -> int user id when DM is adaptive (for background tasks)
         self.dm_fast_reply_until = {}
         self._load()
 
@@ -35,6 +44,79 @@ class ConversationManager:
         last = self.last_bot_message.get(key)
         return ref_id == last or ref_id in recent
 
+    def should_continue_dm_session(self, channel_id: int, is_reply_to_bot: bool) -> bool:
+        """DM: continue rolling context unless long idle gap (reply-to-bot always continues)."""
+        if is_reply_to_bot:
+            return True
+        key = self._key(channel_id)
+        last = self.dm_last_user_ts.get(key)
+        if last is None:
+            return True
+        return (time.time() - float(last)) < DM_SESSION_GAP_SECONDS
+
+    def touch_dm_user_activity(self, channel_id: int) -> None:
+        self.dm_last_user_ts[self._key(channel_id)] = time.time()
+
+    def get_dm_last_user_activity(self, channel_id: int):
+        return self.dm_last_user_ts.get(self._key(channel_id))
+
+    def set_dm_adaptive_user(self, channel_id: int, user_id: int) -> None:
+        self.dm_adaptive_user_id[self._key(channel_id)] = int(user_id)
+
+    def get_dm_adaptive_user(self, channel_id: int):
+        raw = self.dm_adaptive_user_id.get(self._key(channel_id))
+        return int(raw) if raw is not None else None
+
+    def get_dm_profile_llm(self, channel_id: int) -> str:
+        return str(self.dm_profile_llm.get(self._key(channel_id), "") or "").strip()
+
+    def set_dm_profile_llm(self, channel_id: int, text: str) -> None:
+        key = self._key(channel_id)
+        t = (text or "").strip()
+        if len(t) > 1200:
+            t = t[:1200].rstrip()
+        self.dm_profile_llm[key] = t
+
+    def get_dm_topics(self, channel_id: int):
+        return list(self.dm_topics.get(self._key(channel_id), []) or [])
+
+    def set_dm_topics(self, channel_id: int, topics: list) -> None:
+        key = self._key(channel_id)
+        cleaned = []
+        now = time.time()
+        for item in topics or []:
+            if not isinstance(item, dict):
+                continue
+            tid = str(item.get("id", "") or "").strip() or f"t{len(cleaned)}"
+            label = str(item.get("label", "") or "").strip()[:120]
+            summary = str(item.get("summary", "") or "").strip()
+            if not summary and not label:
+                continue
+            try:
+                last_ts = float(item.get("last_ts", now))
+            except (TypeError, ValueError):
+                last_ts = now
+            if now - last_ts > _TOPIC_STALE_SECONDS:
+                continue
+            cleaned.append(
+                {
+                    "id": tid[:64],
+                    "label": label or tid[:40],
+                    "summary": summary[:900],
+                    "last_ts": last_ts,
+                }
+            )
+        self.dm_topics[key] = cleaned[-_DM_TOPICS_MAX:]
+
+    def prune_stale_dm_topics(self, channel_id: int) -> None:
+        """Drop topics older than stale window."""
+        now = time.time()
+        key = self._key(channel_id)
+        items = self.get_dm_topics(channel_id)
+        kept = [t for t in items if now - float(t.get("last_ts", 0)) <= _TOPIC_STALE_SECONDS]
+        if len(kept) != len(items):
+            self.dm_topics[key] = kept[-_DM_TOPICS_MAX:]
+
     def add_message(self, channel_id, role, content):
         key = self._key(channel_id)
         self.conversations[key].append({"role": role, "content": content})
@@ -48,6 +130,13 @@ class ConversationManager:
         key = self._key(channel_id)
         self.conversations[key] = list(messages or [])
 
+    def reset_dm_transcript_only(self, channel_id: int) -> None:
+        """Clear rolling DM messages only; keep topic summaries and LLM profile memory."""
+        key = self._key(channel_id)
+        self.conversations[key] = []
+        self.last_bot_message.pop(key, None)
+        self.recent_bot_message_ids.pop(key, None)
+
     def clear_conversation(self, channel_id=None, user_id=None):
         if channel_id is not None:
             key = self._key(channel_id)
@@ -55,6 +144,10 @@ class ConversationManager:
             self.last_bot_message.pop(key, None)
             self.recent_bot_message_ids.pop(key, None)
             self.dm_summaries.pop(key, None)
+            self.dm_topics.pop(key, None)
+            self.dm_profile_llm.pop(key, None)
+            self.dm_last_user_ts.pop(key, None)
+            self.dm_adaptive_user_id.pop(key, None)
             self.dm_fast_reply_until.pop(key, None)
         elif user_id is not None:
             self.conversations.clear()
@@ -63,8 +156,12 @@ class ConversationManager:
             self.dm_summaries.clear()
             self.dm_history_cutoff.clear()
             self.dm_fast_reply_until.clear()
+            self.dm_topics.clear()
+            self.dm_profile_llm.clear()
+            self.dm_last_user_ts.clear()
+            self.dm_adaptive_user_id.clear()
 
-    def get_dm_history_cutoff(self, channel_id, default_cutoff=16):
+    def get_dm_history_cutoff(self, channel_id, default_cutoff=10):
         key = self._key(channel_id)
         raw = self.dm_history_cutoff.get(key, default_cutoff)
         try:
@@ -91,15 +188,40 @@ class ConversationManager:
         return self.dm_summaries.get(self._key(channel_id), [])
 
     def get_dm_summary_text(self, channel_id):
-        items = self.get_dm_summaries(channel_id)
-        if not items:
-            return ""
+        """Compact text block for LLM: time-decayed topic lines + optional legacy bullets."""
+        self.prune_stale_dm_topics(channel_id)
+        topics = self.get_dm_topics(channel_id)
+        now = time.time()
         lines = []
-        for idx, item in enumerate(items[-3:], start=1):
+        for t in sorted(topics, key=lambda x: float(x.get("last_ts", 0)), reverse=True):
+            label = str(t.get("label", "") or "").strip()
+            summary = str(t.get("summary", "") or "").strip()
+            if not summary:
+                continue
+            age_days = max(0.0, (now - float(t.get("last_ts", now))) / 86400.0)
+            if age_days > 21:
+                cap = 80
+            elif age_days > 7:
+                cap = 140
+            elif age_days > 2:
+                cap = 220
+            else:
+                cap = 320
+            if len(summary) > cap:
+                summary = summary[: cap - 1].rstrip() + "…"
+            ts = int(t.get("last_ts", now))
+            prefix = label[:60] if label else "topic"
+            lines.append(f"- [{prefix}, last={ts}] {summary}")
+
+        legacy = self.get_dm_summaries(channel_id)
+        for item in legacy[-2:]:
             text = str(item.get("summary", "")).strip()
             if text:
-                lines.append(f"{idx}. {text}")
-        return "\n".join(lines)
+                if len(text) > 200:
+                    text = text[:199] + "…"
+                lines.append(f"- [archive] {text}")
+
+        return "\n".join(lines[:12])
 
     def set_dm_fast_reply_window(self, channel_id, minutes: int):
         key = self._key(channel_id)
@@ -139,11 +261,45 @@ class ConversationManager:
                     "last_bot_message": self.last_bot_message,
                     "dm_history_cutoff": self.dm_history_cutoff,
                     "dm_summaries": dict(self.dm_summaries),
+                    "dm_topics": dict(self.dm_topics),
+                    "dm_profile_llm": dict(self.dm_profile_llm),
+                    "dm_last_user_ts": dict(self.dm_last_user_ts),
+                    "dm_adaptive_user_id": dict(self.dm_adaptive_user_id),
                     "dm_fast_reply_until": self.dm_fast_reply_until,
                 },
                 f,
                 indent=2,
             )
+
+    def _migrate_legacy_summaries(self) -> None:
+        """One-time: fold legacy dm_summaries into dm_topics so nothing is lost."""
+        dirty = False
+        now = time.time()
+        for key, entries in list(self.dm_summaries.items()):
+            if not entries:
+                continue
+            existing = self.get_dm_topics(int(key)) if key.isdigit() else self.dm_topics.get(key, [])
+            if existing:
+                continue
+            topics = []
+            for i, item in enumerate(entries[-6:]):
+                text = str(item.get("summary", "") or "").strip()
+                if not text:
+                    continue
+                topics.append(
+                    {
+                        "id": f"mig{i}",
+                        "label": "prior DM",
+                        "summary": text[:800],
+                        "last_ts": now - (len(entries) - i) * 60.0,
+                    }
+                )
+            if topics:
+                self.dm_topics[key] = topics[-_DM_TOPICS_MAX:]
+                self.dm_summaries[key] = []
+                dirty = True
+        if dirty:
+            self.save()
 
     def _load(self):
         try:
@@ -154,8 +310,38 @@ class ConversationManager:
                 self.dm_history_cutoff = data.get("dm_history_cutoff", {})
                 self.dm_summaries = defaultdict(list, data.get("dm_summaries", {}))
                 self.dm_fast_reply_until = data.get("dm_fast_reply_until", {})
+                self.dm_topics = defaultdict(list, data.get("dm_topics", {}))
+                self.dm_profile_llm = dict(data.get("dm_profile_llm", {}))
+                self.dm_last_user_ts = dict(data.get("dm_last_user_ts", {}))
+                self.dm_adaptive_user_id = dict(data.get("dm_adaptive_user_id", {}))
         except (FileNotFoundError, json.JSONDecodeError):
             pass
+        self._migrate_legacy_summaries()
+        self._one_time_clear_transcripts_keep_dm_memory()
+
+    def _one_time_clear_transcripts_keep_dm_memory(self) -> None:
+        """
+        Clear persisted rolling transcripts once; keep DM summaries/topics/profile/cutoffs.
+        Legacy flat summaries are migrated into dm_topics before dm_summaries is cleared.
+        """
+        marker = "data/.dm_transcript_purge_v1"
+        try:
+            with open(marker) as f:
+                if (f.read() or "").strip():
+                    return
+        except FileNotFoundError:
+            pass
+        self.conversations = defaultdict(list)
+        self.last_bot_message = {}
+        self.recent_bot_message_ids = defaultdict(list)
+        # Legacy bullets now live in topics; drop duplicate storage.
+        self.dm_summaries = defaultdict(list)
+        try:
+            with open(marker, "w") as f:
+                f.write("1\n")
+        except OSError:
+            pass
+        self.save()
 
 
 conversation_manager = ConversationManager()

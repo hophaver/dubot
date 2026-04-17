@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import discord
@@ -9,6 +10,8 @@ from utils.llm_service import compact_dm_history_for_channel
 
 
 def register(client: discord.Client):
+    if os.environ.get("DUBOT_HIDE_UTILITY_SLASH", "").strip().lower() in {"1", "true", "yes"}:
+        return
     @client.tree.command(
         name="dm-history",
         description="DM only: view/set cutoff for history summarization and optionally summarize now",
@@ -48,11 +51,13 @@ def register(client: discord.Client):
             )
         current_cutoff = conversation_manager.get_dm_history_cutoff(channel_id)
         summary_entries = conversation_manager.get_dm_summaries(channel_id)
+        topic_entries = conversation_manager.get_dm_topics(channel_id)
         merged_total = sum(int(item.get("merged_messages", 0)) for item in summary_entries)
 
         msg = (
             f"DM history cutoff: **{current_cutoff}** user turns.\n"
-            f"Stored summary blocks: **{len(summary_entries)}** (merged messages: **{merged_total}**)."
+            f"Topic memory entries: **{len(topic_entries)}**.\n"
+            f"Legacy summary blocks: **{len(summary_entries)}** (merged messages: **{merged_total}**)."
         )
         if cutoff is not None:
             msg = f"✅ DM history cutoff updated to **{current_cutoff}** user turns.\n" + msg

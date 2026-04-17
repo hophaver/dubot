@@ -18,9 +18,15 @@ from models import model_manager
 from utils.llm_service import (
     ask_llm,
     plan_command_from_text,
+    analyze_file,
+    compare_files,
+    build_adaptive_command_schema,
+    compact_dm_history_for_channel,
+    schedule_dm_adaptive_background_tasks,
     _strip_leaked_image_placeholders,
     merge_adaptive_manual_guidance_into_profile,
 )
+from commands.translate.translate import do_translate
 from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_file_pipeline
 from utils.dm_image_flow_temp import FINAL_NAME, read_text, remove_session_dir
 from utils.ha_integration import ask_home_assistant
@@ -1054,7 +1060,7 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
                 "bad_filename": "Attachment must be named exactly **`adaptive-dm-context.txt`**.",
                 "empty": "That file is empty.",
                 "bad_suffix": "The file must end with the same **fixed behaviour** block as the export from **`/adaptive-status`**.",
-                "missing_auto_header": "The file must include the line **User-specific context (auto, learned from your messages):**.",
+                "missing_auto_header": "The file must include the line **User-specific context (auto):**.",
             }
             await _send_chat_output(message, f"❌ Invalid file: {hints_fr.get(err_code, err_code)}")
             return True
@@ -1148,6 +1154,183 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
     return True
 
 
+def _adaptive_utility_intent(text: str) -> Optional[str]:
+    """Detect adaptive-DM direct utility intents (no slash commands)."""
+    t = (text or "").strip()
+    if not t or t.startswith("/"):
+        return None
+    low = t.lower()
+    if low.startswith("translate ") or low.startswith("translation:") or " translate this" in low:
+        return "translate"
+    if any(
+        low.startswith(p)
+        for p in (
+            "analyze ",
+            "analyse ",
+            "ocr ",
+            "code review ",
+            "code-review ",
+            "examine ",
+            "interrogate ",
+            "compare files",
+            "compare these files",
+            "compare the files",
+        )
+    ):
+        if low.startswith("compare"):
+            return "compare_files"
+        return "analyze"
+    if "dm history" in low or "history cutoff" in low or re.search(r"\bset\s+(?:dm\s+)?history\s+\d+\b", low):
+        return "dm_history"
+    return None
+
+
+async def _handle_adaptive_utility_commands(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
+    """Run file analysis / compare / translate / dm-history from natural language in adaptive DMs."""
+    intent = _adaptive_utility_intent(clean_content)
+    if not intent:
+        return False
+    uid = message.author.id
+    ch_id = message.channel.id
+    uname = str(message.author.name)
+    atts = await _read_message_attachments(message)
+
+    if intent == "translate":
+        body = clean_content.strip()
+        if body.lower().startswith("translate "):
+            body = body[10:].strip()
+        elif body.lower().startswith("translation:"):
+            body = body.split(":", 1)[-1].strip()
+        target = "English"
+        m_lang = re.search(r"\b(?:into|to)\s+([A-Za-z][A-Za-z\s\-]{2,40})\s*$", body, flags=re.IGNORECASE)
+        if m_lang:
+            target = m_lang.group(1).strip()
+            body = body[: m_lang.start()].strip()
+        if not body.strip():
+            await _send_chat_output(message, "Say what to translate (optionally end with **to Finnish** / **into Spanish**, etc.).")
+            return True
+        out = await do_translate(uid, body, target)
+        if not out:
+            await _send_chat_output(message, "❌ Translation failed.")
+            return True
+        await _send_chat_output(message, out[:1900])
+        return True
+
+    if intent == "dm_history":
+        low = clean_content.lower()
+        if "summarize" in low and "history" in low:
+            try:
+                result = await compact_dm_history_for_channel(uid, ch_id, uname, force=True)
+            except Exception as exc:
+                await _send_chat_output(message, f"❌ Summarize failed: {str(exc)[:200]}")
+                return True
+            if result and result.get("compacted"):
+                await _send_chat_output(
+                    message,
+                    f"✅ Rolled off **{result.get('merged_messages', 0)}** older turns into topic memory.",
+                )
+            else:
+                await _send_chat_output(
+                    message,
+                    f"ℹ️ Nothing to compact ({(result or {}).get('reason', 'ok')}).",
+                )
+            return True
+        m_set = re.search(r"\bset\s+(?:dm\s+)?history\s+(\d+)\b", low)
+        if m_set:
+            try:
+                n = int(m_set.group(1))
+            except ValueError:
+                n = 0
+            if n < 4 or n > 80:
+                await _send_chat_output(message, "❌ Cutoff must be between **4** and **80** user turns.")
+                return True
+            conversation_manager.set_dm_history_cutoff(ch_id, n)
+            conversation_manager.save()
+            await _send_chat_output(message, f"✅ DM rolling history cutoff set to **{n}** user turns.")
+            return True
+        co = conversation_manager.get_dm_history_cutoff(ch_id)
+        topics = conversation_manager.get_dm_topics(ch_id)
+        await _send_chat_output(
+            message,
+            f"DM rolling cutoff: **{co}** user turns kept hot.\n"
+            f"Topic memory entries: **{len(topics)}** (stale topics drop after ~30 days idle).\n"
+            "Say **`set history 12`** to change the cutoff.",
+        )
+        return True
+
+    if intent == "compare_files":
+        if len(atts) < 2:
+            await _send_chat_output(message, "Attach **at least two** text-y files to compare.")
+            return True
+        prompt = ""
+        low = clean_content.lower()
+        if "compare files" in low:
+            prompt = clean_content[low.find("compare files") + len("compare files") :].strip()
+        elif "compare these files" in low:
+            prompt = clean_content[low.find("compare these files") + len("compare these files") :].strip()
+        elif "compare the files" in low:
+            prompt = clean_content[low.find("compare the files") + len("compare the files") :].strip()
+        try:
+            res = await compare_files(
+                uid,
+                ch_id,
+                [{"filename": a["filename"], "data": a["data"]} for a in atts[:4]],
+                prompt,
+                uname,
+                record_in_conversation=False,
+            )
+        except Exception as exc:
+            await _send_chat_output(message, f"❌ Compare failed: {str(exc)[:200]}")
+            return True
+        await _send_chat_output(message, res[:1900] if res else "❌ Empty result.")
+        return True
+
+    # analyze / ocr / code-review / examine / interrogate
+    if not atts:
+        await _send_chat_output(message, "Attach a file for that, or say what to run more plainly.")
+        return True
+    file_info = atts[0]
+    fn = file_info["filename"]
+    data = file_info["data"]
+    low = clean_content.lower()
+    vision_mode = "concise"
+    user_prompt = ""
+    if low.startswith("ocr ") or low.startswith("ocr\n"):
+        user_prompt = f"Extract ALL text. Language hint from user message: {clean_content[4:120].strip() or 'auto'}"
+        vision_mode = "concise"
+    elif low.startswith("code review ") or low.startswith("code-review "):
+        rest = clean_content.split(" ", 2)[-1] if low.startswith("code review ") else clean_content.split(" ", 1)[-1]
+        user_prompt = f"Review this code. Focus: {rest.strip()[:500]}" if rest.strip() else "Review this code."
+    elif low.startswith("examine "):
+        user_prompt = clean_content[8:].strip() or "Describe this image in full detail."
+        vision_mode = "examine"
+    elif low.startswith("interrogate "):
+        user_prompt = clean_content[12:].strip() or "Answer very concisely."
+        vision_mode = "interrogate"
+    elif low.startswith("analyze ") or low.startswith("analyse "):
+        user_prompt = clean_content.split(" ", 1)[1].strip() if " " in clean_content else ""
+    else:
+        user_prompt = ""
+
+    try:
+        res = await analyze_file(
+            uid,
+            ch_id,
+            fn,
+            data,
+            user_prompt,
+            uname,
+            vision_mode=vision_mode,
+            return_only_text=False,
+            record_in_conversation=False,
+        )
+    except Exception as exc:
+        await _send_chat_output(message, f"❌ File analysis failed: {str(exc)[:200]}")
+        return True
+    await _send_chat_output(message, res[:1900] if res else "❌ Empty result.")
+    return True
+
+
 async def _handle_adaptive_command_flow(client: discord.Client, message: discord.Message, clean_content: str) -> bool:
     """DM-only natural-language command routing with explicit confirmation."""
     user_id = message.author.id
@@ -1218,6 +1401,12 @@ async def _handle_adaptive_command_flow(client: discord.Client, message: discord
         await _send_chat_output(message, "Quick yes/no: should I run it?")
         return True
 
+    try:
+        if await _handle_adaptive_utility_commands(client, message, clean_content):
+            return True
+    except Exception:
+        pass
+
     if _looks_like_himas_request(clean_content):
         command_obj = client.tree.get_command("himas")
         if command_obj is not None:
@@ -1245,7 +1434,7 @@ async def _handle_adaptive_command_flow(client: discord.Client, message: discord
         return False
     plan = _quick_command_plan_from_text(clean_content)
     if not plan:
-        schema = _build_command_schema(client)
+        schema = build_adaptive_command_schema(_build_command_schema(client))
         plan = await plan_command_from_text(user_id, clean_content, schema)
     if not plan.get("should_execute"):
         return False
@@ -1375,9 +1564,17 @@ async def process_discord_message(client, message, permission, conversation_mana
         except Exception:
             pass
 
+    if is_dm:
+        conversation_manager.touch_dm_user_activity(message.channel.id)
+
     async with message.channel.typing():
-        # Determine if this is a continuation
-        is_continuation = is_reply_to_bot or is_dm
+        # DM: continue rolling context only when replying to the bot or within a recent session window.
+        dm_session_continue = conversation_manager.should_continue_dm_session(
+            message.channel.id, is_reply_to_bot
+        )
+        is_continuation = is_reply_to_bot or (is_dm and dm_session_continue)
+        if is_dm and adaptive_dm_manager.is_enabled(message.author.id) and not dm_session_continue:
+            conversation_manager.reset_dm_transcript_only(message.channel.id)
         
         # Build attachments list (for files/images with wake word or mentions)
         attachments = await _read_message_attachments(message)
