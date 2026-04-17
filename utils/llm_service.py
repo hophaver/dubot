@@ -543,15 +543,17 @@ def _heuristic_merge_manual_into_profile(current: Dict[str, Any], guidance: str)
 
 def _dm_summary_line_from_message(item: Dict[str, Any]) -> str:
     role = str(item.get("role", "user") or "user")
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else None
+    if role == "assistant" and conversation_manager.is_slash_command_bot_turn(meta):
+        return ""
+    if role == "assistant" and meta and meta.get("news_delivery"):
+        return ""
     content = str(item.get("content", "") or "").strip()
     if not content:
         return ""
-    content = re.sub(
-        r"Recent messages in this channel:\n[\s\S]*?\n[\w.\- ]+ says:\s*",
-        "",
-        content,
-        flags=re.IGNORECASE,
-    ).strip()
+    if role == "assistant" and conversation_manager.is_news_style_dm_bot_text(content):
+        return ""
+    content = conversation_manager.strip_discord_recent_context_block(content)
     lower = content.lower()
     if any(
         marker in lower
@@ -641,7 +643,12 @@ async def _dm_llm_merge_topic_summaries(
 
 async def _dm_llm_refresh_brief_profile(user_id: int, channel_id: int) -> None:
     """Background: refresh dm_profile_llm from recent user lines (separate from adaptive structured profile)."""
-    hist = conversation_manager.get_conversation(channel_id) or []
+    hist_raw = conversation_manager.get_conversation(channel_id) or []
+    hist = (
+        conversation_manager.roll_adaptive_dm_transcript_messages(channel_id, hist_raw)
+        if adaptive_dm_manager.is_enabled(user_id)
+        else hist_raw
+    )
     user_bits: List[str] = []
     for m in hist[-14:]:
         if not isinstance(m, dict) or m.get("role") != "user":
@@ -693,7 +700,12 @@ async def compact_dm_history_for_channel(
     user_id: int, channel_id: int, username: str, force: bool = False
 ) -> Dict[str, Any]:
     """Trim DM transcript aggressively; merge rolled-off lines into topic summaries (LLM in background unless force)."""
-    conversation = conversation_manager.get_conversation(channel_id)
+    adaptive = adaptive_dm_manager.is_enabled(user_id)
+    conversation = (
+        conversation_manager.roll_adaptive_dm_transcript_messages(channel_id)
+        if adaptive
+        else (conversation_manager.get_conversation(channel_id) or [])
+    )
     cutoff = conversation_manager.get_dm_history_cutoff(channel_id, default_cutoff=10)
     max_messages = max(6, cutoff * 2)
     if not force and len(conversation) <= max_messages:
@@ -717,7 +729,13 @@ async def compact_dm_history_for_channel(
     if not joined.strip():
         conversation_manager.replace_conversation(channel_id, recent_messages)
         conversation_manager.save()
-        return {"compacted": True, "cutoff": cutoff, "merged_messages": len(old_messages), "remaining_messages": len(recent_messages), "reason": "empty-source-trimmed"}
+        return {
+            "compacted": True,
+            "cutoff": cutoff,
+            "merged_messages": len(old_messages),
+            "remaining_messages": len(recent_messages),
+            "reason": "empty-source-trimmed",
+        }
 
     conversation_manager.replace_conversation(channel_id, recent_messages)
     conversation_manager.save()
@@ -802,7 +820,7 @@ async def plan_command_from_text(user_id: int, message_text: str, command_schema
 
 def _compact_dm_tail_for_image_flow(channel_id: int, username: str, max_chars: int = 1100) -> str:
     """Recent transcript slice for image flow — no extra LLM; keeps token budget low."""
-    hist = conversation_manager.get_conversation(channel_id) or []
+    hist = conversation_manager.roll_adaptive_dm_transcript_messages(channel_id) or []
     chunks: List[str] = []
     for m in hist[-10:]:
         if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
@@ -1130,6 +1148,8 @@ async def ask_llm(
             except Exception:
                 pass
         history = conversation_manager.get_conversation(channel_id)
+        if adaptive_dm:
+            history = conversation_manager.roll_adaptive_dm_transcript_messages(channel_id, history)
     else:
         if is_dm and adaptive_dm:
             conversation_manager.reset_dm_transcript_only(channel_id)
@@ -1194,11 +1214,17 @@ async def ask_llm(
     
     # Store conversation if successful (channel-based; user identity is in formatted_message)
     if response_text and not response_text.startswith("Error:"):
-        conversation_manager.add_message(channel_id, "user", persisted_user_message)
-        conversation_manager.add_message(channel_id, "assistant", response_text)
-        conversation_manager.save()
-        if adaptive_dm:
-            schedule_dm_adaptive_background_tasks(user_id, channel_id)
+        skip_adaptive_store = bool(
+            adaptive_dm
+            and not (reply_context_block or "").strip()
+            and conversation_manager.is_news_style_dm_bot_text(persisted_user_message)
+        )
+        if not skip_adaptive_store:
+            conversation_manager.add_message(channel_id, "user", persisted_user_message)
+            conversation_manager.add_message(channel_id, "assistant", response_text)
+            conversation_manager.save()
+            if adaptive_dm:
+                schedule_dm_adaptive_background_tasks(user_id, channel_id)
 
     return response_text
 

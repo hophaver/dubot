@@ -1,6 +1,8 @@
 import json
+import re
 import time
 from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 from config import get_chat_history
 
@@ -8,6 +10,52 @@ from config import get_chat_history
 DM_SESSION_GAP_SECONDS = 36 * 3600  # treat as fresh session after this idle (unless reply-to-bot)
 _TOPIC_STALE_SECONDS = 30 * 86400  # forget topic summaries not touched in ~30 days
 _DM_TOPICS_MAX = 14
+
+# Strip embedded "recent channel" block from persisted user lines (see ask_llm / Discord context).
+_DISCORD_RECENT_CTX_RE = re.compile(
+    r"Recent messages in this channel:\n[\s\S]*?\n[\w.\- ]+ says:\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_discord_recent_context_block(content: str) -> str:
+    return _DISCORD_RECENT_CTX_RE.sub("", (content or "").strip()).strip()
+
+
+def is_news_style_dm_bot_text(content: str) -> bool:
+    """Heuristic: automated news DM body (compact article, digest header, slop edit)."""
+    core = strip_discord_recent_context_block(content)
+    if not core:
+        return False
+    low = core.lower()
+    if "⏰ **you're outside your daily quiet window**" in low:
+        return True
+    if "news briefing" in low and "quiet" in low:
+        return True
+    if "**slop**" in low and "~~" in core:
+        return True
+    if core.lstrip().startswith("# **") and "source:" in low:
+        if "http://" in low or "https://" in low:
+            return True
+    return False
+
+
+def is_news_style_embed_title(title: str) -> bool:
+    t = (title or "").strip().lower()
+    if not t:
+        return False
+    if "news briefing" in t:
+        return True
+    if "quiet hours summary" in t:
+        return True
+    return False
+
+
+def is_slash_command_bot_turn(meta: Optional[Dict[str, Any]]) -> bool:
+    """True when this assistant line came from a Discord slash-command reply."""
+    if not meta or not isinstance(meta, dict):
+        return False
+    return bool(meta.get("discord_interaction") and (meta.get("command_name") or "").strip())
 
 
 class ConversationManager:
@@ -117,14 +165,46 @@ class ConversationManager:
         if len(kept) != len(items):
             self.dm_topics[key] = kept[-_DM_TOPICS_MAX:]
 
-    def add_message(self, channel_id, role, content):
+    def add_message(
+        self,
+        channel_id,
+        role,
+        content,
+        *,
+        meta: Optional[Dict[str, Any]] = None,
+    ):
         key = self._key(channel_id)
-        self.conversations[key].append({"role": role, "content": content})
+        entry: Dict[str, Any] = {"role": role, "content": content}
+        if meta:
+            entry["meta"] = dict(meta)
+        self.conversations[key].append(entry)
         if len(self.conversations[key]) > self.max_history * 2:
             self.conversations[key] = self.conversations[key][-self.max_history * 2 :]
 
     def get_conversation(self, channel_id):
         return self.conversations.get(self._key(channel_id), [])
+
+    def roll_adaptive_dm_transcript_messages(
+        self, channel_id, messages: Optional[List[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
+        """User/assistant turns for adaptive DM LLM history: drop slash-command bot replies and news bot posts."""
+        raw = messages if messages is not None else self.get_conversation(channel_id)
+        out: List[Dict[str, Any]] = []
+        for m in raw or []:
+            if not isinstance(m, dict):
+                continue
+            if m.get("role") not in ("user", "assistant"):
+                continue
+            meta = m.get("meta") if isinstance(m.get("meta"), dict) else None
+            if m.get("role") == "assistant":
+                if is_slash_command_bot_turn(meta):
+                    continue
+                if meta and meta.get("news_delivery"):
+                    continue
+                if is_news_style_dm_bot_text(str(m.get("content", "") or "")):
+                    continue
+            out.append(m)
+        return out
 
     def replace_conversation(self, channel_id, messages):
         key = self._key(channel_id)

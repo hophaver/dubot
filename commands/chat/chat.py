@@ -88,16 +88,15 @@ def register(client: discord.Client):
             return
         await interaction.response.defer()
         from utils.llm_service import ask_llm, analyze_file, compare_files
+        from adaptive_dm import adaptive_dm_manager
 
         attachments = await _read_attachments([file1, file2, file3], interaction)
 
         msg_lower = message.lower()
         is_dm = _is_dm_channel(interaction.channel)
         if is_dm:
-            from adaptive_dm import adaptive_dm_manager as _adm
-
             _label = (getattr(interaction.user, "global_name", None) or interaction.user.name or "").strip()
-            _adm.touch_adaptive_sync_display_name(interaction.user.id, _label)
+            adaptive_dm_manager.touch_adaptive_sync_display_name(interaction.user.id, _label)
         fast_reply_enabled = (not is_dm) or conversation_manager.is_dm_fast_reply_active(interaction.channel.id)
 
         if len(attachments) >= 2 and any(keyword in msg_lower for keyword in COMPARE_KEYWORDS):
@@ -107,12 +106,13 @@ def register(client: discord.Client):
                     interaction.user.id, interaction.channel.id, file_data_list, message, str(interaction.user.name)
                 )
                 await send_long_message(interaction, result)
-                conversation_manager.add_message(
-                    interaction.channel.id, "user",
-                    f"{interaction.user.name} says: [Compare files] {message}"
-                )
-                conversation_manager.add_message(interaction.channel.id, "assistant", result)
-                conversation_manager.save()
+                if not (is_dm and adaptive_dm_manager.is_enabled(interaction.user.id)):
+                    conversation_manager.add_message(
+                        interaction.channel.id, "user",
+                        f"{interaction.user.name} says: [Compare files] {message}"
+                    )
+                    conversation_manager.add_message(interaction.channel.id, "assistant", result)
+                    conversation_manager.save()
                 return
             except Exception as e:
                 await interaction.followup.send(f"⚠️ Error comparing files: {str(e)[:100]}")
@@ -125,9 +125,10 @@ def register(client: discord.Client):
                     message, str(interaction.user.name)
                 )
                 await send_long_message(interaction, result)
-                conversation_manager.add_message(interaction.channel.id, "user", f"{interaction.user.name} says: [File: {a['filename']}] {message}")
-                conversation_manager.add_message(interaction.channel.id, "assistant", result)
-                conversation_manager.save()
+                if not (is_dm and adaptive_dm_manager.is_enabled(interaction.user.id)):
+                    conversation_manager.add_message(interaction.channel.id, "user", f"{interaction.user.name} says: [File: {a['filename']}] {message}")
+                    conversation_manager.add_message(interaction.channel.id, "assistant", result)
+                    conversation_manager.save()
                 return
             except Exception as e:
                 await interaction.followup.send(f"⚠️ Error analyzing file: {str(e)[:100]}")

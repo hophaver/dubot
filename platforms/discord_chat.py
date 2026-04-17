@@ -12,7 +12,11 @@ from typing import Optional, Any, Dict, List, Tuple, get_args, get_origin
 from discord import app_commands
 from discord.ui import View, Button
 from config import get_config, get_wake_word, set_bot_awake
-from conversations import conversation_manager
+from conversations import (
+    conversation_manager,
+    is_news_style_dm_bot_text,
+    is_news_style_embed_title,
+)
 from services.reminder_service import reminder_manager
 from models import model_manager
 from utils.llm_service import (
@@ -1590,7 +1594,14 @@ async def process_discord_message(client, message, permission, conversation_mana
         context = None
         if is_continuation and message.channel and hasattr(message.channel, 'history'):
             try:
-                context = await get_chat_context(message.channel, limit=6, include_bots=is_dm)
+                adaptive_ctx = is_dm and adaptive_dm_manager.is_enabled(message.author.id)
+                context = await get_chat_context(
+                    message.channel,
+                    limit=6,
+                    include_bots=is_dm,
+                    adaptive_dm_context=adaptive_ctx,
+                    current_message=message,
+                )
             except Exception:
                 context = None
 
@@ -1779,16 +1790,62 @@ async def process_wakeword_admin_command(client, message, command, content, perm
         return True
     return False
 
-async def get_chat_context(channel, limit=5, include_bots=False):
+def _discord_message_is_slash_command_output(msg: discord.Message) -> bool:
+    """True for messages created as the bot's reply to a slash command (application command)."""
+    inter = getattr(msg, "interaction", None)
+    return inter is not None
+
+
+def _adaptive_dm_skip_context_message(msg: discord.Message, current_message: discord.Message) -> bool:
+    """Adaptive DM rolling context: omit slash outputs and push news unless user replied to that news."""
+    if not msg.author.bot:
+        return False
+    if _discord_message_is_slash_command_output(msg):
+        return True
+    if msg.embeds:
+        for emb in msg.embeds:
+            if is_news_style_embed_title(getattr(emb, "title", None) or ""):
+                return True
+    body = (msg.content or "").strip()
+    if body and is_news_style_dm_bot_text(body):
+        ref = getattr(current_message, "reference", None)
+        ref_id = getattr(ref, "message_id", None) if ref else None
+        if ref_id and ref_id == msg.id:
+            return False
+        return True
+    return False
+
+
+async def get_chat_context(
+    channel,
+    limit=5,
+    include_bots=False,
+    *,
+    adaptive_dm_context: bool = False,
+    current_message: Optional[discord.Message] = None,
+):
     """Get recent messages for group chat context"""
     messages = []
     try:
         async for msg in channel.history(limit=limit):
             if msg.author.bot and not include_bots:
                 continue
+            if adaptive_dm_context and current_message is not None:
+                if _adaptive_dm_skip_context_message(msg, current_message):
+                    continue
             text = msg.content or ""
-            if not text.strip() and not msg.attachments:
+            if not text.strip() and not msg.attachments and not msg.embeds:
                 continue
+            if msg.embeds and not text.strip():
+                parts = []
+                for emb in msg.embeds[:2]:
+                    t = (emb.title or "").strip()
+                    d = (emb.description or "").strip()
+                    if t:
+                        parts.append(t)
+                    if d:
+                        parts.append(d[:500])
+                text = "\n".join(parts).strip()
             if msg.attachments:
                 attachment_names = ", ".join(a.filename for a in msg.attachments[:3] if a.filename)
                 if attachment_names:
