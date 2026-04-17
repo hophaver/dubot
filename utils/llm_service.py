@@ -6,7 +6,7 @@ import base64
 import mimetypes
 import time
 import requests
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 import integrations
 from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
 from conversations import (
@@ -991,8 +991,14 @@ async def ask_llm(
     fast_reply=False,
     reply_context_block: Optional[str] = None,
     image_gen_capability_note: Optional[str] = None,
+    *,
+    persist: bool = True,
+    abort_check: Optional[Callable[[], Awaitable[bool]]] = None,
+    reuse_response: Optional[str] = None,
 ):
     """Main LLM interface for all platforms with file support"""
+    if abort_check and await abort_check():
+        return ""
     # Get system info
     date, time = update_system_time_date()
     location, city, country = await _get_runtime_location_cached()
@@ -1066,7 +1072,31 @@ async def ask_llm(
     if rcb:
         formatted_message = f"{rcb}\n\n{formatted_message}"
         persisted_user_message = f"{rcb}\n\n{persisted_user_message}"
-    
+
+    if reuse_response is not None:
+        response_text = _clean_response(str(reuse_response or ""))
+        if adaptive_dm and str(
+            model_manager.get_effective_model_for_function(user_id, "image_generation").get("model") or ""
+        ).strip():
+            response_text = _strip_leaked_image_placeholders(response_text)
+        if (
+            persist
+            and response_text
+            and not response_text.startswith("Error:")
+        ):
+            skip_adaptive_store = bool(
+                adaptive_dm
+                and not (reply_context_block or "").strip()
+                and is_news_style_dm_bot_text(persisted_user_message)
+            )
+            if not skip_adaptive_store:
+                conversation_manager.add_message(channel_id, "user", persisted_user_message)
+                conversation_manager.add_message(channel_id, "assistant", response_text)
+                conversation_manager.save()
+                if adaptive_dm:
+                    schedule_dm_adaptive_background_tasks(user_id, channel_id)
+        return response_text
+
     # Add attachment context to message
     if attachment_context:
         formatted_message += attachment_context
@@ -1210,15 +1240,22 @@ async def ask_llm(
         images=bool(images_data),
         provider=provider,
         request_options=request_options,
+        abort_check=abort_check,
     )
-    
+    if abort_check and await abort_check():
+        return ""
+
     # Clean response
     response_text = _clean_response(response_text)
     if adaptive_dm and str(model_manager.get_effective_model_for_function(user_id, "image_generation").get("model") or "").strip():
         response_text = _strip_leaked_image_placeholders(response_text)
     
     # Store conversation if successful (channel-based; user identity is in formatted_message)
-    if response_text and not response_text.startswith("Error:"):
+    if (
+        persist
+        and response_text
+        and not response_text.startswith("Error:")
+    ):
         skip_adaptive_store = bool(
             adaptive_dm
             and not (reply_context_block or "").strip()
@@ -1369,7 +1406,12 @@ def _to_openrouter_messages(messages: list) -> list:
     return converted
 
 
-async def _make_openrouter_request(model_name: str, messages: list, max_tokens: Optional[int] = None) -> str:
+async def _make_openrouter_request(
+    model_name: str,
+    messages: list,
+    max_tokens: Optional[int] = None,
+    abort_check: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> Optional[str]:
     if not OPENROUTER_API_KEY:
         return "Error: OPENROUTER_API_KEY is not configured."
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -1407,7 +1449,11 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         return f"OpenRouter request failed ({status_code})."
 
     try:
+        if abort_check and await abort_check():
+            return None
         response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+        if abort_check and await abort_check():
+            return None
         body = {}
         try:
             body = response.json()
@@ -1416,7 +1462,11 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
 
         if response.status_code == 429:
             await asyncio.sleep(2)
+            if abort_check and await abort_check():
+                return None
             response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
+            if abort_check and await abort_check():
+                return None
             try:
                 body = response.json()
             except ValueError:
@@ -1438,6 +1488,8 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         if isinstance(content, list):
             text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
             content = "".join(text_parts)
+        if abort_check and await abort_check():
+            return None
         return str(content).strip() or "No response."
     except requests.exceptions.Timeout:
         return "Error: Request timed out"
@@ -1445,7 +1497,14 @@ async def _make_openrouter_request(model_name: str, messages: list, max_tokens: 
         return f"Error: {str(e)}"
 
 
-async def _try_models_with_fallback(requested_model, messages, images=False, provider="local", request_options: Optional[Dict[str, Any]] = None):
+async def _try_models_with_fallback(
+    requested_model,
+    messages,
+    images=False,
+    provider="local",
+    request_options: Optional[Dict[str, Any]] = None,
+    abort_check: Optional[Callable[[], Awaitable[bool]]] = None,
+):
     provider = (provider or "local").strip().lower()
     if provider == "cloud":
         max_tokens = None
@@ -1454,7 +1513,13 @@ async def _try_models_with_fallback(requested_model, messages, images=False, pro
                 max_tokens = int(request_options.get("num_predict"))
             except (TypeError, ValueError):
                 max_tokens = None
-        response = await _make_openrouter_request(requested_model, messages, max_tokens=max_tokens)
+        if abort_check and await abort_check():
+            return requested_model, ""
+        response = await _make_openrouter_request(
+            requested_model, messages, max_tokens=max_tokens, abort_check=abort_check
+        )
+        if response is None:
+            return requested_model, ""
         if response and not response.startswith("Error:"):
             return requested_model, response
         return requested_model, f"⚠️ Cloud model unavailable: {response}"
@@ -1474,7 +1539,13 @@ async def _try_models_with_fallback(requested_model, messages, images=False, pro
 
     models_to_try = list(dict.fromkeys(models_to_try))
     for model_name in models_to_try:
-        response = await _make_ollama_request(model_name, messages, request_options=request_options)
+        if abort_check and await abort_check():
+            return requested_model, ""
+        response = await _make_ollama_request(
+            model_name, messages, request_options=request_options, abort_check=abort_check
+        )
+        if response is None:
+            return requested_model, ""
 
         if response and not response.startswith("Error:"):
             return model_name, response
@@ -1488,8 +1559,13 @@ async def _try_models_with_fallback(requested_model, messages, images=False, pro
         return requested_model, _format_vision_help_message()
     return requested_model, "⚠️ All models are unavailable. Please check your Ollama server."
 
-async def _make_ollama_request(model_name, messages, request_options: Optional[Dict[str, Any]] = None):
-    """Make request to Ollama API"""
+async def _make_ollama_request(
+    model_name,
+    messages,
+    request_options: Optional[Dict[str, Any]] = None,
+    abort_check: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> Optional[str]:
+    """Make request to Ollama API. Returns None when aborted (coalesced DM)."""
     endpoints = [
         OLLAMA_URL,
         "http://localhost:11434",
@@ -1537,8 +1613,12 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
 
         for attempt in range(3):
             try:
+                if abort_check and await abort_check():
+                    return None
                 # Run blocking I/O in a thread so Discord event loop stays responsive.
                 response = await asyncio.to_thread(requests.post, url, json=data, timeout=75)
+                if abort_check and await abort_check():
+                    return None
 
                 if response.status_code == 404:
                     break
@@ -1552,6 +1632,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                             f"{reliability_telemetry.format_snapshot('Counters')}"
                         )
                         await asyncio.sleep(1 + attempt)
+                        if abort_check and await abort_check():
+                            return None
                         continue
                     error_text = (response.text or "")[:140]
                     error_count = reliability_telemetry.increment("llm_errors")
@@ -1571,6 +1653,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                             f"(attempt {attempt + 1}/3)."
                         )
                         await asyncio.sleep(1 + attempt)
+                        if abort_check and await abort_check():
+                            return None
                         continue
                     error_count = reliability_telemetry.increment("llm_errors")
                     home_log.log_sync(
@@ -1578,6 +1662,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                         f"(error #{error_count})."
                     )
                     return "Error: Invalid JSON response from Ollama."
+                if abort_check and await abort_check():
+                    return None
                 return result.get("message", {}).get("content", "No response.")
 
             except requests.exceptions.ConnectionError:
@@ -1589,6 +1675,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                         f"{reliability_telemetry.format_snapshot('Counters')}"
                     )
                     await asyncio.sleep(1 + attempt)
+                    if abort_check and await abort_check():
+                        return None
                     continue
                 break
             except requests.exceptions.Timeout:
@@ -1600,6 +1688,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                         f"{reliability_telemetry.format_snapshot('Counters')}"
                     )
                     await asyncio.sleep(1 + attempt)
+                    if abort_check and await abort_check():
+                        return None
                     continue
                 timeout_count = reliability_telemetry.increment("llm_timeouts")
                 home_log.log_sync(
@@ -1616,6 +1706,8 @@ async def _make_ollama_request(model_name, messages, request_options: Optional[D
                         f"(attempt {attempt + 1}/3)."
                     )
                     await asyncio.sleep(1 + attempt)
+                    if abort_check and await abort_check():
+                        return None
                     continue
                 error_count = reliability_telemetry.increment("llm_errors")
                 home_log.log_sync(
@@ -1640,6 +1732,8 @@ async def probe_model(provider: str, model_name: str) -> Tuple[bool, str]:
         response = await _make_openrouter_request(model_name, test_messages)
     else:
         response = await _make_ollama_request(model_name, test_messages)
+    if response is None:
+        return False, f"Cannot use model '{model_name}' (aborted)."
     if response and not response.startswith("Error:"):
         return True, f"Model '{model_name}' OK ({provider})."
     return False, f"Cannot use model '{model_name}'. {response}"
@@ -1903,9 +1997,11 @@ async def analyze_file(
             response = await _make_openrouter_request(model_name, messages)
         else:
             response = await _make_ollama_request(model_name, messages)
+        if response is None:
+            response = ""
     
     # Clean and format response
-    response = _clean_response(response)
+    response = _clean_response(response or "")
     
     if record_in_conversation:
         conversation_manager.add_message(
@@ -1985,7 +2081,7 @@ async def compare_files(
         response = await _make_openrouter_request(model_name, messages)
     else:
         response = await _make_ollama_request(model_name, messages)
-    response = _clean_response(response)
+    response = _clean_response(response or "")
     
     # Format response
     header = f"🔍 **File Comparison: {len(files)} files**\n"

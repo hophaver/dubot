@@ -39,7 +39,7 @@ from whitelist import get_user_permission
 from conversations import conversation_manager
 from services.reminder_service import reminder_manager
 from services.news_service import news_manager
-from platforms.discord_chat import process_discord_message
+from platforms.discord_chat import process_discord_message, handle_dm_user_typing
 from commands.shitpost import handle_shitpost
 from utils.llm_service import initialize_command_database
 from utils import home_log
@@ -55,6 +55,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
 intents.reactions = True
+intents.typing = True
 
 class BotClient(discord.Client):
     def __init__(self):
@@ -263,6 +264,14 @@ async def on_ready():
     sent = await home_log.send_to_home(embed=embed)
     if get_startup_channel_id() and not sent:
         await home_log.log("⚠️ Could not send startup message to home channel (check permissions).", also_send=False)
+
+@client.event
+async def on_typing(channel, user, when):
+    try:
+        await handle_dm_user_typing(channel, user)
+    except Exception:
+        pass
+
 
 @client.event
 async def on_message(message):

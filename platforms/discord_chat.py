@@ -5,6 +5,7 @@ import os
 import io
 import mimetypes
 import asyncio
+import logging
 import inspect
 import shlex
 import re
@@ -39,6 +40,12 @@ from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
 from adaptive_dm import ADAPTIVE_DM_SYSTEM_SUFFIX, adaptive_dm_manager, is_adaptive_context_export_filename
 from commands.shared import sanitize_discord_bot_content, _CHUNK_SEND_DELAY, _chunk_message, MAX_MESSAGE_LENGTH
+from utils.dm_typing_coalesce import dm_typing_coalescer
+
+log = logging.getLogger(__name__)
+
+# One background consumer per DM channel (typing-aware coalescing).
+_dm_llm_tasks: Dict[int, asyncio.Task] = {}
 
 
 def _is_transient_http_error(exc: Exception) -> bool:
@@ -1474,6 +1481,200 @@ async def _handle_adaptive_command_flow(client: discord.Client, message: discord
     )
     return True
 
+
+def _join_dm_coalesced_user_text(lines: List[str]) -> str:
+    parts = [str(x).strip() for x in lines if str(x).strip()]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return (
+        "The user sent multiple messages in quick succession; treat them as one request.\n"
+        + "\n---\n".join(parts)
+    )
+
+
+async def _dm_llm_consumer_loop(channel_id: int) -> None:
+    """Serialize DM LLM work: wait for typing to settle, merge lines, cancel superseded generations."""
+    while True:
+        try:
+            batch, anchor, ctx = await dm_typing_coalescer.wait_batch(channel_id)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("dm coalesce wait_batch failed ch=%s", channel_id)
+            return
+
+        combined = _join_dm_coalesced_user_text(batch)
+        if not combined:
+            continue
+
+        ch = anchor.channel
+        user_id = int(ctx["user_id"])
+        username = str(ctx["username"])
+        is_reply_to_bot = bool(ctx["is_reply_to_bot"])
+        dm_session_continue = bool(ctx["dm_session_continue"])
+        is_continuation = bool(ctx["is_continuation"])
+        is_wake_word = bool(ctx["is_wake_word"])
+        is_mentioned = bool(ctx["is_mentioned"])
+        fast_reply_enabled = bool(ctx["fast_reply_enabled"])
+
+        reply_context_block: Optional[str] = None
+        attachments: Optional[List[Dict[str, Any]]] = None
+        try:
+            attachments = list(ctx.get("attachments") or [])
+        except Exception:
+            attachments = []
+        if (is_wake_word or is_mentioned) and anchor.reference:
+            try:
+                rcb, extra_ref = await _build_wake_message_reply_context(ctx["client"], anchor)
+                if rcb:
+                    reply_context_block = rcb
+                if extra_ref:
+                    attachments = (attachments or []) + list(extra_ref)
+            except Exception:
+                pass
+
+        context = None
+        if is_continuation and ch and hasattr(ch, "history"):
+            try:
+                adaptive_ctx = adaptive_dm_manager.is_enabled(user_id)
+                context = await get_chat_context(
+                    ch,
+                    limit=6,
+                    include_bots=True,
+                    adaptive_dm_context=adaptive_ctx,
+                    current_message=anchor,
+                )
+            except Exception:
+                context = None
+
+        cid = int(channel_id)
+
+        async def _abort_check() -> bool:
+            return await dm_typing_coalescer.should_abort_generation(cid)
+
+        draft: Optional[str] = None
+        try:
+            draft = await asyncio.wait_for(
+                ask_llm(
+                    user_id,
+                    cid,
+                    combined,
+                    username,
+                    is_continuation=is_continuation,
+                    platform="discord",
+                    chat_context=context,
+                    attachments=attachments if attachments else None,
+                    is_dm=True,
+                    fast_reply=fast_reply_enabled,
+                    reply_context_block=reply_context_block,
+                    persist=False,
+                    abort_check=_abort_check,
+                ),
+                timeout=150,
+            )
+        except asyncio.TimeoutError:
+            timeout_count = reliability_telemetry.increment("llm_timeouts")
+            await home_log.send_to_home(
+                f"🔴 Message generation timed out (timeout #{timeout_count}) in channel {cid}. "
+                f"user={user_id}. {reliability_telemetry.format_snapshot('Counters')}"
+            )
+            await _send_with_retry(
+                lambda: _send_chat_output(anchor, "⚠️ I timed out while generating a reply. Please try again in a moment.")
+            )
+            await dm_typing_coalescer.prepend_lines_async(cid, batch)
+            continue
+        except Exception as exc:
+            error_count = reliability_telemetry.increment("llm_errors")
+            await home_log.send_to_home(
+                f"🔴 Message generation crashed (error #{error_count}) in channel {cid}. "
+                f"user={user_id}. error={str(exc)[:280]}"
+            )
+            await _send_with_retry(
+                lambda: _send_chat_output(anchor, "⚠️ I hit an internal error while generating a reply. Please try again.")
+            )
+            await dm_typing_coalescer.prepend_lines_async(cid, batch)
+            continue
+
+        if await _abort_check():
+            # Superseded: do not persist a partial reply; re-queue this batch with any newer lines.
+            leftover = await dm_typing_coalescer.pop_pending_lines(cid)
+            merged = batch + leftover
+            if merged:
+                await dm_typing_coalescer.prepend_lines_async(cid, merged)
+            continue
+
+        answer = draft or ""
+        if not answer.strip():
+            if await _abort_check():
+                leftover = await dm_typing_coalescer.pop_pending_lines(cid)
+                merged = batch + leftover
+                if merged:
+                    await dm_typing_coalescer.prepend_lines_async(cid, merged)
+                continue
+            error_count = reliability_telemetry.increment("llm_errors")
+            await home_log.send_to_home(
+                f"🔴 Message generation returned empty response (error #{error_count}) in channel {cid}. "
+                f"user={user_id}. {reliability_telemetry.format_snapshot('Counters')}"
+            )
+            await _send_with_retry(
+                lambda: _send_chat_output(anchor, "⚠️ I could not generate a response this time. Please try again.")
+            )
+            continue
+
+        try:
+            await ask_llm(
+                user_id,
+                cid,
+                combined,
+                username,
+                is_continuation=is_continuation,
+                platform="discord",
+                chat_context=context,
+                attachments=attachments if attachments else None,
+                is_dm=True,
+                fast_reply=fast_reply_enabled,
+                reply_context_block=reply_context_block,
+                persist=True,
+                reuse_response=answer,
+            )
+        except Exception:
+            pass
+
+        chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
+        response = None
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                response = await _send_with_retry(lambda: _send_chat_output(anchor, chunk))
+            else:
+                response = await _send_with_retry(lambda: ch.send(chunk))
+            conversation_manager.set_last_bot_message(cid, response.id)
+            if i < len(chunks) - 1:
+                await asyncio.sleep(_CHUNK_SEND_DELAY)
+
+        conversation_manager.save()
+        _schedule_adaptive_post_reply_calibration(anchor, combined)
+
+
+async def handle_dm_user_typing(channel: discord.abc.Messageable, user: discord.abc.User) -> None:
+    """Discord `on_typing`: pause in-flight DM replies while the user may be composing."""
+    if getattr(user, "bot", False):
+        return
+    if isinstance(channel, discord.DMChannel):
+        await dm_typing_coalescer.note_user_typing(channel.id, int(user.id))
+
+
+async def _ensure_dm_llm_consumer(channel_id: int) -> None:
+    t = _dm_llm_tasks.get(channel_id)
+    if t and not t.done():
+        return
+    _dm_llm_tasks[channel_id] = asyncio.create_task(
+        _dm_llm_consumer_loop(channel_id),
+        name=f"dm_llm_coalesce_{channel_id}",
+    )
+
+
 async def process_discord_message(client, message, permission, conversation_manager) -> bool:
     """Process Discord messages with group chat awareness. Return True if handled."""
     config = get_config()
@@ -1571,16 +1772,45 @@ async def process_discord_message(client, message, permission, conversation_mana
     if is_dm:
         conversation_manager.touch_dm_user_activity(message.channel.id)
 
-    async with message.channel.typing():
-        # DM: continue rolling context only when replying to the bot or within a recent session window.
         dm_session_continue = conversation_manager.should_continue_dm_session(
             message.channel.id, is_reply_to_bot
         )
-        is_continuation = is_reply_to_bot or (is_dm and dm_session_continue)
-        if is_dm and adaptive_dm_manager.is_enabled(message.author.id) and not dm_session_continue:
+        is_continuation = is_reply_to_bot or dm_session_continue
+        if adaptive_dm_manager.is_enabled(message.author.id) and not dm_session_continue:
             conversation_manager.reset_dm_transcript_only(message.channel.id)
-        
-        # Build attachments list (for files/images with wake word or mentions)
+
+        attachments = await _read_message_attachments(message)
+        handler_ctx: Dict[str, Any] = {
+            "client": client,
+            "user_id": message.author.id,
+            "username": str(message.author.name),
+            "is_reply_to_bot": is_reply_to_bot,
+            "dm_session_continue": dm_session_continue,
+            "is_continuation": is_continuation,
+            "is_wake_word": is_wake_word,
+            "is_mentioned": is_mentioned,
+            "fast_reply_enabled": conversation_manager.is_dm_fast_reply_active(message.channel.id),
+            "attachments": attachments or [],
+        }
+
+        async def _start_dm_consumer(_cid: int) -> None:
+            await _ensure_dm_llm_consumer(_cid)
+
+        await dm_typing_coalescer.notify_user_message(
+            message.channel.id,
+            clean_content,
+            message,
+            handler_ctx,
+            _start_dm_consumer,
+        )
+        return True
+
+    async with message.channel.typing():
+        dm_session_continue = conversation_manager.should_continue_dm_session(
+            message.channel.id, is_reply_to_bot
+        )
+        is_continuation = is_reply_to_bot or dm_session_continue
+
         attachments = await _read_message_attachments(message)
         reply_context_block: Optional[str] = None
         if (is_wake_word or is_mentioned) and message.reference:
@@ -1589,24 +1819,22 @@ async def process_discord_message(client, message, permission, conversation_mana
                 reply_context_block = rcb
             if extra_ref:
                 attachments = (attachments or []) + extra_ref
-        
-        # Include recent channel context for continuity and non-LLM bot messages (e.g. news posts).
+
         context = None
-        if is_continuation and message.channel and hasattr(message.channel, 'history'):
+        if is_continuation and message.channel and hasattr(message.channel, "history"):
             try:
-                adaptive_ctx = is_dm and adaptive_dm_manager.is_enabled(message.author.id)
                 context = await get_chat_context(
                     message.channel,
                     limit=6,
-                    include_bots=is_dm,
-                    adaptive_dm_context=adaptive_ctx,
+                    include_bots=False,
+                    adaptive_dm_context=False,
                     current_message=message,
                 )
             except Exception:
                 context = None
 
         try:
-            fast_reply_enabled = (not is_dm) or conversation_manager.is_dm_fast_reply_active(message.channel.id)
+            fast_reply_enabled = conversation_manager.is_dm_fast_reply_active(message.channel.id)
             answer = await asyncio.wait_for(
                 ask_llm(
                     message.author.id,
@@ -1617,7 +1845,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                     platform="discord",
                     chat_context=context,
                     attachments=attachments if attachments else None,
-                    is_dm=is_dm,
+                    is_dm=False,
                     fast_reply=fast_reply_enabled,
                     reply_context_block=reply_context_block,
                 ),
@@ -1654,7 +1882,7 @@ async def process_discord_message(client, message, permission, conversation_mana
                 lambda: _send_chat_output(message, "⚠️ I could not generate a response this time. Please try again.")
             )
             return True
-        
+
         chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
         response = None
         for i, chunk in enumerate(chunks):
@@ -1665,11 +1893,8 @@ async def process_discord_message(client, message, permission, conversation_mana
             conversation_manager.set_last_bot_message(message.channel.id, response.id)
             if i < len(chunks) - 1:
                 await asyncio.sleep(_CHUNK_SEND_DELAY)
-        
-        # Save conversations periodically
+
         conversation_manager.save()
-        if is_dm:
-            _schedule_adaptive_post_reply_calibration(message, clean_content)
         return True
 
 async def process_wakeword_download(client, message, link_or_empty):
