@@ -9,7 +9,12 @@ import requests
 from typing import Dict, List, Optional, Tuple, Any
 import integrations
 from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
-from conversations import conversation_manager
+from conversations import (
+    conversation_manager,
+    is_news_style_dm_bot_text,
+    is_slash_command_bot_turn,
+    strip_discord_recent_context_block,
+)
 from personas import persona_manager
 from models import model_manager
 from llm_function_prefs import get_function_persona_name
@@ -544,16 +549,16 @@ def _heuristic_merge_manual_into_profile(current: Dict[str, Any], guidance: str)
 def _dm_summary_line_from_message(item: Dict[str, Any]) -> str:
     role = str(item.get("role", "user") or "user")
     meta = item.get("meta") if isinstance(item.get("meta"), dict) else None
-    if role == "assistant" and conversation_manager.is_slash_command_bot_turn(meta):
+    if role == "assistant" and is_slash_command_bot_turn(meta):
         return ""
     if role == "assistant" and meta and meta.get("news_delivery"):
         return ""
     content = str(item.get("content", "") or "").strip()
     if not content:
         return ""
-    if role == "assistant" and conversation_manager.is_news_style_dm_bot_text(content):
+    if role == "assistant" and is_news_style_dm_bot_text(content):
         return ""
-    content = conversation_manager.strip_discord_recent_context_block(content)
+    content = strip_discord_recent_context_block(content)
     lower = content.lower()
     if any(
         marker in lower
@@ -1217,7 +1222,7 @@ async def ask_llm(
         skip_adaptive_store = bool(
             adaptive_dm
             and not (reply_context_block or "").strip()
-            and conversation_manager.is_news_style_dm_bot_text(persisted_user_message)
+            and is_news_style_dm_bot_text(persisted_user_message)
         )
         if not skip_adaptive_store:
             conversation_manager.add_message(channel_id, "user", persisted_user_message)
