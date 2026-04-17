@@ -456,6 +456,90 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
         return {}
 
 
+def _extract_json_object_loose(text: str) -> Dict[str, Any]:
+    """Parse first JSON object in model output; tolerates preamble/postamble."""
+    t = _clean_response(text or "").strip()
+    if not t:
+        return {}
+    parsed = _extract_json_object(t)
+    if parsed:
+        return parsed
+    start = t.find("{")
+    end = t.rfind("}")
+    if start != -1 and end > start:
+        try:
+            chunk = t[start : end + 1]
+            parsed = json.loads(chunk)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def _normalize_merge_profile_dict(parsed: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    """Build profile dict from LLM output; missing keys fall back to current."""
+    cur = current if isinstance(current, dict) else {}
+    pn = parsed.get("preferred_name")
+    if pn is None:
+        pn = cur.get("preferred_name", "")
+    likes = parsed.get("likes")
+    if not isinstance(likes, list):
+        likes = cur.get("likes", []) or []
+    dislikes = parsed.get("dislikes")
+    if not isinstance(dislikes, list):
+        dislikes = cur.get("dislikes", []) or []
+    tones = parsed.get("tone_notes")
+    if not isinstance(tones, list):
+        tones = cur.get("tone_notes", []) or []
+    return {
+        "preferred_name": str(pn or "").strip(),
+        "likes": [str(x).strip() for x in likes if str(x).strip()][:24],
+        "dislikes": [str(x).strip() for x in dislikes if str(x).strip()][:24],
+        "tone_notes": [str(x).strip() for x in tones if str(x).strip()][:30],
+    }
+
+
+def _heuristic_merge_manual_into_profile(current: Dict[str, Any], guidance: str) -> Dict[str, Any]:
+    """Last-resort merge when the LLM does not return JSON: fold trimmed lines into tone_notes / simple patterns."""
+    base = _normalize_merge_profile_dict({}, current)
+    text = (guidance or "").replace("\r\n", "\n")
+    lines = []
+    for ln in text.split("\n"):
+        s = ln.strip().lstrip("-•*").strip()
+        if len(s) < 2:
+            continue
+        lines.append(s[:200])
+    if not lines:
+        return base
+    lower_full = text.lower()
+    pn = base["preferred_name"]
+    m_name = re.search(r"\bcall me ([a-zA-Z0-9_\- ]{2,30})", text, flags=re.IGNORECASE)
+    if m_name:
+        pn = m_name.group(1).strip()
+    likes = list(base["likes"])
+    dislikes = list(base["dislikes"])
+    tones = list(base["tone_notes"])
+    for s in lines[:40]:
+        low = s.lower()
+        if re.match(r"^(i like|i love|my favorite is)\b", low):
+            val = re.sub(r"^(i like|i love|my favorite is)\s*", "", low, flags=re.IGNORECASE).strip(" .,!?:;")[:80]
+            if val and val not in likes:
+                likes.append(val)
+        elif re.match(r"^(i dislike|i hate|i don't like|i dont like)\b", low):
+            val = re.sub(r"^(i dislike|i hate|i don't like|i dont like)\s*", "", low, flags=re.IGNORECASE).strip(" .,!?:;")[:80]
+            if val and val not in dislikes:
+                dislikes.append(val)
+        else:
+            if s not in tones and s.lower() not in {t.lower() for t in tones}:
+                tones.append(s)
+    return {
+        "preferred_name": pn,
+        "likes": likes[-24:],
+        "dislikes": dislikes[-24:],
+        "tone_notes": tones[-30:],
+    }
+
+
 async def compact_dm_history_for_channel(user_id: int, channel_id: int, username: str, force: bool = False) -> Dict[str, Any]:
     """Summarize old DM messages and trim in-memory history to reduce token usage."""
     conversation = conversation_manager.get_conversation(channel_id)
@@ -1401,40 +1485,56 @@ async def merge_adaptive_manual_guidance_into_profile(
     eff = model_manager.get_effective_model_for_function(user_id, "command_planner")
     requested_model = eff.get("model", "qwen2.5:7b")
     provider = eff.get("provider", "local")
-    sys = (
-        "You update an adaptive Discord DM user profile JSON.\n"
-        "Given current_profile and manual_guidance (user edits from a context export), produce an UPDATED profile "
-        "that heavily incorporates the guidance into likes/dislikes/tone_notes/preferred_name.\n"
-        "Do NOT copy the manual text verbatim into a single field—distill into short bullets.\n"
-        "Preserve unrelated existing facts unless guidance contradicts them.\n"
-        "Return JSON ONLY with keys: preferred_name (string), likes (array of strings), dislikes (array of strings), "
-        "tone_notes (array of strings). Max 24 likes, 24 dislikes, 30 tone_notes entries total."
+    base_profile = dict(current_profile) if isinstance(current_profile, dict) else {}
+    guidance = (manual_guidance or "")[:8000]
+
+    sys_v1 = (
+        "You update an adaptive Discord DM user profile as JSON.\n"
+        "Input: current_profile (object) and manual_guidance (string).\n"
+        "Output: ONE JSON object only — no markdown, no code fences, no commentary before or after.\n"
+        "Keys exactly: preferred_name (string), likes (array of strings), dislikes (array of strings), "
+        "tone_notes (array of strings).\n"
+        "Fold the guidance into those fields: short bullets, distill meaning, do not paste the whole guidance as one string.\n"
+        "Keep existing facts unless guidance contradicts them. Max 24 likes, 24 dislikes, 30 tone_notes."
+    )
+    sys_v2 = (
+        "Return ONLY valid minified JSON on a single line. Keys: preferred_name, likes, dislikes, tone_notes. "
+        "Arrays of strings. Merge manual_guidance into current_profile."
     )
     user_payload = json.dumps(
-        {"current_profile": current_profile, "manual_guidance": (manual_guidance or "")[:8000]},
+        {"current_profile": base_profile, "manual_guidance": guidance},
         ensure_ascii=False,
     )
-    messages = [{"role": "system", "content": sys}, {"role": "user", "content": user_payload}]
-    try:
-        _, raw = await _try_models_with_fallback(
-            requested_model,
-            messages,
-            images=False,
-            provider=provider,
-            request_options={"num_predict": 512, "temperature": 0.35},
+    last_raw = ""
+    for attempt, (sys_prompt, temp, n_pred) in enumerate(
+        (
+            (sys_v1, 0.25, 900),
+            (sys_v1, 0.15, 900),
+            (sys_v2, 0.1, 1024),
         )
-        parsed = _extract_json_object(_clean_response(raw or ""))
-        if not parsed:
-            return False, dict(current_profile), "merge_parse_failed"
-        out: Dict[str, Any] = {
-            "preferred_name": str(parsed.get("preferred_name", "") or "").strip(),
-            "likes": [str(x).strip() for x in (parsed.get("likes") or []) if str(x).strip()][:24],
-            "dislikes": [str(x).strip() for x in (parsed.get("dislikes") or []) if str(x).strip()][:24],
-            "tone_notes": [str(x).strip() for x in (parsed.get("tone_notes") or []) if str(x).strip()][:30],
-        }
-        return True, out, ""
-    except Exception as e:
-        return False, dict(current_profile), str(e)[:200]
+    ):
+        messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_payload}]
+        try:
+            _, raw = await _try_models_with_fallback(
+                requested_model,
+                messages,
+                images=False,
+                provider=provider,
+                request_options={"num_predict": n_pred, "temperature": temp},
+            )
+            last_raw = raw or ""
+            parsed = _extract_json_object_loose(last_raw)
+            if parsed:
+                out = _normalize_merge_profile_dict(parsed, base_profile)
+                return True, out, ""
+        except Exception as e:
+            if attempt == 2:
+                break
+            last_raw = str(e)[:200]
+
+    if guidance.strip():
+        return True, _heuristic_merge_manual_into_profile(base_profile, guidance), ""
+    return False, dict(base_profile), "merge_parse_failed"
 
 
 async def validate_and_set_model(user_id, provider, model_name):
