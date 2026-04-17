@@ -247,6 +247,11 @@ def initialize_command_database():
     command_db.add_command("wake", "Bring bot back online", "General")
     command_db.add_command("bal", "Check OpenRouter account credits (OPENROUTER_API_KEY)", "General")
     command_db.add_command("openrouter-check", "Diagnose OpenRouter keys for chat and credits", "General")
+    command_db.add_command(
+        "trader",
+        "Trader FastAPI: setup guide, status, risk, mode, kill (subcommands; configure TRADER_BASE_URL + TRADER_AUTH_TOKEN)",
+        "General",
+    )
     command_db.add_command("help", "List all commands", "General")
     
     # File Analysis Commands
@@ -988,7 +993,14 @@ async def ask_llm(
             "\n\nFast reply mode is enabled. Be concise and quick: "
             "usually 1-3 short sentences unless the user asks for details."
         )
-    
+
+    try:
+        from services.trader_client import append_trader_snapshot_to_llm_prompt
+
+        enhanced_system_prompt = await append_trader_snapshot_to_llm_prompt(enhanced_system_prompt)
+    except Exception:
+        pass
+
     # Prepare conversation history (channel-based: one thread per channel, last 5 turns)
     if is_continuation:
         if is_dm:

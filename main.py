@@ -4,9 +4,10 @@ import os
 os.environ["DUBOT_RUNTIME"] = "discord"
 
 try:
-    from utils.bootstrap_deps import ensure_discord_dependencies, ensure_news_dependencies
+    from utils.bootstrap_deps import ensure_discord_dependencies, ensure_news_dependencies, ensure_trader_dependencies
     ensure_discord_dependencies()
     ensure_news_dependencies()
+    ensure_trader_dependencies()
 except Exception as e:
     print(f"⚠️ bootstrap_deps failed (non-fatal): {e}", flush=True)
 
@@ -60,6 +61,7 @@ class BotClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.start_time = time.time()
         self.commands_registered = False
+        self._trader_webhook_server = None
 
     async def close(self):
         try:
@@ -81,6 +83,12 @@ class BotClient(discord.Client):
             from utils.dm_image_flow_temp import clear_all_temp_sessions_sync
 
             clear_all_temp_sessions_sync()
+        except Exception:
+            pass
+        try:
+            if self._trader_webhook_server is not None:
+                await self._trader_webhook_server.stop()
+                self._trader_webhook_server = None
         except Exception:
             pass
         await super().close()
@@ -105,6 +113,16 @@ class BotClient(discord.Client):
             export_adaptive_to_personas(_persona_manager)
         except Exception:
             pass
+
+        try:
+            from integrations import TRADER_WEBHOOK_PORT
+            from services.trader_webhook import TraderWebhookServer
+
+            if TRADER_WEBHOOK_PORT and TRADER_WEBHOOK_PORT > 0:
+                self._trader_webhook_server = TraderWebhookServer(self, TRADER_WEBHOOK_PORT)
+                await self._trader_webhook_server.start()
+        except Exception as e:
+            print(f"⚠️ Trader webhook server failed to start: {e}", flush=True)
 
     async def register_all_commands(self):
         """Register ALL commands without duplicates"""

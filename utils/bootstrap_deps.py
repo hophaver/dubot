@@ -28,6 +28,12 @@ def ensure_discord_dependencies() -> None:
     _install_if_missing("discord", "discord.py>=2.3.0")
 
 
+def ensure_trader_dependencies() -> None:
+    """httpx (Trader API) and aiohttp (optional inbound webhook)."""
+    _install_if_missing("httpx", "httpx>=0.27.0")
+    _install_if_missing("aiohttp", "aiohttp>=3.9.0")
+
+
 def ensure_news_dependencies() -> None:
     """If feedparser or beautifulsoup4 are missing, pip install them (matches requirements.txt)."""
     to_install = []
