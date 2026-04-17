@@ -219,7 +219,7 @@ def initialize_command_database():
     )
     command_db.add_command(
         "adaptive-status",
-        "DMs: adaptive context export; reply with notes or attach adaptive-dm-context.txt to replace (confirm/revert)",
+        "DMs: export adaptive context; reply with notes or attach adaptive-dm-context.txt to replace context",
         "General",
     )
     command_db.add_command(

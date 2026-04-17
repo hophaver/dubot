@@ -10,7 +10,7 @@ from whitelist import get_user_permission
 def register(client: discord.Client):
     @client.tree.command(
         name="adaptive-status",
-        description="DMs: export adaptive context; reply with notes or attach adaptive-dm-context.txt to replace (confirm/revert)",
+        description="DMs: adaptive context export; notes reply merges; attach exact adaptive-dm-context.txt to replace",
     )
     async def adaptive_status(interaction: discord.Interaction):
         if not get_user_permission(interaction.user.id):
@@ -61,7 +61,7 @@ def register(client: discord.Client):
             title="Adaptive (DM)",
             description=(
                 f"**Attachment:** `adaptive-dm-context.txt` — auto-learned + fixed behaviour. {desc_extra}\n\n"
-                "**Reply** with **manual notes** to fold into the auto-learned profile, or attach **`adaptive-dm-context.txt`** to **replace** the whole block (fixed prefix + reset auto; tuning refills from DMs). "
+                "**Reply** with **manual notes** to merge into the auto-learned profile, or attach a file named exactly **`adaptive-dm-context.txt`** to replace the whole export (same tail + auto header required). "
                 "You will get a **preview** and **Confirm** / **Revert**. "
                 "**`reset manual`** clears legacy manual text and any pending preview. "
                 "On restart this syncs to **`personas.json`** as **`<your name> adaptive`**."

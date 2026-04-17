@@ -902,10 +902,8 @@ class AdaptiveManualMergeConfirmView(View):
         kind = pending.get("kind") or "manual_merge"
         await interaction.response.defer()
         if kind == "full_replace":
-            new_prefix = str(pending.get("new_prefix", "") or "")
-            adaptive_dm_manager.replace_profile_data(self.owner_id, self._empty_profile())
-            adaptive_dm_manager.set_context_manual_prefix(self.owner_id, new_prefix)
-            adaptive_dm_manager.clear_profile_manual_override(self.owner_id)
+            body_core = str(pending.get("new_body_core", "") or "").strip()
+            adaptive_dm_manager.apply_context_file_replace(self.owner_id, body_core, reset_profile=True)
         elif kind == "manual_merge":
             new_prof = pending.get("new_profile")
             if not isinstance(new_prof, dict):
@@ -948,13 +946,19 @@ class AdaptiveManualMergeConfirmView(View):
         await interaction.response.defer()
         if kind == "full_replace":
             prev = pending.get("previous_profile")
-            if isinstance(prev, dict):
-                adaptive_dm_manager.replace_profile_data(self.owner_id, prev)
+            prev_ov = str(pending.get("previous_override_body", "") or "")
             prev_prefix = str(pending.get("previous_prefix", "") or "")
-            if prev_prefix.strip():
-                adaptive_dm_manager.set_context_manual_prefix(self.owner_id, prev_prefix)
+            prev_legacy = str(pending.get("previous_legacy_manual", "") or "")
+            if isinstance(prev, dict):
+                adaptive_dm_manager.restore_context_file_replace_state(
+                    self.owner_id,
+                    profile=prev,
+                    override_body=prev_ov,
+                    manual_prefix=prev_prefix,
+                    legacy_manual=prev_legacy,
+                )
             else:
-                adaptive_dm_manager.clear_context_manual_prefix(self.owner_id)
+                adaptive_dm_manager.clear_context_override_body(self.owner_id)
         else:
             prev = pending.get("previous_profile")
             if isinstance(prev, dict):
@@ -980,6 +984,20 @@ async def _read_first_txt_attachment(message: discord.Message) -> Optional[str]:
     return None
 
 
+async def _read_adaptive_context_txt_attachment(message: discord.Message) -> Tuple[Optional[str], Optional[str]]:
+    """Return (filename, text) for exact adaptive-dm-context.txt attachment."""
+    for att in list(getattr(message, "attachments", []) or []):
+        fn = (att.filename or "").strip()
+        if fn.lower() != "adaptive-dm-context.txt":
+            continue
+        try:
+            raw = await att.read()
+            return fn, raw.decode("utf-8", errors="replace")
+        except Exception:
+            return fn, None
+    return None, None
+
+
 async def _try_handle_dm_status_reply(client: discord.Client, message: discord.Message) -> bool:
     """Merge manual notes into adaptive auto-learned profile; optional full-export paste still supported."""
     if not isinstance(message.channel, discord.DMChannel):
@@ -1003,51 +1021,52 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
         return False
 
     text = (message.content or "").strip()
-    file_body = await _read_first_txt_attachment(message)
-    if file_body is not None:
-        pasted = file_body.strip()
+    ctx_fn, ctx_body = await _read_adaptive_context_txt_attachment(message)
+    if ctx_fn is not None:
+        if ctx_body is None:
+            await _send_chat_output(message, "❌ Could not read **`adaptive-dm-context.txt`**.")
+            return True
+        pasted = ctx_body.strip()
     else:
-        pasted = text
+        file_body = await _read_first_txt_attachment(message)
+        pasted = (file_body.strip() if file_body is not None else text)
 
     if not pasted:
         await _send_chat_output(
             message,
-            "Reply with **your manual notes** only, or attach a `.txt` with those notes. "
-            "Say **`reset manual`** to clear legacy manual text and pending previews.",
+            "Reply with **manual notes**, or attach **`adaptive-dm-context.txt`** exactly named to replace the whole block. "
+            "Say **`reset manual`** to clear.",
         )
         return True
 
     low = pasted.lower()
     if low in ("reset", "reset manual", "clear", "clear manual"):
         adaptive_dm_manager.clear_profile_manual_override(uid)
-        await _send_chat_output(message, "✅ Cleared. Legacy manual text, fixed context prefix, and any pending preview removed.")
+        await _send_chat_output(message, "✅ Cleared. Manual text, full context override, prefix, and pending previews removed.")
         return True
 
-    is_context_txt = file_body is not None and any(
-        "adaptive-dm-context" in (getattr(a, "filename", None) or "").lower()
-        for a in (getattr(message, "attachments", None) or [])
-    )
-    fr_ok, fr_err, fr_prefix = adaptive_dm_manager.validate_full_context_file_replace(uid, pasted)
-    pl = pasted.lower()
-    suf = ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
-    looks_full = is_context_txt or (
-        len(pasted.strip()) > 600
-        and pasted.strip().endswith(suf)
-        and ("user-specific context" in pl or "for this direct message" in pl)
-    )
-    looks_full = looks_full or (len(pasted.strip()) > 400 and pasted.strip().endswith(suf))
-    if looks_full and not fr_ok:
-        hints_fr = {
-            "empty": "That file looks incomplete.",
-            "bad_suffix": "The file must end with the **fixed behaviour** block from **`/adaptive-status`**.",
-        }
-        await _send_chat_output(message, f"❌ {hints_fr.get(fr_err, 'Could not parse that full context file.')}")
-        return True
-    if fr_ok and looks_full:
+    if ctx_fn is not None:
+        ok, err_code, body_core = adaptive_dm_manager.validate_full_context_attachment(ctx_fn, pasted)
+        if not ok:
+            hints_fr = {
+                "bad_filename": "Attachment must be named exactly **`adaptive-dm-context.txt`**.",
+                "empty": "That file is empty.",
+                "bad_suffix": "The file must end with the same **fixed behaviour** block as the export from **`/adaptive-status`**.",
+                "missing_auto_header": "The file must include the line **User-specific context (auto, learned from your messages):**.",
+            }
+            await _send_chat_output(message, f"❌ Invalid file: {hints_fr.get(err_code, err_code)}")
+            return True
         prev_prof = adaptive_dm_manager.get_profile_data_copy(uid)
+        prev_override = adaptive_dm_manager.get_context_override_body(uid)
         prev_prefix = adaptive_dm_manager.get_context_manual_prefix(uid)
-        preview_core = adaptive_dm_manager.preview_full_addition_after_replace(uid, fr_prefix)
-        file_bytes = preview_core.encode("utf-8")
+        prev_legacy = adaptive_dm_manager.get_profile_manual_override(uid)
+        auto_blk = adaptive_dm_manager.get_auto_profile_prompt_text(uid)
+        preview_body = (
+            f"{body_core.strip()}\n\n{auto_blk}\n\n{ADAPTIVE_DM_SYSTEM_SUFFIX.strip()}".strip()
+            if auto_blk
+            else f"{body_core.strip()}\n\n{ADAPTIVE_DM_SYSTEM_SUFFIX.strip()}".strip()
+        )
+        file_bytes = preview_body.encode("utf-8")
         if len(file_bytes) > 7_900_000:
             await _send_chat_output(message, "❌ That file is too large for Discord.")
             return True
@@ -1056,14 +1075,16 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
             {
                 "kind": "full_replace",
                 "previous_profile": prev_prof,
+                "previous_override_body": prev_override,
                 "previous_prefix": prev_prefix,
-                "new_prefix": fr_prefix.strip(),
+                "previous_legacy_manual": prev_legacy,
+                "new_body_core": body_core.strip(),
             },
         )
         view = AdaptiveManualMergeConfirmView(owner_id=uid, timeout=600.0)
         await _send_chat_output(
             message,
-            "**Full `adaptive-dm-context.txt`** detected. Preview shows your **fixed** prefix plus the **current** auto-learned block; after **Confirm** the profile resets so tuning refills the auto section from DMs. **Revert** restores the previous state.",
+            "Preview: your file plus the **current** auto-learned block. **Confirm** replaces stored context entirely and resets the structured profile so DM tuning refills the auto section. **Revert** undoes.",
             file=discord.File(io.BytesIO(file_bytes), filename="adaptive-dm-context-preview.txt"),
             view=view,
         )

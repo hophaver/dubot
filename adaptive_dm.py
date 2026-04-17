@@ -32,6 +32,7 @@ TUNE_QUEUE_ENTRY_MAX = 400
 TUNE_QUEUE_MAX_ITEMS = 60
 
 _MANUAL_CONTEXT_MAX_LEN = 12000
+_CONTEXT_OVERRIDE_MAX_LEN = 48000
 
 
 # Lines at the start of exported status files to strip when pasting back.
@@ -121,6 +122,7 @@ class AdaptiveDmManager:
                 "tune_guild_channel_enabled": False,
                 "pending_manual_merge": None,
                 "context_manual_prefix": "",
+                "context_override_body": "",
             }
         return self.state[key]
 
@@ -240,6 +242,7 @@ class AdaptiveDmManager:
         user_state = self._get_user_state(user_id)
         user_state["profile_manual_override"] = ""
         user_state["context_manual_prefix"] = ""
+        user_state["context_override_body"] = ""
         user_state["pending_manual_merge"] = None
         self.save()
 
@@ -258,6 +261,66 @@ class AdaptiveDmManager:
     def clear_context_manual_prefix(self, user_id: int) -> None:
         st = self._get_user_state(user_id)
         st["context_manual_prefix"] = ""
+        self.save()
+
+    def get_context_override_body(self, user_id: int) -> str:
+        return str(self._get_user_state(user_id).get("context_override_body", "") or "").strip()
+
+    def set_context_override_body(self, user_id: int, text: str) -> None:
+        """Full adaptive-dm-context body without final suffix duplicate; merged with live auto on read."""
+        st = self._get_user_state(user_id)
+        cleaned = (text or "").strip()
+        if len(cleaned) > _CONTEXT_OVERRIDE_MAX_LEN:
+            cleaned = cleaned[:_CONTEXT_OVERRIDE_MAX_LEN]
+        st["context_override_body"] = cleaned
+        self.save()
+
+    def clear_context_override_body(self, user_id: int) -> None:
+        st = self._get_user_state(user_id)
+        st["context_override_body"] = ""
+        self.save()
+
+    def apply_context_file_replace(
+        self,
+        user_id: int,
+        body_core: str,
+        *,
+        reset_profile: bool = True,
+    ) -> None:
+        """Store full context body (no trailing suffix duplicate); clear legacy manual + prefix; optionally reset profile."""
+        st = self._get_user_state(user_id)
+        st["context_manual_prefix"] = ""
+        st["profile_manual_override"] = ""
+        if reset_profile:
+            st["profile"] = {
+                "preferred_name": "",
+                "likes": [],
+                "dislikes": [],
+                "tone_notes": [],
+            }
+        cleaned = (body_core or "").strip()
+        if len(cleaned) > _CONTEXT_OVERRIDE_MAX_LEN:
+            cleaned = cleaned[:_CONTEXT_OVERRIDE_MAX_LEN]
+        st["context_override_body"] = cleaned
+        self.save()
+
+    def restore_context_file_replace_state(
+        self,
+        user_id: int,
+        *,
+        profile: Dict[str, Any],
+        override_body: str,
+        manual_prefix: str,
+        legacy_manual: str,
+    ) -> None:
+        st = self._get_user_state(user_id)
+        if isinstance(profile, dict):
+            self.replace_profile_data(user_id, profile)
+        st = self._get_user_state(user_id)
+        st["context_override_body"] = str(override_body or "")[:_CONTEXT_OVERRIDE_MAX_LEN]
+        st["context_manual_prefix"] = str(manual_prefix or "")[:_MANUAL_CONTEXT_MAX_LEN]
+        lm = str(legacy_manual or "").strip()
+        st["profile_manual_override"] = lm[:_MANUAL_CONTEXT_MAX_LEN] if lm else ""
         self.save()
 
     @staticmethod
@@ -474,6 +537,7 @@ class AdaptiveDmManager:
         if not cleaned:
             return
         self._update_profile_from_cleaned_text(user_id, cleaned)
+        self._refresh_auto_in_context_override(user_id)
 
     def apply_batch_tuning_text(self, user_id: int, raw: str) -> Tuple[bool, str]:
         """Ingest multiline / pasted corpus into the adaptive profile. Returns (ok, reason_code)."""
@@ -487,6 +551,7 @@ class AdaptiveDmManager:
         st["tone_tuning_updates"] = int(st.get("tone_tuning_updates", 0) or 0) + 1
         st["last_tone_tuning_ts"] = time.time()
         self.save()
+        self._refresh_auto_in_context_override(user_id)
         return True, "ok"
 
     def _format_manual_block(self, manual: str) -> str:
@@ -523,6 +588,10 @@ class AdaptiveDmManager:
     def _structured_profile_prompt(self, user_id: int) -> str:
         return self._structured_profile_prompt_from_dict(self.get_profile(user_id))
 
+    def get_auto_profile_prompt_text(self, user_id: int) -> str:
+        """Auto-learned block only (empty string if no structured profile yet)."""
+        return (self._structured_profile_prompt(user_id) or "").strip()
+
     def build_full_addition_for_profile_dict(self, user_id: int, profile_dict: Dict[str, Any]) -> str:
         """Full adaptive addition (auto block + fixed suffix) for a hypothetical profile; ignores manual override."""
         parts = []
@@ -534,6 +603,11 @@ class AdaptiveDmManager:
 
     def get_profile_prompt(self, user_id: int) -> str:
         auto = self._structured_profile_prompt(user_id)
+        override = self.get_context_override_body(user_id)
+        if override:
+            if auto:
+                return f"{override}\n\n{auto}"
+            return override
         parts: List[str] = []
         fixed_prefix = self.get_context_manual_prefix(user_id)
         if fixed_prefix:
@@ -548,30 +622,45 @@ class AdaptiveDmManager:
             return ""
         return "\n\n".join(parts)
 
-    def validate_full_context_file_replace(self, user_id: int, pasted: str) -> Tuple[bool, str, str]:
+    @staticmethod
+    def validate_full_context_attachment(filename: str, pasted: str) -> Tuple[bool, str, str]:
         """
-        User sends a full adaptive-dm-context body ending with the fixed suffix.
-        Returns (ok, err_code, prefix_before_auto) where prefix is stored as context_manual_prefix.
+        Strict full-file replace: exact filename adaptive-dm-context.txt, body ends with fixed suffix,
+        and contains the auto-learned section header (user may edit that section).
+        Returns (ok, err_code, body_without_suffix) for storage in context_override_body.
         """
+        fn = (filename or "").strip().lower()
+        if fn != "adaptive-dm-context.txt":
+            return False, "bad_filename", ""
         suffix = ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
-        body = self.strip_status_export_file_headers(pasted).strip()
+        body = AdaptiveDmManager.strip_status_export_file_headers(pasted).strip()
         if not body:
             return False, "empty", ""
         if not suffix or not body.endswith(suffix):
             return False, "bad_suffix", ""
         core = body[: -len(suffix)].rstrip()
-        auto_expected = (self._structured_profile_prompt(user_id) or "").strip()
-        if auto_expected and core.endswith(auto_expected):
-            prefix = core[: -len(auto_expected)].rstrip()
-            return True, "", prefix
-        marker = "\nUser-specific context (auto, learned from your messages):"
-        pos = core.find(marker)
-        if pos != -1:
-            prefix = core[:pos].rstrip()
-            return True, "", prefix
-        if core.lstrip().lower().startswith("user-specific context (auto, learned from your messages):"):
-            return True, "", ""
-        return True, "", core.strip()
+        low = core.lower()
+        if "user-specific context (auto, learned from your messages)" not in low:
+            return False, "missing_auto_header", ""
+        return True, "", core
+
+    def _refresh_auto_in_context_override(self, user_id: int) -> None:
+        """Re-embed live auto-learned block into stored full-context override after tuning."""
+        ov = self.get_context_override_body(user_id)
+        if not ov:
+            return
+        low = ov.lower()
+        marker = "user-specific context (auto, learned from your messages):"
+        idx = low.find(marker)
+        if idx == -1:
+            return
+        prefix = ov[:idx].rstrip()
+        auto = (self._structured_profile_prompt(user_id) or "").strip()
+        if auto:
+            new_ov = f"{prefix}\n\n{auto}".strip() if prefix else auto
+        else:
+            new_ov = prefix
+        self.set_context_override_body(user_id, new_ov)
 
     def apply_live_message_tune(self, user_id: int, text: str) -> None:
         """Per-message nudge plus queue sample (aggressive adaptivity). URLs stripped inside."""
@@ -601,26 +690,15 @@ class AdaptiveDmManager:
             applied += 1
         return {"messages": messages, "applied": applied}
 
-    def preview_full_addition_after_replace(self, user_id: int, new_fixed_prefix: str) -> str:
-        """Preview file body: proposed fixed prefix + current auto block + suffix (ignores pending replace)."""
-        parts: List[str] = []
-        pfx = (new_fixed_prefix or "").strip()
-        if pfx:
-            parts.append(pfx)
-        auto = self._structured_profile_prompt(user_id)
-        if auto:
-            parts.append(auto)
-        parts.append(ADAPTIVE_DM_SYSTEM_SUFFIX.strip())
-        return "\n\n".join(parts)
-
     def get_full_adaptive_system_addition(self, user_id: int) -> str:
         """Text appended to the base persona+chat system prompt when adaptive DM is on (learned + fixed behaviour)."""
-        parts = []
         profile = self.get_profile_prompt(user_id)
-        if profile:
-            parts.append(profile)
-        parts.append(ADAPTIVE_DM_SYSTEM_SUFFIX.strip())
-        return "\n\n".join(parts)
+        if not profile:
+            return ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
+        suf = ADAPTIVE_DM_SYSTEM_SUFFIX.strip()
+        if profile.rstrip().endswith(suf):
+            return profile.strip()
+        return f"{profile.strip()}\n\n{suf}"
 
     def get_status_snapshot(self, user_id: int) -> Dict[str, Any]:
         """Read-only snapshot for the DM assistant status command."""
@@ -634,7 +712,8 @@ class AdaptiveDmManager:
             "tone_tuning_updates": int(st.get("tone_tuning_updates", 0) or 0),
             "last_tone_tuning_ts": float(st.get("last_tone_tuning_ts", 0.0) or 0.0),
             "has_manual_override": bool(self.get_profile_manual_override(user_id))
-            or bool(self.get_context_manual_prefix(user_id)),
+            or bool(self.get_context_manual_prefix(user_id))
+            or bool(self.get_context_override_body(user_id)),
             "guild_tune_channel_id": self._get_user_state(user_id).get("tune_guild_channel_id"),
             "guild_tune_channel_enabled": bool(
                 self._get_user_state(user_id).get("tune_guild_channel_enabled", False)
@@ -731,6 +810,8 @@ class AdaptiveDmManager:
         if str(st.get("profile_manual_override", "") or "").strip():
             return True
         if str(st.get("context_manual_prefix", "") or "").strip():
+            return True
+        if str(st.get("context_override_body", "") or "").strip():
             return True
         p = st.get("profile") or {}
         if str(p.get("preferred_name", "") or "").strip():
