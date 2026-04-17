@@ -98,15 +98,21 @@ def register(client: discord.Client):
             _label = (getattr(interaction.user, "global_name", None) or interaction.user.name or "").strip()
             adaptive_dm_manager.touch_adaptive_sync_display_name(interaction.user.id, _label)
         fast_reply_enabled = (not is_dm) or conversation_manager.is_dm_fast_reply_active(interaction.channel.id)
+        skip_adaptive_transcript = is_dm and adaptive_dm_manager.is_enabled(interaction.user.id)
 
         if len(attachments) >= 2 and any(keyword in msg_lower for keyword in COMPARE_KEYWORDS):
             try:
                 file_data_list = [{"filename": a["filename"], "data": a["data"]} for a in attachments]
                 result = await compare_files(
-                    interaction.user.id, interaction.channel.id, file_data_list, message, str(interaction.user.name)
+                    interaction.user.id,
+                    interaction.channel.id,
+                    file_data_list,
+                    message,
+                    str(interaction.user.name),
+                    record_in_conversation=not skip_adaptive_transcript,
                 )
                 await send_long_message(interaction, result)
-                if not (is_dm and adaptive_dm_manager.is_enabled(interaction.user.id)):
+                if not skip_adaptive_transcript:
                     conversation_manager.add_message(
                         interaction.channel.id, "user",
                         f"{interaction.user.name} says: [Compare files] {message}"
@@ -121,11 +127,16 @@ def register(client: discord.Client):
             try:
                 a = attachments[0]
                 result = await analyze_file(
-                    interaction.user.id, interaction.channel.id, a["filename"], a["data"],
-                    message, str(interaction.user.name)
+                    interaction.user.id,
+                    interaction.channel.id,
+                    a["filename"],
+                    a["data"],
+                    message,
+                    str(interaction.user.name),
+                    record_in_conversation=not skip_adaptive_transcript,
                 )
                 await send_long_message(interaction, result)
-                if not (is_dm and adaptive_dm_manager.is_enabled(interaction.user.id)):
+                if not skip_adaptive_transcript:
                     conversation_manager.add_message(interaction.channel.id, "user", f"{interaction.user.name} says: [File: {a['filename']}] {message}")
                     conversation_manager.add_message(interaction.channel.id, "assistant", result)
                     conversation_manager.save()
