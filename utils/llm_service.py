@@ -1121,7 +1121,8 @@ async def ask_llm(
             "usually 1-3 short sentences unless the user asks for details."
         )
     
-    # Prepare conversation history (channel-based: one thread per channel, last 5 turns)
+    # Prepare conversation history (channel-based). Persisted turns are user/assistant only;
+    # the full system prompt (including current date/time/location) must be injected every request.
     if is_continuation:
         if is_dm:
             try:
@@ -1129,25 +1130,29 @@ async def ask_llm(
             except Exception:
                 pass
         history = conversation_manager.get_conversation(channel_id)
-        if not history:
-            history = [{"role": "system", "content": enhanced_system_prompt}]
     else:
         if is_dm and adaptive_dm:
             conversation_manager.reset_dm_transcript_only(channel_id)
         else:
             conversation_manager.clear_conversation(channel_id)
-        history = [{"role": "system", "content": enhanced_system_prompt}]
-    
-    # Build messages
-    messages = history.copy()
-    if is_dm and len(messages) > 14:
-        # Keep active window small; topic summaries + profile hold older context.
-        messages = messages[-14:]
+        history = []
+
+    rolling = [
+        m
+        for m in (history or [])
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+    ]
+    if is_dm and len(rolling) > 13:
+        # Match prior budget: at most 13 user/assistant turns before the new user message.
+        rolling = rolling[-13:]
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": enhanced_system_prompt}]
+    messages.extend(rolling)
+
     if is_dm:
         dm_summary = conversation_manager.get_dm_summary_text(channel_id)
         if dm_summary:
             messages.insert(
-                0,
+                1,
                 {
                     "role": "system",
                     "content": (
