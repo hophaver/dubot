@@ -1606,6 +1606,10 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
             continue
 
         answer = draft or ""
+        if adaptive_dm_manager.is_enabled(user_id) and str(
+            model_manager.get_effective_model_for_function(user_id, "image_generation").get("model") or ""
+        ).strip():
+            answer = _strip_leaked_image_placeholders(answer)
         if not answer.strip():
             if await _abort_check():
                 leftover = await dm_typing_coalescer.pop_pending_lines(cid)

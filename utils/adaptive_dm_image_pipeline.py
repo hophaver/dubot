@@ -19,6 +19,7 @@ from utils.llm_service import (
     adaptive_dm_image_flow_compress_image_prompt,
     adaptive_dm_image_flow_draft_reply,
     adaptive_dm_image_flow_refine_text_for_image,
+    _strip_leaked_agent_tool_artifacts,
 )
 from utils.openrouter_image import OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT, generate_openrouter_image_with_fallback
 
@@ -62,6 +63,7 @@ def _sanitize_final_message(text: str, image_prompt: str) -> str:
         if p != -1:
             t = t[:p].rstrip()
             break
+    t = _strip_leaked_agent_tool_artifacts(t)
     return t.strip() or ""
 
 
