@@ -1,9 +1,9 @@
+from commands.shared import require_permanent_admin
 from typing import Optional
 
 import discord
 from discord import app_commands
 
-from integrations import PERMANENT_ADMIN
 from services import clone_service
 
 
@@ -29,8 +29,7 @@ def register(client: discord.Client):
         user: Optional[discord.Member],
         mode: str,
     ):
-        if interaction.user.id != PERMANENT_ADMIN:
-            await interaction.response.send_message("❌ Permanent admin only.", ephemeral=True)
+        if not await require_permanent_admin(interaction):
             return
         if interaction.guild is None:
             await interaction.response.send_message("❌ Use this command in a server.", ephemeral=True)

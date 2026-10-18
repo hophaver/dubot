@@ -8,7 +8,7 @@ async def _news_llm(system_prompt_key: str, prompt: str, num_predict: int, label
     """Run a news prompt on the configured news model (or the default chat model), with model fallback."""
     from models import model_manager
     from utils.llm import providers
-    from utils.llm_service import _try_models_with_fallback, get_enhanced_prompt
+    from utils.llm_service import try_models_with_fallback, get_enhanced_prompt
 
     from .store import get_news_model
 
@@ -21,7 +21,7 @@ async def _news_llm(system_prompt_key: str, prompt: str, num_predict: int, label
         {"role": "user", "content": prompt},
     ]
     try:
-        _, response = await _try_models_with_fallback(
+        _, response = await try_models_with_fallback(
             model_name,
             messages,
             provider=provider,

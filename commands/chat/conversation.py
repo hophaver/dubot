@@ -3,8 +3,8 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from whitelist import is_admin, get_user_permission
 from config import get_conversation_channels, add_conversation_channel, remove_conversation_channel
+from commands.shared import require_admin
 
 
 def register(client: discord.Client):
@@ -21,11 +21,7 @@ def register(client: discord.Client):
         enabled: bool,
         channel: Optional[discord.TextChannel] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
-            return
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
 
         target_channel = channel or interaction.channel

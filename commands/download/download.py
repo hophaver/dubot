@@ -1,16 +1,15 @@
 import os
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 from config import get_download_limit_mb
 from commands.download._helpers import DOWNLOAD_EXTENSIONS, IMAGE_EXTENSIONS, extract_urls, download_url_sync
+from commands.shared import require_user
 
 def register(client: discord.Client):
     @client.tree.command(name="download", description="Download media from a link or the last message with media and send to chat")
     @app_commands.describe(link_or_message="Optional: URL to download, or leave empty to use last message with link/attachment")
     async def download(interaction: discord.Interaction, link_or_message: str = None):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer()
         max_bytes = get_download_limit_mb() * 1024 * 1024

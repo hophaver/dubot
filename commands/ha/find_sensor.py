@@ -1,7 +1,7 @@
+from commands.shared import require_himas
 from typing import Optional
 import discord
 from discord import app_commands
-from whitelist import has_himas_permission
 from utils.ha_integration import ha_manager
 
 
@@ -9,8 +9,7 @@ def register(client: discord.Client):
     @client.tree.command(name="find-sensor", description="Find and query sensors")
     @app_commands.describe(search="Search term for sensors")
     async def find_sensor(interaction: discord.Interaction, search: Optional[str] = None):
-        if not has_himas_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_himas(interaction):
             return
         await interaction.response.defer()
         entities = list((await ha_manager.get_all_entities()).values())

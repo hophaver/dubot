@@ -1,5 +1,5 @@
+from commands.shared import require_himas
 import discord
-from whitelist import has_himas_permission
 from ._shared import load_ha_mappings
 
 _FIELDS_PER_EMBED = 25  # Discord limit
@@ -9,8 +9,7 @@ _EMBEDS_PER_MESSAGE = 10  # Discord limit
 def register(client: discord.Client):
     @client.tree.command(name="listentities", description="List all entity mappings")
     async def listentities(interaction: discord.Interaction):
-        if not has_himas_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_himas(interaction):
             return
         items = list(load_ha_mappings().items())
         if not items:

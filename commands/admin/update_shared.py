@@ -9,7 +9,7 @@ from discord.ui import Button, View
 
 from utils.paths import ROOT as PROJECT_ROOT
 from utils.update_state import update_state_manager
-from whitelist import is_admin
+from commands.shared import require_admin
 
 REQUIREMENTS = os.path.join(PROJECT_ROOT, "requirements.txt")
 GIT_TIMEOUT = 120
@@ -102,15 +102,13 @@ def build_update_action_view() -> View:
     """Persistent view (static custom_ids): register once with client.add_view() so it survives restarts."""
 
     async def restart_callback(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         await interaction.response.send_message("🔄 Restarting bot...")
         await restart_bot(interaction.client)
 
     async def safe_callback(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         current = await get_current_commit()
         if not current:

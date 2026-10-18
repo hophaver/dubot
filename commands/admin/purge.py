@@ -1,14 +1,13 @@
 import discord
 from discord import app_commands
-from whitelist import is_admin
+from commands.shared import require_admin
 
 
 def register(client: discord.Client):
     @client.tree.command(name="purge", description="Delete messages from channel")
     @app_commands.describe(amount="Number of messages to delete (1-100)")
     async def purge(interaction: discord.Interaction, amount: int = 10):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         if amount < 1 or amount > 100:
             await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)

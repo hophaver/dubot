@@ -2,15 +2,14 @@ import discord
 from discord import app_commands
 
 from adaptive_dm import adaptive_dm_manager
-from whitelist import get_user_permission
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
     @client.tree.command(name="adaptive-tune", description="DMs: apply queued messages to your adaptive profile now")
     @app_commands.describe(force="Run even with fewer queued messages")
     async def adaptive_tune(interaction: discord.Interaction, force: bool = False):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         if not isinstance(interaction.channel, discord.DMChannel):
             await interaction.response.send_message("❌ DMs only.", ephemeral=True)

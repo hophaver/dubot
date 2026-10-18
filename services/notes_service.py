@@ -293,11 +293,11 @@ def _model_and_system(user_id: int, prompt_key: str) -> Tuple[str, str, str]:
 
 
 async def _llm_json(user_id: int, prompt_key: str, user_block: str, num_predict: int) -> Optional[Dict[str, Any]]:
-    from utils.llm_service import _try_models_with_fallback, _extract_json_object_loose
+    from utils.llm_service import try_models_with_fallback, extract_json_object_loose
 
     model, provider, full_sys = _model_and_system(user_id, prompt_key)
     try:
-        _, raw = await _try_models_with_fallback(
+        _, raw = await try_models_with_fallback(
             model,
             [{"role": "system", "content": full_sys}, {"role": "user", "content": user_block}],
             images=False,
@@ -306,7 +306,7 @@ async def _llm_json(user_id: int, prompt_key: str, user_block: str, num_predict:
         )
     except Exception:
         return None
-    parsed = _extract_json_object_loose(raw or "")
+    parsed = extract_json_object_loose(raw or "")
     return parsed or None
 
 

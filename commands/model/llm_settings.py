@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 import discord
 from discord.ui import Select, Button
 
-from commands.shared import OwnerOnlyView, bot_embed_thumbnail_url, require_user
+from commands.shared import OwnerOnlyView, bot_embed_thumbnail_url, require_admin, require_user
 from config import get_current_persona, set_current_persona
 from llm_function_prefs import (
     LLM_FUNCTION_KEYS,
@@ -343,8 +343,7 @@ class LLMSettingsView(OwnerOnlyView):
         await interaction.edit_original_response(embed=embed, view=self)
 
     async def _on_global_persona(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         if not self.pending_persona or self.pending_persona == "__global_default__":
             await interaction.response.send_message(

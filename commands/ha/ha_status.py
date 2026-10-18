@@ -1,5 +1,5 @@
+from commands.shared import require_himas
 import discord
-from whitelist import has_himas_permission
 from utils.ha_integration import ha_manager
 from ._shared import load_ha_mappings
 
@@ -7,8 +7,7 @@ from ._shared import load_ha_mappings
 def register(client: discord.Client):
     @client.tree.command(name="ha-status", description="Check Home Assistant connection and entities")
     async def ha_status(interaction: discord.Interaction):
-        if not has_himas_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_himas(interaction):
             return
         await interaction.response.defer()
         status, data = await ha_manager.get_api_status()

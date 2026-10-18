@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 
 from conversations import conversation_manager
-from whitelist import get_user_permission
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
@@ -21,8 +21,7 @@ def register(client: discord.Client):
         enabled: bool,
         minutes: Optional[int] = 30,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         if not isinstance(interaction.channel, discord.DMChannel):
             await interaction.response.send_message(

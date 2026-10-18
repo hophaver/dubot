@@ -1,10 +1,10 @@
 """Daily recurring quiet hours for news DMs (server local timezone)."""
 
+from commands.shared import require_user
 from typing import Optional
 
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 from datetime import datetime
 
 from services.news_service import (
@@ -37,8 +37,7 @@ def register(client: discord.Client):
         pause: Optional[str] = None,
         cancel: Optional[app_commands.Choice[str]] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
 
         if cancel:

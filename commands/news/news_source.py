@@ -1,11 +1,11 @@
 """Admin command to manage custom RSS sources by topic."""
 
+from commands.shared import require_admin
 from typing import Optional
 
 import discord
 from discord import app_commands
 
-from whitelist import is_admin
 from services.news_service import (
     add_custom_topic_feed,
     get_custom_topic_feeds,
@@ -69,8 +69,7 @@ def register(client: discord.Client):
         url: Optional[str] = None,
         source: Optional[str] = None,
     ):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
 
         action_val = action.value

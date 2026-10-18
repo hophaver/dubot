@@ -2,8 +2,8 @@
 from typing import Optional
 import discord
 from discord import app_commands
-from whitelist import is_admin, get_user_permission, set_user_role, load_whitelist
-from commands.shared import bot_embed_thumbnail_url
+from whitelist import set_user_role, load_whitelist
+from commands.shared import make_bot_embed, require_admin, require_user
 
 
 async def build_whitelist_embed(client: discord.Client) -> discord.Embed:
@@ -17,14 +17,12 @@ async def build_whitelist_embed(client: discord.Client) -> discord.Embed:
             names[uid] = u.display_name or str(uid)
         except Exception:
             names[uid] = f"ID {uid}"
-    embed = discord.Embed(
+    embed = make_bot_embed(
+        client,
         title="Whitelist",
         description="Use `/whitelist @user admin` (or himas/user) to add or change a user's role. Admin only.",
         color=discord.Color.dark_blue(),
     )
-    _thumb = bot_embed_thumbnail_url(client.user)
-    if _thumb:
-        embed.set_thumbnail(url=_thumb)
     for key, label in role_config:
         ids = data.get(key, []) or []
         if not ids:
@@ -49,8 +47,7 @@ def register(client: discord.Client):
         role: Optional[str] = None,
     ):
         if user is not None and role is not None:
-            if not is_admin(interaction.user.id):
-                await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+            if not await require_admin(interaction):
                 return
             role_clean = role.strip().lower()
             if role_clean not in ("admin", "himas", "user"):
@@ -67,8 +64,7 @@ def register(client: discord.Client):
                 ephemeral=True,
             )
             return
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer()
         embed = await build_whitelist_embed(client)

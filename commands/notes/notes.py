@@ -5,7 +5,7 @@ from discord import app_commands
 
 from services.notes_service import build_notes_payload, notes_manager, run_update
 from utils import dm_background
-from whitelist import get_user_permission
+from commands.shared import require_user
 
 TextlikeChannel = Union[discord.TextChannel, discord.Thread]
 
@@ -17,8 +17,7 @@ def register(client: discord.Client):
     )
     @app_commands.describe(channel="Channel to turn note-taking on/off (omit to view notes for this channel)")
     async def notes(interaction: discord.Interaction, channel: Optional[TextlikeChannel] = None):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         if channel is not None:
             await _toggle(client, interaction, channel)

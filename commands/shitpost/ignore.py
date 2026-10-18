@@ -1,15 +1,14 @@
 import discord
 from discord import app_commands
-from whitelist import is_admin
 from . import _blacklist
+from commands.shared import require_admin
 
 
 def register(client):
     @client.tree.command(name="ignore", description="Add a word to shitpost ignore list (admin)")
     @app_commands.describe(word="Word to ignore (e.g. !word / .word will do nothing)")
     async def ignore(interaction: discord.Interaction, word: str):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         word_clean = (word or "").strip().lower()
         if not word_clean:

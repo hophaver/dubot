@@ -298,12 +298,22 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     return False
 
 
+async def require_himas(interaction: discord.Interaction) -> bool:
+    """True for admin or himas (Home Assistant) users; otherwise replies "❌ Denied"."""
+    from whitelist import has_himas_permission
+
+    if has_himas_permission(interaction.user.id):
+        return True
+    await _deny(interaction, "❌ Denied")
+    return False
+
+
 async def require_permanent_admin(interaction: discord.Interaction) -> bool:
     from whitelist import is_permanent_admin
 
     if is_permanent_admin(interaction.user.id):
         return True
-    await _deny(interaction, "❌ Only the bot owner can use this.")
+    await _deny(interaction, "❌ Permanent admin only.")
     return False
 
 

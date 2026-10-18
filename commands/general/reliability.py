@@ -1,22 +1,19 @@
 import discord
 from discord import app_commands
 
-from whitelist import is_admin
-from commands.shared import bot_embed_thumbnail_url
+from commands.shared import make_bot_embed, require_admin
 from utils import home_log
 from utils import reliability_telemetry
 
 
 def _build_reliability_embed(client: discord.Client, title: str) -> discord.Embed:
     data = reliability_telemetry.snapshot()
-    embed = discord.Embed(
+    embed = make_bot_embed(
+        client,
         title=title,
         description="Telemetry for retries, timeouts, and failures.",
         color=discord.Color.dark_gold(),
     )
-    _thumb = bot_embed_thumbnail_url(client.user)
-    if _thumb:
-        embed.set_thumbnail(url=_thumb)
     embed.add_field(name="LLM retries", value=str(data.get("llm_retries", 0)), inline=True)
     embed.add_field(name="LLM timeouts", value=str(data.get("llm_timeouts", 0)), inline=True)
     embed.add_field(name="LLM errors", value=str(data.get("llm_errors", 0)), inline=True)
@@ -44,8 +41,7 @@ def register(client):
         action: app_commands.Choice[str],
         post_to_home: bool = False,
     ):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
 
         if action.value == "reset":

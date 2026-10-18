@@ -1,17 +1,17 @@
 from typing import Optional
 import discord
 from discord import app_commands
-from whitelist import is_admin, get_user_permission
+from whitelist import is_admin
 from config import get_chat_history, set_chat_history
 from conversations import conversation_manager
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
     @client.tree.command(name="chat-history", description="View or set how many user messages to remember per chat (1–100)")
     @app_commands.describe(number="Set to this number (omit to show current)")
     async def chat_history(interaction: discord.Interaction, number: Optional[int] = None):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         current = get_chat_history()
         if number is None:

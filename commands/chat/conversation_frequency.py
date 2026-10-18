@@ -3,8 +3,9 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from whitelist import is_admin, get_user_permission
+from whitelist import is_admin
 from config import get_conversation_frequency, set_conversation_frequency
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
@@ -21,8 +22,7 @@ def register(client: discord.Client):
         min_messages: Optional[int] = None,
         max_messages: Optional[int] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
 
         current_min, current_max = get_conversation_frequency()

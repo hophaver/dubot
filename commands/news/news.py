@@ -1,9 +1,9 @@
 """Subscribe to news topics delivered via DM."""
 
+from commands.shared import require_user
 from typing import List, Optional
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 from services.news_service import (
     subscribe_user,
     unsubscribe_user,
@@ -101,8 +101,7 @@ def register(client: discord.Client):
         topics: Optional[str] = None,
         action: Optional[app_commands.Choice[str]] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
 
         action_val = action.value if action else "subscribe"

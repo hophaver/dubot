@@ -1,9 +1,9 @@
+from commands.shared import require_permanent_admin
 from typing import Optional
 
 import discord
 from discord import app_commands
 
-from integrations import PERMANENT_ADMIN
 from services import profanity_service
 
 
@@ -35,8 +35,7 @@ def register(client: discord.Client):
         action: str = "view",
         word: Optional[str] = None,
     ):
-        if interaction.user.id != PERMANENT_ADMIN:
-            await interaction.response.send_message("❌ Permanent admin only.", ephemeral=True)
+        if not await require_permanent_admin(interaction):
             return
 
         action = (action or "view").strip().lower()

@@ -6,7 +6,7 @@ from discord import app_commands
 
 from models import model_manager
 from utils.openrouter_image import OPENROUTER_IMAGE_GEN_SYSTEM_PROMPT, generate_openrouter_image_with_fallback
-from whitelist import get_user_permission
+from commands.shared import require_user
 
 
 def _ext_for_mime(mime: str) -> str:
@@ -24,8 +24,7 @@ def register(client: discord.Client):
     )
     @app_commands.describe(idea="What to generate")
     async def imagine(interaction: discord.Interaction, idea: str):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         eff = model_manager.get_effective_model_for_function(interaction.user.id, "image_generation")
         model_name = str(eff.get("model") or "").strip()

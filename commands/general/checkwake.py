@@ -1,20 +1,15 @@
 import discord
-from whitelist import get_user_permission
-from commands.shared import bot_embed_thumbnail_url
+from commands.shared import make_bot_embed, require_user
 from config import get_wake_word
 
 
 def register(client):
     @client.tree.command(name="checkwake", description="Check current wake word")
     async def checkwake(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         wake_word = get_wake_word()
-        embed = discord.Embed(title="🔔 Wake Word", color=discord.Color.blue())
-        _thumb = bot_embed_thumbnail_url(client.user)
-        if _thumb:
-            embed.set_thumbnail(url=_thumb)
+        embed = make_bot_embed(client, "🔔 Wake Word", color=discord.Color.blue())
         embed.add_field(name="Current", value=f"`{wake_word}`", inline=True)
         embed.add_field(name="Usage", value=f"Mention me or start with **{wake_word}** to chat.", inline=True)
         embed.set_footer(text="/setwake [Admin]")

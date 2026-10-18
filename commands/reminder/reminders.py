@@ -1,13 +1,12 @@
 import discord
-from whitelist import get_user_permission
 from services.reminder_service import reminder_manager
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
     @client.tree.command(name="reminders", description="List your active reminders")
     async def reminders(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         user_reminders = reminder_manager.get_user_reminders(interaction.user.id)
         if not user_reminders:

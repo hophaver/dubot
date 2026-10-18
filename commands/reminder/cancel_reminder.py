@@ -1,15 +1,14 @@
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 from services.reminder_service import reminder_manager
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
     @client.tree.command(name="cancel-reminder", description="Cancel a reminder by ID")
     @app_commands.describe(reminder_id="ID of the reminder to cancel")
     async def cancel_reminder(interaction: discord.Interaction, reminder_id: str):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         try:
             rem = reminder_manager.reminders.get(reminder_id)

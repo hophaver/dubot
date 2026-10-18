@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 
 from adaptive_dm import adaptive_dm_manager
-from whitelist import get_user_permission
+from commands.shared import require_user
 
 TextlikeChannel = Union[discord.TextChannel, discord.Thread]
 
@@ -31,8 +31,7 @@ def register(client: discord.Client):
         channel: Optional[Union[discord.TextChannel, discord.Thread]] = None,
         clear_stored_channel: bool = False,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
 
         uid = interaction.user.id

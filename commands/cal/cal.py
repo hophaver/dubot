@@ -1,10 +1,10 @@
+from commands.shared import require_user
 import io
 import random
 from typing import Optional
 
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 
 from utils.ical_batch import (
     build_calendar_ics,
@@ -48,8 +48,7 @@ def register(client: discord.Client):
         duration_minutes: app_commands.Range[int, 1, 24 * 60],
         random_variation: Optional[app_commands.Range[int, 0, 720]] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer()
         try:

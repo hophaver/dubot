@@ -1,9 +1,9 @@
+from commands.shared import require_permanent_admin
 from typing import Optional
 
 import discord
 from discord import app_commands
 
-from integrations import PERMANENT_ADMIN
 from services import remover_service
 
 
@@ -14,8 +14,7 @@ def register(client: discord.Client):
     )
     @app_commands.describe(emoji="Unicode or <:custom:123> (omit to pick via reaction on the next line)")
     async def remover_cmd(interaction: discord.Interaction, emoji: Optional[str] = None):
-        if interaction.user.id != PERMANENT_ADMIN:
-            await interaction.response.send_message("❌ Permanent admin only.", ephemeral=True)
+        if not await require_permanent_admin(interaction):
             return
 
         if emoji is not None and str(emoji).strip():

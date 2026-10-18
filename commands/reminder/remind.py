@@ -1,9 +1,9 @@
 from typing import Optional
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 from services.reminder_service import reminder_manager
 from .parse_time import parse_time_string
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
@@ -19,8 +19,7 @@ def register(client: discord.Client):
         message: str,
         channel: Optional[discord.TextChannel] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer()
         try:

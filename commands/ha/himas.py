@@ -1,14 +1,13 @@
+from commands.shared import require_himas
 import discord
 from discord import app_commands
-from whitelist import has_himas_permission
 
 
 def register(client: discord.Client):
     @client.tree.command(name="himas", description="Control Home Assistant with natural language")
     @app_commands.describe(command="Natural language command")
     async def himas(interaction: discord.Interaction, command: str):
-        if not has_himas_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_himas(interaction):
             return
         await interaction.response.defer()
         try:

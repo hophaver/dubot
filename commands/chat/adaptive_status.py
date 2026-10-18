@@ -4,7 +4,7 @@ import json
 import discord
 
 from adaptive_dm import AdaptiveDmManager, adaptive_dm_manager
-from whitelist import get_user_permission
+from commands.shared import require_user
 
 
 def register(client: discord.Client):
@@ -13,8 +13,7 @@ def register(client: discord.Client):
         description="DMs: adaptive context export; notes reply merges; attach exact adaptive-dm-context.txt to replace",
     )
     async def adaptive_status(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         if not isinstance(interaction.channel, discord.DMChannel):
             await interaction.response.send_message("❌ DMs only.", ephemeral=True)

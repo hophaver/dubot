@@ -434,13 +434,11 @@ User command: "{user_command}"
                 home_log.log_sync(f"HA LLM parse failed ({self._himas_llm_label}): {response_text}")
                 response_text = ""
 
-            if response_text:
-                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                if json_match:
-                    try:
-                        return json.loads(json_match.group())
-                    except json.JSONDecodeError:
-                        pass
+            from utils.llm.text import extract_json_object
+
+            parsed = extract_json_object(response_text)
+            if parsed:
+                return parsed
         except Exception as e:
             home_log.log_sync(f"LLM parse error: {e}")
         return {"type": "error", "message": f"Could not parse: {user_command}"}

@@ -2,9 +2,8 @@ import asyncio
 from typing import Optional, List, Dict, Any
 import discord
 from discord import app_commands
-from whitelist import get_user_permission
 from conversations import conversation_manager
-from commands.shared import send_long_message
+from commands.shared import require_user, send_long_message
 
 
 COMPARE_KEYWORDS = {"compare", "difference", "similar", "contrast"}
@@ -80,8 +79,7 @@ def register(client: discord.Client):
         file2: Optional[discord.Attachment] = None,
         file3: Optional[discord.Attachment] = None,
     ):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer()
         from utils.llm_service import ask_llm, analyze_file, compare_files

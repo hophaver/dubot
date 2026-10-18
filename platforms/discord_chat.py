@@ -23,8 +23,9 @@ from utils.llm_service import (
     analyze_file,
     compare_files,
     compact_dm_history_for_channel,
-    _strip_leaked_image_placeholders,
+    strip_leaked_image_placeholders,
     merge_adaptive_manual_guidance_into_profile,
+    persist_turn,
 )
 from utils.llm.translate import do_translate
 from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_pipeline
@@ -387,7 +388,7 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
             )
             return True
 
-        content = _strip_leaked_image_placeholders((final_text or "").strip())
+        content = strip_leaked_image_placeholders((final_text or "").strip())
         if not content:
             content = "Here’s the image."
         if len(content) > 1900:
@@ -1601,11 +1602,7 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
                 await dm_typing_coalescer.prepend_lines_async(cid, merged)
             continue
 
-        answer = draft or ""
-        if adaptive_dm_manager.is_enabled(user_id) and str(
-            model_manager.get_effective_model_for_function(user_id, "image_generation").get("model") or ""
-        ).strip():
-            answer = _strip_leaked_image_placeholders(answer)
+        answer = draft or ""  # already cleaned by ask_llm (finalize_reply)
         if not answer.strip():
             if await _abort_check():
                 leftover = await dm_typing_coalescer.pop_pending_lines(cid)
@@ -1624,21 +1621,7 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
             continue
 
         try:
-            await ask_llm(
-                user_id,
-                cid,
-                combined,
-                username,
-                is_continuation=is_continuation,
-                platform="discord",
-                chat_context=context,
-                attachments=attachments if attachments else None,
-                is_dm=True,
-                fast_reply=fast_reply_enabled,
-                reply_context_block=reply_context_block,
-                persist=True,
-                reuse_response=answer,
-            )
+            persist_turn(user_id, cid, username, combined, answer, is_dm=True, reply_context_block=reply_context_block)
         except Exception as exc:
             await home_log.send_to_home(f"⚠️ Failed to persist DM turn in channel {cid}: {str(exc)[:300]}")
 
