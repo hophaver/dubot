@@ -20,6 +20,7 @@ LLM_FUNCTION_KEYS: List[str] = [
     "translate",
     "shitpost",
     "image_generation",
+    "notes",
 ]
 
 LLM_FUNCTION_LABELS: Dict[str, str] = {
@@ -31,6 +32,7 @@ LLM_FUNCTION_LABELS: Dict[str, str] = {
     "translate": "Translate",
     "shitpost": "Shitpost (!word / .word)",
     "image_generation": "Image generation (/imagine; OpenRouter only)",
+    "notes": "Note taker (/notes)",
 }
 
 
@@ -44,6 +46,7 @@ _UTILITY_DEFAULT_PERSONAS = {
     "file_analysis": "__utility_file_analysis__",
     "compare_files": "__utility_compare_files__",
     "translate": "__utility_translate__",
+    "notes": "__utility_notes__",
 }
 
 

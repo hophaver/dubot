@@ -46,6 +46,7 @@ from utils import home_log
 from utils import reliability_telemetry
 from commands.shared import send_long_to_channel, bot_embed_thumbnail_url, sanitize_discord_bot_content
 from adaptive_dm import adaptive_dm_manager, is_adaptive_context_export_filename
+from services import notes_service
 
 # Initialize command database
 initialize_command_database()
@@ -217,6 +218,12 @@ class BotClient(discord.Client):
             NewsCommands(self).register()
         except Exception as e:
             errors.append(f"news: {e}")
+        # 11. Notes
+        try:
+            from commands.notes import NotesCommands
+            NotesCommands(self).register()
+        except Exception as e:
+            errors.append(f"notes: {e}")
 
         try:
             await self.tree.sync()
@@ -254,6 +261,7 @@ async def on_ready():
     status_text = config.get("bot_status", "Analyzing files with AI")
     activity = discord.Activity(type=discord.ActivityType.listening, name=status_text)
     await client.change_presence(activity=activity)
+    notes_service.start_idle_loop(client)
 
     from integrations import refresh_environment_location_async
     from utils.bot_overview_embed import build_bot_overview_embed
@@ -287,6 +295,13 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # Note taker counts every human message in tracked channels (not just whitelisted users)
+    if message.guild:
+        try:
+            notes_service.on_guild_message(client, message)
+        except Exception:
+            pass
+
     # Get permission level
     permission = get_user_permission(message.author.id)
     if permission is None:
@@ -312,6 +327,17 @@ async def on_message(message):
                 pass
 
         asyncio.create_task(_guild_adaptive_tune())
+
+        if message.reference:
+            try:
+                if await notes_service.try_handle_notes_reply(client, message):
+                    return
+            except Exception as e:
+                try:
+                    await message.reply(f"❌ Notes edit failed: {str(e)[:300]}")
+                except Exception:
+                    pass
+                return
 
     # Check if bot is mentioned and has file attachments
     if client.user.mentioned_in(message) and message.attachments:

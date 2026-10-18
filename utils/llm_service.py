@@ -234,6 +234,11 @@ def initialize_command_database():
         "General",
     )
     command_db.add_command(
+        "notes",
+        "Server: /notes shows this channel's project notes; /notes channel:#x toggles note-taking there",
+        "General",
+    )
+    command_db.add_command(
         "adaptive-tune-channel",
         "Tune adaptive profile from a server channel (same as DMs; your messages only; URLs ignored for tuning)",
         "General",

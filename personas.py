@@ -18,6 +18,7 @@ DEFAULT_PERSONAS = {
     "__utility_file_analysis__": "You extract facts from one file. Be direct; no preamble.",
     "__utility_compare_files__": "You diff provided file excerpts. Be structured; no preamble.",
     "__utility_translate__": "You translate user text only. No notes or quotes.",
+    "__utility_notes__": "You extract product/project ideas from chat into concise structured notes. Ignore small talk. JSON only.",
 }
 
 
