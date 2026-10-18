@@ -14,6 +14,7 @@ class ModelManager:
     def __init__(self):
         self.available_models: List[str] = []
         self.user_models: Dict[str, Dict] = {}
+        self.ollama_online: bool = False
         self.load_models()
         self.refresh_local_models()
 
@@ -25,12 +26,15 @@ class ModelManager:
                 models_data = response.json().get("models", [])
                 self.available_models = [m.get("name") for m in models_data if m.get("name")]
                 home_log.log_sync(f"✅ Found {len(self.available_models)} Ollama models")
+                self.ollama_online = True
                 return True
         except requests.exceptions.ConnectionError:
-            home_log.log_sync(f"⚠️ Cannot connect to Ollama at {OLLAMA_URL}")
+            # Console only; the startup embed shows Ollama online/offline instead.
+            print(f"⚠️ Cannot connect to Ollama at {OLLAMA_URL}")
         except Exception as e:
             home_log.log_sync(f"⚠️ Error fetching models: {e}")
         self.available_models = []
+        self.ollama_online = False
         return False
 
     def set_user_model(self, user_id, model_name: str, provider: str = "local") -> None:

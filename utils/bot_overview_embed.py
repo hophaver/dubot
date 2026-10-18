@@ -48,7 +48,6 @@ async def build_bot_overview_embed(
         HA_URL,
         HA_ACCESS_TOKEN,
         LOCATION,
-        OLLAMA_URL,
         OPENROUTER_CHAT_API_KEY,
         OPENROUTER_MANAGEMENT_API_KEY,
     )
@@ -119,7 +118,12 @@ async def build_bot_overview_embed(
 
     openrouter_value = f"{credits_line}\nConfigured keys: {keys_line}"
 
-    ollama_line = f"{OLLAMA_URL} · {n_local} local model(s)" if n_local else f"{OLLAMA_URL} · no local models"
+    if not model_manager.ollama_online:
+        ollama_line = "Offline"
+    elif n_local:
+        ollama_line = f"Online · {n_local} local model(s)"
+    else:
+        ollama_line = "Online · no local models"
 
     cmd_line = "All packages loaded" if not errors else ", ".join(errors)[:900]
 
