@@ -463,7 +463,7 @@ if __name__ == "__main__":
     try:
         from services.status_server import start_status_server
 
-        start_status_server()
+        start_status_server(client)
     except Exception as e:
         print(f"⚠️ Status server failed: {e}", flush=True)
 
