@@ -1,30 +1,52 @@
+import asyncio
 import os
-import subprocess
 import sys
+from dataclasses import dataclass
 from typing import Optional
 
 import discord
 from discord.ui import Button, View
 
+from utils.paths import ROOT as PROJECT_ROOT
 from utils.update_state import update_state_manager
 from whitelist import is_admin
 
-# Project root: commands/admin/update_shared.py -> admin -> commands -> root
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REQUIREMENTS = os.path.join(PROJECT_ROOT, "requirements.txt")
+GIT_TIMEOUT = 120
+PIP_TIMEOUT = 900
 
 
-def run_git(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args],
-        capture_output=True,
-        text=True,
+@dataclass
+class ProcResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+async def _run(argv: list[str], timeout: float) -> ProcResult:
+    """Run a subprocess in PROJECT_ROOT without blocking the event loop."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
         cwd=PROJECT_ROOT,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return ProcResult(124, "", f"timed out after {int(timeout)}s")
+    return ProcResult(proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
 
 
-def get_current_commit() -> str:
-    res = run_git(["rev-parse", "HEAD"])
+async def run_git(args: list[str]) -> ProcResult:
+    return await _run(["git", *args], GIT_TIMEOUT)
+
+
+async def get_current_commit() -> str:
+    res = await run_git(["rev-parse", "HEAD"])
     if res.returncode != 0:
         return ""
     return (res.stdout or "").strip()
@@ -35,19 +57,14 @@ def short_sha(sha: str) -> str:
     return value[:8] if value else "unknown"
 
 
-def pip_upgrade_dependencies() -> Optional[subprocess.CompletedProcess]:
+async def pip_upgrade_dependencies() -> Optional[ProcResult]:
     """Run pip install -r requirements.txt --upgrade. Returns None if requirements.txt is missing."""
     if not os.path.isfile(REQUIREMENTS):
         return None
-    return subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS, "--upgrade"],
-        capture_output=True,
-        text=True,
-        cwd=PROJECT_ROOT,
-    )
+    return await _run([sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS, "--upgrade"], PIP_TIMEOUT)
 
 
-def format_requirements_status(pip_res: Optional[subprocess.CompletedProcess]) -> str:
+def format_requirements_status(pip_res: Optional[ProcResult]) -> str:
     section = ["### Requirements"]
     if pip_res is None:
         section.append("○ No `requirements.txt` found.")
@@ -57,7 +74,8 @@ def format_requirements_status(pip_res: Optional[subprocess.CompletedProcess]) -
     lower = combined.lower()
 
     if pip_res.returncode != 0:
-        first_line = (pip_res.stderr or pip_res.stdout or "unknown pip error").strip().splitlines()[0][:220]
+        lines = (pip_res.stderr or pip_res.stdout or "unknown pip error").strip().splitlines()
+        first_line = (lines[0] if lines else "unknown pip error")[:220]
         section.append(f"❌ Dependency check failed: {first_line}")
         return "\n".join(section)
 
@@ -69,19 +87,32 @@ def format_requirements_status(pip_res: Optional[subprocess.CompletedProcess]) -
     return "\n".join(section)
 
 
+async def restart_bot(client: discord.Client) -> None:
+    """Persist state, then replace this process with a fresh one."""
+    persist = getattr(client, "persist_state", None)
+    if persist is not None:
+        try:
+            await persist()
+        except Exception as e:
+            print(f"⚠️ Failed to persist state before restart: {e}", flush=True)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def build_update_action_view() -> View:
+    """Persistent view (static custom_ids): register once with client.add_view() so it survives restarts."""
+
     async def restart_callback(interaction: discord.Interaction):
         if not is_admin(interaction.user.id):
             await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
         await interaction.response.send_message("🔄 Restarting bot...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        await restart_bot(interaction.client)
 
     async def safe_callback(interaction: discord.Interaction):
         if not is_admin(interaction.user.id):
             await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
-        current = get_current_commit()
+        current = await get_current_commit()
         if not current:
             await interaction.response.send_message("❌ Could not read current git commit.", ephemeral=True)
             return

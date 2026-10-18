@@ -1,5 +1,4 @@
 import discord
-from discord import app_commands
 from whitelist import get_user_permission
 from commands.shared import bot_embed_thumbnail_url
 from config import get_wake_word

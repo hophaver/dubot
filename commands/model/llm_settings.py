@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import discord
-from discord.ui import View, Select, Button
+from discord.ui import Select, Button
 
-from commands.shared import bot_embed_thumbnail_url
+from commands.shared import OwnerOnlyView, bot_embed_thumbnail_url, require_user
 from config import get_current_persona, set_current_persona
 from llm_function_prefs import (
     LLM_FUNCTION_KEYS,
@@ -18,7 +18,7 @@ from llm_function_prefs import (
 from models import model_manager
 from personas import persona_manager
 from utils.llm_service import validate_and_set_function_model, validate_and_set_model
-from whitelist import get_user_permission, is_admin
+from whitelist import is_admin
 
 
 def _status_lines(user_id: int) -> Tuple[str, str]:
@@ -44,7 +44,6 @@ def _status_lines(user_id: int) -> Tuple[str, str]:
 
 def _build_model_pairs(user_id: int, fn_key: str) -> List[Optional[Tuple[str, str]]]:
     """Ordered choices for the model menu. Index 0 = clear override (use default chat model). Max 25 entries total."""
-    model_manager.refresh_local_models()
     local_models = model_manager.list_all_models(refresh_local=False)
     info = model_manager.get_user_model_info(user_id)
     cloud_hist = info.get("cloud_history", []) if isinstance(info.get("cloud_history"), list) else []
@@ -189,13 +188,14 @@ def _persona_options() -> List[discord.SelectOption]:
     return opts[:25]
 
 
-class LLMSettingsView(View):
+class LLMSettingsView(OwnerOnlyView):
     def __init__(self, client: discord.Client, user_id: int, fn_key: str, timeout: float = 300):
-        super().__init__(timeout=timeout)
+        super().__init__(user_id, timeout=timeout)
         self.client = client
         self.user_id = user_id
+        self.message: Optional[discord.Message] = None
         self.fn_key = fn_key if fn_key in LLM_FUNCTION_KEYS else "chat"
-        self._model_pairs: List[Optional[Tuple[str, str]]] = _build_model_pairs(user_id, self.fn_key)
+        self._model_pairs: List[Optional[Tuple[str, str]]] = []
         self.pending_model_idx: Optional[int] = None
         self.pending_persona: Optional[str] = None
         self._rebuild_rows()
@@ -265,9 +265,6 @@ class LLMSettingsView(View):
             await interaction.response.edit_message(embed=embed, view=self)
 
     async def _on_fn(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         v = (interaction.data.get("values") or [None])[0]
         if v in LLM_FUNCTION_KEYS:
             self.fn_key = v
@@ -277,9 +274,6 @@ class LLMSettingsView(View):
         await self._edit(interaction)
 
     async def _on_model(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         raw = (interaction.data.get("values") or [None])[0]
         try:
             self.pending_model_idx = int(raw) if raw is not None else None
@@ -288,16 +282,10 @@ class LLMSettingsView(View):
         await self._edit(interaction)
 
     async def _on_persona(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         self.pending_persona = (interaction.data.get("values") or [None])[0]
         await self._edit(interaction)
 
     async def _on_apply(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         await interaction.response.defer()
         msgs: List[str] = []
 
@@ -321,8 +309,6 @@ class LLMSettingsView(View):
                     prov, mname = slot
                     if self.fn_key == "chat":
                         ok, msg = await validate_and_set_model(self.user_id, prov, mname)
-                    elif self.fn_key == "image_generation":
-                        ok, msg = await validate_and_set_function_model(self.user_id, "image_generation", prov, mname)
                     else:
                         ok, msg = await validate_and_set_function_model(self.user_id, self.fn_key, prov, mname)
                     msgs.append("Model: " + msg)
@@ -357,9 +343,6 @@ class LLMSettingsView(View):
         await interaction.edit_original_response(embed=embed, view=self)
 
     async def _on_global_persona(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         if not is_admin(interaction.user.id):
             await interaction.response.send_message("❌ Admin only.", ephemeral=True)
             return
@@ -403,12 +386,14 @@ def register(client: discord.Client):
         description="Per-function model (local/cloud) and persona; default chat; separate OpenRouter image model",
     )
     async def llm_settings(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         if not persona_manager.list_personas():
             await interaction.response.send_message("📝 No personas available. Use `/persona-create` first.")
             return
+        # Refreshing the Ollama model list can take a few seconds; defer so the interaction doesn't expire.
+        await interaction.response.defer()
+        await model_manager.refresh_async()
         view = LLMSettingsView(client, interaction.user.id, "chat")
         embed = _build_embed(
             interaction.user.id,
@@ -418,8 +403,4 @@ def register(client: discord.Client):
             None,
             bot_embed_thumbnail_url(interaction.client.user),
         )
-        await interaction.response.send_message(embed=embed, view=view)
-        try:
-            view.message = await interaction.original_response()
-        except Exception:
-            view.message = None
+        view.message = await interaction.followup.send(embed=embed, view=view, wait=True)

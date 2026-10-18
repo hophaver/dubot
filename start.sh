@@ -4,12 +4,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 PID_FILE="${SCRIPT_DIR}/.bot.pid"
-PIDS_FILE="${SCRIPT_DIR}/.bot.pids"
-LOG_FILE="${SCRIPT_DIR}/bot.log"
 DISCORD_LOG_FILE="${SCRIPT_DIR}/bot-discord.log"
 
 print_recent_log() {
-    if [ -f "$LOG_FILE" ]; then
+    if [ -f "$DUBOT_LOG_PATH" ]; then
         echo "  --- Last log lines ---"
         "$PYTHON_BIN" - <<'PY'
 import os
@@ -71,21 +69,14 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 fi
 
-if [ -f "$PIDS_FILE" ]; then
-    if rg -n "^[^:]+:[0-9]+$" "$PIDS_FILE" >/dev/null 2>&1; then
-        while IFS=: read -r _name _pid; do
-            if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
-                echo "  ⚠ Bot already running (PID $_pid). Run ./stop.sh first."
-                exit 1
-            fi
-        done < "$PIDS_FILE"
-    fi
-    rm -f "$PIDS_FILE"
+# Keep one previous log generation once the log passes ~10 MB.
+if [ -f "$DISCORD_LOG_FILE" ] && [ "$(wc -c < "$DISCORD_LOG_FILE")" -gt 10485760 ]; then
+    mv -f "$DISCORD_LOG_FILE" "${DISCORD_LOG_FILE}.1"
 fi
 
 echo "=== Starting bot in background ==="
 
-nohup env DUBOT_RUNTIME=discord "$PYTHON_BIN" "main.py" >> "$DISCORD_LOG_FILE" 2>&1 &
+nohup "$PYTHON_BIN" "main.py" >> "$DISCORD_LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 sleep 4

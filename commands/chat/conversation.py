@@ -33,7 +33,6 @@ def register(client: discord.Client):
             await interaction.response.send_message("❌ Conversation can only be enabled for text channels.", ephemeral=True)
             return
 
-        current = get_conversation_channels()
         if enabled:
             add_conversation_channel(target_channel.id)
             msg = f"✅ Auto-conversation **enabled** for {target_channel.mention}."

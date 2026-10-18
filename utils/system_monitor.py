@@ -1,8 +1,23 @@
+import asyncio
 import psutil
 import socket
 import platform
 import subprocess
 import time
+
+
+def format_uptime(seconds: float) -> str:
+    """'3d 4h 5m', or '4h 5m' when under a day."""
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m"
+
+
+async def get_system_status_async():
+    """get_system_status() blocks ~1s (CPU sampling + GPU probes); run it off the event loop."""
+    return await asyncio.to_thread(get_system_status)
+
 
 def get_system_status():
     """Get comprehensive system status"""
@@ -28,11 +43,7 @@ def get_system_status():
         gpu_util = get_gpu_utilization()
         
         # Uptime
-        uptime_seconds = time.time() - psutil.boot_time()
-        days = int(uptime_seconds // 86400)
-        hours = int((uptime_seconds % 86400) // 3600)
-        minutes = int((uptime_seconds % 3600) // 60)
-        uptime_str = f"{days}d {hours}h {minutes}m"
+        uptime_str = format_uptime(time.time() - psutil.boot_time())
         
         return {
             "cpu_percent": cpu_percent,

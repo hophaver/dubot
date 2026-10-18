@@ -56,31 +56,10 @@ class PersonaManager:
     def persona_exists(self, name):
         return name in self.personas
 
-    def set_user_persona(self, user_id, persona_name):
-        """Set the global persona for everyone (user_id ignored)."""
-        if persona_name in self.personas:
-            set_current_persona(persona_name)
-            return True
-        return False
-
-    def get_user_persona(self, user_id):
-        """Return the global persona (same for all users)."""
-        current = get_current_persona()
-        return current if current in self.personas else "default"
-
     def create_persona(self, name, system_prompt):
         self.personas[name] = system_prompt
         self.save_personas()
         return True
-
-    def delete_persona(self, name):
-        if name != "default" and name in self.personas:
-            if get_current_persona() == name:
-                set_current_persona("default")
-            del self.personas[name]
-            self.save_personas()
-            return True
-        return False
 
     def list_personas(self):
         return list(self.personas.keys())

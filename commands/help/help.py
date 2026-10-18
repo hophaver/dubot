@@ -36,7 +36,7 @@ def register(client: discord.Client):
         if command:
             cmd_info = command_db.get_command(command.lower())
             if not cmd_info:
-                await interaction.response.send_message(f"Unknown command. Try `/help` for the list.")
+                await interaction.response.send_message("Unknown command. Try `/help` for the list.")
                 return
             embed = make_bot_embed(
                 client, f"/{cmd_info['name']}", cmd_info["description"], color=discord.Color.blue()

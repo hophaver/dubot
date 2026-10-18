@@ -1,8 +1,9 @@
 """OpenRouter credits balance (management API key)."""
 
+import asyncio
+
 import discord
-from discord import app_commands
-from whitelist import get_user_permission
+from commands.shared import require_user
 from utils.openrouter import fetch_credits
 
 
@@ -18,12 +19,11 @@ def register(client):
         description="Check OpenRouter account credits (uses OPENROUTER_MANAGEMENT_API_KEY)",
     )
     async def bal(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer(ephemeral=True)
 
-        data, err = fetch_credits()
+        data, err = await asyncio.to_thread(fetch_credits)
         if err:
             await interaction.followup.send(err, ephemeral=True)
             return

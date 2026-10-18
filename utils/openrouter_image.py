@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
-from integrations import OPENROUTER_API_KEY
+from integrations import OPENROUTER_CHAT_API_KEY
+from utils.http import parse_openrouter_error, session as http_session
+from utils.llm import providers
 from utils import home_log
 
 # System instructions for the image model (natural-language + contextual prompts).
@@ -74,7 +73,7 @@ def _bytes_from_image_url_string(url: str) -> Optional[Tuple[bytes, str]]:
         return parsed
     if u.startswith("http://") or u.startswith("https://"):
         try:
-            r = requests.get(u, timeout=60)
+            r = http_session().get(u, timeout=60)
             if r.status_code != 200 or not r.content:
                 return None
             ct = (r.headers.get("Content-Type") or "image/png").split(";")[0].strip().lower()
@@ -226,13 +225,12 @@ async def generate_openrouter_image(
     Returns (image_bytes, mime, assistant_text, error_message).
     error_message empty on success. image_bytes None when only text or failure.
     """
-    if not OPENROUTER_API_KEY:
+    if not OPENROUTER_CHAT_API_KEY:
         return None, "image/png", "", "Error: OPENROUTER_API_KEY is not configured."
     model_name = str(model_name or "").strip()
     if not model_name:
         return None, "image/png", "", "Error: No image model configured. Set one in /llm-settings (Image generation) or use /pull-model."
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
     messages: List[Dict[str, Any]] = []
     if system_prompt and str(system_prompt).strip():
         messages.append({"role": "system", "content": str(system_prompt).strip()})
@@ -244,35 +242,15 @@ async def generate_openrouter_image(
         "modalities": list(modalities),
         "stream": False,
     }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    def _post() -> requests.Response:
-        return requests.post(url, json=payload, headers=headers, timeout=timeout)
-
     try:
-        response = await asyncio.to_thread(_post)
-    except requests.exceptions.Timeout:
+        status, body, raw = await providers.openrouter_post(payload, timeout=timeout)
+    except asyncio.TimeoutError:
         return None, "image/png", "", "Error: Image request timed out."
     except Exception as e:
         return None, "image/png", "", f"Error: {str(e)[:200]}"
 
-    body: Dict[str, Any] = {}
-    try:
-        body = response.json()
-    except ValueError:
-        body = {}
-
-    if response.status_code != 200:
-        err_obj = body.get("error") if isinstance(body, dict) else {}
-        detail = ""
-        if isinstance(err_obj, dict):
-            detail = str(err_obj.get("message", "") or "").strip()
-        if not detail:
-            detail = (response.text or "")[:220]
-        return None, "image/png", "", f"Error: OpenRouter ({response.status_code}): {detail[:220]}"
+    if status != 200:
+        return None, "image/png", "", f"Error: {parse_openrouter_error(status, body, raw, model_name)}"
 
     choices = body.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
@@ -282,17 +260,7 @@ async def generate_openrouter_image(
     if not isinstance(msg, dict):
         return None, "image/png", "", "Error: Invalid assistant message."
 
-    text_out = ""
-    content = msg.get("content", "")
-    if isinstance(content, list):
-        parts = [
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        text_out = "".join(parts).strip()
-    elif content is not None:
-        text_out = str(content).strip()
+    text_out = providers.message_text(msg)
 
     blobs = _extract_images_from_message(msg)
     if not blobs:

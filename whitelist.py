@@ -53,11 +53,6 @@ def is_admin(user_id):
 def has_himas_permission(user_id):
     return get_user_permission(user_id) in ("admin", "himas")
 
-def add_user_to_whitelist(user_id, permission):
-    """Add user to whitelist. permission: 1=user, 2=admin. For himas set_user_role."""
-    role = "admin" if permission == 2 else "user"
-    return set_user_role(user_id, role)
-
 def set_user_role(user_id, role: str):
     """Set user's role. role: 'admin', 'himas', or 'user'. Removes from other roles first."""
     user_id = int(user_id)
@@ -74,20 +69,3 @@ def set_user_role(user_id, role: str):
     whitelist.setdefault(role, []).append(user_id)
     save_whitelist(whitelist)
     return True
-
-def remove_user_from_whitelist(user_id):
-    """Remove user from whitelist (all levels)."""
-    user_id = int(user_id)
-    if user_id == PERMANENT_ADMIN:
-        return False
-    whitelist = load_whitelist()
-    changed = False
-    for key in ("admin", "himas", "user"):
-        lst = whitelist.get(key, [])
-        if user_id in lst:
-            lst.remove(user_id)
-            whitelist[key] = lst
-            changed = True
-    if changed:
-        save_whitelist(whitelist)
-    return changed

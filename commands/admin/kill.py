@@ -1,13 +1,12 @@
 import asyncio
 import discord
-from whitelist import is_admin
+from commands.shared import require_admin
 
 
 def register(client: discord.Client):
     @client.tree.command(name="kill", description="Kill the bot")
     async def kill(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         await interaction.response.send_message("💀 Shutting down bot...")
 
@@ -15,4 +14,5 @@ def register(client: discord.Client):
             await asyncio.sleep(1.5)
             await client.close()
 
-        asyncio.create_task(_delayed_exit())
+        # Keep a reference so the task can't be garbage-collected before it runs.
+        client._kill_task = asyncio.create_task(_delayed_exit())

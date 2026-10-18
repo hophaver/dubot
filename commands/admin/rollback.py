@@ -1,19 +1,19 @@
 import discord
 
 from commands.admin.update_shared import build_update_action_view, get_current_commit, run_git, short_sha
+from commands.shared import require_admin
 from utils.update_state import update_state_manager
-from whitelist import is_admin
 
 
-def _working_tree_dirty() -> bool:
-    status = run_git(["status", "--porcelain"])
+async def _working_tree_dirty() -> bool:
+    status = await run_git(["status", "--porcelain"])
     if status.returncode != 0:
         return False
     return bool((status.stdout or "").strip())
 
 
-def _commit_exists(commit_sha: str) -> bool:
-    check = run_git(["cat-file", "-e", f"{commit_sha}^{{commit}}"])
+async def _commit_exists(commit_sha: str) -> bool:
+    check = await run_git(["cat-file", "-e", f"{commit_sha}^{{commit}}"])
     return check.returncode == 0
 
 
@@ -23,8 +23,7 @@ def register(client: discord.Client):
         description="Rollback bot code to last safe/working git version",
     )
     async def rollback(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -37,28 +36,28 @@ def register(client: discord.Client):
                 )
                 return
 
-            if not _commit_exists(target_commit):
+            if not await _commit_exists(target_commit):
                 await interaction.followup.send(
                     f"❌ Stored rollback commit `{target_commit}` is not available in this git repo.",
                     ephemeral=True,
                 )
                 return
 
-            if _working_tree_dirty():
+            if await _working_tree_dirty():
                 await interaction.followup.send(
                     "❌ Rollback aborted: working tree has local changes. Commit/stash them first.",
                     ephemeral=True,
                 )
                 return
 
-            before = get_current_commit()
-            result = run_git(["reset", "--hard", target_commit])
+            before = await get_current_commit()
+            result = await run_git(["reset", "--hard", target_commit])
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "unknown git error")[:400]
                 await interaction.followup.send(f"❌ Rollback failed:\n```{err}```", ephemeral=True)
                 return
 
-            after = get_current_commit()
+            after = await get_current_commit()
             update_state_manager.record_rollback_success(after)
             view = build_update_action_view()
 

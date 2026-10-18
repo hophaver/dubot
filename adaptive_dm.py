@@ -654,7 +654,7 @@ class AdaptiveDmManager:
         low = core.lower()
         if "user-specific context (auto" not in low:
             return False, "missing_auto_header", ""
-        core = self.strip_default_auto_tail_lines(core)
+        core = AdaptiveDmManager.strip_default_auto_tail_lines(core)
         return True, "", core
 
     def _refresh_auto_in_context_override(self, user_id: int) -> None:

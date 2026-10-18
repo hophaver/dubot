@@ -1,19 +1,22 @@
 """Check, start, and stop Ollama server (used by main startup and /ollama-on, /ollama-off)."""
-import sys
+import asyncio
 import subprocess
+import sys
 import urllib.request
 from typing import Tuple
 
 
-def _get_base_url() -> str:
+def base_url() -> str:
+    """Single source of truth for the Ollama API base URL."""
     from integrations import OLLAMA_URL
+
     return (OLLAMA_URL or "http://localhost:11434").rstrip("/")
 
 
 def check_ollama_running() -> bool:
     """Return True if Ollama API responds."""
     try:
-        urllib.request.urlopen(f"{_get_base_url()}/api/tags", timeout=2)
+        urllib.request.urlopen(f"{base_url()}/api/tags", timeout=2)
         return True
     except Exception:
         return False
@@ -56,3 +59,15 @@ def stop_ollama() -> Tuple[bool, str]:
         return True, "Ollama stopped."
     except Exception as e:
         return False, str(e)[:200]
+
+
+async def start_ollama_async() -> Tuple[bool, str]:
+    return await asyncio.to_thread(start_ollama)
+
+
+async def stop_ollama_async() -> Tuple[bool, str]:
+    return await asyncio.to_thread(stop_ollama)
+
+
+async def check_ollama_running_async() -> bool:
+    return await asyncio.to_thread(check_ollama_running)

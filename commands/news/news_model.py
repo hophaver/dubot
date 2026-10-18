@@ -4,8 +4,8 @@ from typing import List, Optional, Tuple
 
 import discord
 from discord import app_commands
-from discord.ui import Button, Select, View
-from whitelist import is_admin
+from discord.ui import Button, Select
+from commands.shared import OwnerOnlyView, require_admin
 from models import model_manager
 from services.news_service import set_news_model, get_news_model, get_news_recent_cloud_models
 
@@ -34,7 +34,7 @@ def _news_model_embed(
     return embed
 
 
-class NewsModelSelectView(View):
+class NewsModelSelectView(OwnerOnlyView):
     def __init__(
         self,
         user_id: int,
@@ -44,7 +44,7 @@ class NewsModelSelectView(View):
         cloud_models: List[str],
         timeout: float = 120,
     ):
-        super().__init__(timeout=timeout)
+        super().__init__(user_id, timeout=timeout)
         self.user_id = user_id
         self.current_provider = current_provider
         self.current_model = current_model
@@ -111,9 +111,6 @@ class NewsModelSelectView(View):
         await interaction.response.edit_message(embed=self._current_embed(), view=self)
 
     async def _on_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         selected_value = interaction.data.get("values", [None])[0]
         if not selected_value:
             await interaction.response.defer()
@@ -130,25 +127,16 @@ class NewsModelSelectView(View):
         await self._refresh_message(interaction)
 
     async def _on_prev(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         if self.page > 0:
             self.page -= 1
         await self._refresh_message(interaction)
 
     async def _on_next(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         if self.page < self._total_pages() - 1:
             self.page += 1
         await self._refresh_message(interaction)
 
     async def _on_confirm(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Only the user who ran the command can use this.", ephemeral=True)
-            return
         target_provider, target_model = self.selected or (self.current_provider, self.current_model or "")
         if not target_model:
             await interaction.response.send_message("No model selected.", ephemeral=True)
@@ -183,8 +171,7 @@ def register(client: discord.Client):
         provider: Optional[app_commands.Choice[str]] = None,
         model_name: Optional[str] = None,
     ):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
 
         if provider:

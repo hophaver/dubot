@@ -1,6 +1,4 @@
 import discord
-import subprocess
-import sys
 import os
 import io
 import mimetypes
@@ -18,22 +16,18 @@ from conversations import (
     is_news_style_dm_bot_text,
     is_news_style_embed_title,
 )
-from services.reminder_service import reminder_manager
 from models import model_manager
 from utils.llm_service import (
     ask_llm,
     plan_command_from_text,
     analyze_file,
     compare_files,
-    build_adaptive_command_schema,
     compact_dm_history_for_channel,
-    schedule_dm_adaptive_background_tasks,
     _strip_leaked_image_placeholders,
     merge_adaptive_manual_guidance_into_profile,
 )
-from commands.translate.translate import do_translate
-from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_file_pipeline
-from utils.dm_image_flow_temp import FINAL_NAME, read_text, remove_session_dir
+from utils.llm.translate import do_translate
+from utils.adaptive_dm_image_pipeline import run_adaptive_dm_image_pipeline
 from utils.ha_integration import ask_home_assistant
 from utils import home_log
 from utils import reliability_telemetry
@@ -375,61 +369,56 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
         await _send_chat_output(message, "Say what to generate (e.g. **imagine** a red panda in a spacesuit), or use **`/imagine`**.")
         return True
 
-    session_dir = None
     try:
-        try:
-            session_dir, img_bytes, mime, err = await run_adaptive_dm_image_file_pipeline(
-                uid,
-                message.channel.id,
-                str(message.author.name),
-                idea,
-                model_name,
-            )
-            if err:
-                await _send_chat_output(message, f"❌ {err}")
-                return True
-            if not img_bytes:
-                await _send_chat_output(
-                    message,
-                    "❌ No image came back from the model. Try another model or a clearer prompt.",
-                )
-                return True
-
-            final_path = session_dir / FINAL_NAME
-            content = _strip_leaked_image_placeholders((await read_text(final_path)).strip())
-            if not content:
-                content = "Here’s the image."
-            if len(content) > 1900:
-                content = content[:1890].rstrip() + "…"
-
-            ext = _ext_for_generated_image_mime(mime)
-            # Build a fresh discord.File per attempt: a retried send would otherwise reuse a consumed stream.
-            sent = await _send_with_retry(
-                lambda: _send_chat_output(
-                    message, content=content, file=discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
-                )
-            )
-            try:
-                cid = message.channel.id
-                conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
-                conversation_manager.add_message(cid, "assistant", content)
-            except Exception:
-                pass
-            conversation_manager.set_last_bot_message(message.channel.id, sent.id)
-            conversation_manager.save()
-            _schedule_adaptive_post_reply_calibration(message, clean_content)
+        final_text, img_bytes, mime, err = await run_adaptive_dm_image_pipeline(
+            uid,
+            message.channel.id,
+            str(message.author.name),
+            idea,
+            model_name,
+        )
+        if err:
+            await _send_chat_output(message, f"❌ {err}")
             return True
-        except Exception as exc:
-            await home_log.send_to_home(
-                f"🔴 adaptive_dm_image_pipeline failed user={uid} ch={message.channel.id}: {str(exc)[:400]}"
-            )
+        if not img_bytes:
             await _send_chat_output(
                 message,
-                "⚠️ Something went wrong while generating that image. Please try again.",
+                "❌ No image came back from the model. Try another model or a clearer prompt.",
             )
             return True
-    finally:
-        await remove_session_dir(session_dir)
+
+        content = _strip_leaked_image_placeholders((final_text or "").strip())
+        if not content:
+            content = "Here’s the image."
+        if len(content) > 1900:
+            content = content[:1890].rstrip() + "…"
+
+        ext = _ext_for_generated_image_mime(mime)
+        # Build a fresh discord.File per attempt: a retried send would otherwise reuse a consumed stream.
+        sent = await _send_with_retry(
+            lambda: _send_chat_output(
+                message, content=content, file=discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
+            )
+        )
+        try:
+            cid = message.channel.id
+            conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
+            conversation_manager.add_message(cid, "assistant", content)
+        except Exception:
+            pass
+        conversation_manager.set_last_bot_message(message.channel.id, sent.id)
+        conversation_manager.save()
+        _schedule_adaptive_post_reply_calibration(message, clean_content)
+        return True
+    except Exception as exc:
+        await home_log.send_to_home(
+            f"🔴 adaptive_dm_image_pipeline failed user={uid} ch={message.channel.id}: {str(exc)[:400]}"
+        )
+        await _send_chat_output(
+            message,
+            "⚠️ Something went wrong while generating that image. Please try again.",
+        )
+        return True
 
 
 def _looks_like_command_request(text: str) -> bool:
@@ -628,7 +617,14 @@ def _extract_no_confirm_preference(text: str):
     return None
 
 
+_command_schema_cache: Optional[List[Dict[str, Any]]] = None
+
+
 def _build_command_schema(client: discord.Client):
+    """Planner schema of every slash command (the tree is fixed after startup, so it is built once)."""
+    global _command_schema_cache
+    if _command_schema_cache is not None:
+        return _command_schema_cache
     schema = []
     for cmd in client.tree.get_commands():
         params = []
@@ -642,6 +638,7 @@ def _build_command_schema(client: discord.Client):
                 }
             )
         schema.append({"name": cmd.name, "description": cmd.description or "", "parameters": params})
+    _command_schema_cache = schema
     return schema
 
 
@@ -1446,7 +1443,7 @@ async def _handle_adaptive_command_flow(client: discord.Client, message: discord
         return False
     plan = _quick_command_plan_from_text(clean_content)
     if not plan:
-        schema = build_adaptive_command_schema(_build_command_schema(client))
+        schema = _build_command_schema(client)
         plan = await plan_command_from_text(user_id, clean_content, schema)
     if not plan.get("should_execute"):
         return False
@@ -1513,8 +1510,6 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
         ch = anchor.channel
         user_id = int(ctx["user_id"])
         username = str(ctx["username"])
-        is_reply_to_bot = bool(ctx["is_reply_to_bot"])
-        dm_session_continue = bool(ctx["dm_session_continue"])
         is_continuation = bool(ctx["is_continuation"])
         is_wake_word = bool(ctx["is_wake_word"])
         is_mentioned = bool(ctx["is_mentioned"])
@@ -1906,7 +1901,6 @@ async def process_wakeword_download(client, message, link_or_empty):
     """Download media from link or last message with media, send to chat. Files not stored."""
     from config import get_download_limit_mb
     from commands.download._helpers import extract_urls, download_url_sync, DOWNLOAD_EXTENSIONS
-    import os
     channel = message.channel
     max_bytes = get_download_limit_mb() * 1024 * 1024
     target_url = None
@@ -1987,19 +1981,20 @@ async def process_wakeword_download(client, message, link_or_empty):
 async def process_wakeword_admin_command(client, message, command, content, permission):
     """Process admin commands triggered by wake word"""
     if command == "restart":
+        from commands.admin.update_shared import restart_bot
+
         await message.reply("🔄 Restarting...")
-        subprocess.run(['sudo', 'systemctl', 'restart', 'dubot.service'])
+        await restart_bot(client)
         return True
     elif command == "kill":
         await message.reply("👋 Bye...")
 
         async def _delayed_exit():
             await asyncio.sleep(1.5)
-            conversation_manager.save()
-            reminder_manager.stop()
-            sys.exit(0)
+            await client.close()
 
-        asyncio.create_task(_delayed_exit())
+        # Not via dm_background: close() waits on those tasks, which would deadlock here.
+        client._kill_task = asyncio.create_task(_delayed_exit())
         return True
     elif command == "himas" and permission in ["admin", "himas"]:
         if not content:

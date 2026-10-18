@@ -1,5 +1,4 @@
 import discord
-from discord import app_commands
 from whitelist import get_user_permission
 from config import set_bot_awake
 

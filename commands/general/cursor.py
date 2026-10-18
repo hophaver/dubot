@@ -1,9 +1,10 @@
 """Cursor team spend command (requires Cursor Admin API key)."""
 
+import asyncio
 from datetime import datetime, timezone
 
 import discord
-from whitelist import get_user_permission
+from commands.shared import require_user
 from utils.cursor_api import fetch_spend_summary
 
 
@@ -18,12 +19,11 @@ def register(client):
         description="Check Cursor team spend for the current billing cycle",
     )
     async def cursor(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
 
         await interaction.response.defer(ephemeral=True)
-        data, err = fetch_spend_summary()
+        data, err = await asyncio.to_thread(fetch_spend_summary)
         if err:
             await interaction.followup.send(err, ephemeral=True)
             return

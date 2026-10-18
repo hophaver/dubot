@@ -11,10 +11,9 @@ from integrations import (
     HIMAS_ASSIST_AGENT_ID,
     HIMAS_PARSE_PROVIDER,
     HIMAS_PARSE_MODEL,
-    OLLAMA_URL,
-    OPENROUTER_API_KEY,
 )
 from utils import home_log
+from utils.http import aio_session
 from utils.json_store import CachedJsonFile
 from utils.paths import data_path
 
@@ -92,20 +91,11 @@ class HomeAssistantManager:
         }
         self.entities_cache = {}
         self.last_update = 0
-        self.session = None
         self._himas_llm_label = ""
-    
+
     async def get_session(self):
-        """Get or create aiohttp session"""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
-        return self.session
-    
-    async def close(self):
-        """Close the aiohttp session"""
-        if self.session:
-            await self.session.close()
-            self.session = None
+        """Shared process-wide aiohttp session (closed by utils.http.close() on shutdown)."""
+        return aio_session()
 
     def _resolve_himas_parse_model(self, user_id: int) -> Tuple[str, str]:
         """Return (backend, model) for LLM JSON parsing fallback: ollama or openrouter."""
@@ -181,54 +171,6 @@ class HomeAssistantManager:
             speech = "OK."
         return {"message": speech[:4096]}
 
-    async def _openrouter_parse_json(self, system_prompt: str, user_tail: str, model_name: str) -> str:
-        if not OPENROUTER_API_KEY:
-            return ""
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_tail},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 400,
-        }
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        try:
-            session = await self.get_session()
-            async with session.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as response:
-                body = await response.json(content_type=None)
-                if response.status != 200:
-                    err = body.get("error", {}) if isinstance(body, dict) else {}
-                    msg = err.get("message", str(body)[:200]) if isinstance(err, dict) else str(body)[:200]
-                    home_log.log_sync(f"OpenRouter himas parse HTTP {response.status}: {msg}")
-                    return ""
-                choices = body.get("choices") or []
-                if not choices:
-                    return ""
-                message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-                content = message.get("content", "")
-                if isinstance(content, list):
-                    text_parts = [
-                        part.get("text", "")
-                        for part in content
-                        if isinstance(part, dict) and part.get("type") == "text"
-                    ]
-                    content = "".join(text_parts)
-                return str(content).strip()
-        except Exception as e:
-            home_log.log_sync(f"OpenRouter himas parse error: {e}")
-            return ""
-    
     def _get_entity_allowlist(self) -> Optional[List[str]]:
         """Return list of allowed entity_ids from data/ha_entities_allowlist.json, or None if not used."""
         data = _allowlist_store.get()
@@ -480,26 +422,17 @@ User command: "{user_command}"
 """
             user_tail = f'Convert to HA command: {user_command}'
 
-            response_text = ""
-            if backend == "openrouter":
-                response_text = await self._openrouter_parse_json(system_prompt, user_tail, model_name)
-            else:
-                base_url = (OLLAMA_URL or "http://localhost:11434").rstrip("/")
-                prompt = f"### System:\n{system_prompt}\n\n### User:\n{user_tail}\n\n### Assistant:\n"
-                session = await self.get_session()
-                async with session.post(
-                    f"{base_url}/api/generate",
-                    json={
-                        "model": model_name,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 300}
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        response_text = result.get("response", "").strip()
+            from utils.llm import providers
+
+            response_text = await providers.chat(
+                "cloud" if backend == "openrouter" else "local",
+                model_name,
+                [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_tail}],
+                request_options={"temperature": 0.1, "num_predict": 400},
+            )
+            if not response_text or providers.is_error_reply(response_text):
+                home_log.log_sync(f"HA LLM parse failed ({self._himas_llm_label}): {response_text}")
+                response_text = ""
 
             if response_text:
                 json_match = re.search(r'\{.*\}', response_text, re.DOTALL)

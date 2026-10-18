@@ -1,11 +1,18 @@
+import asyncio
 import json
-import requests
+import time
+import aiohttp
 import discord
 from discord import app_commands
-from whitelist import is_admin
-from integrations import OLLAMA_URL
+from commands.shared import require_admin
 from models import model_manager
+from utils.http import aio_session
+from utils.ollama import base_url as ollama_base_url
 from utils.llm_service import validate_and_set_model, validate_and_set_image_generation_model
+
+
+PULL_TIMEOUT_SECONDS = 1800
+PROGRESS_EDIT_INTERVAL = 2.0  # seconds between progress edits (Discord rate limits)
 
 
 def _status_line(data: dict) -> str:
@@ -38,8 +45,7 @@ def register(client: discord.Client):
         type: app_commands.Choice[str],
         model_name: str,
     ):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_admin(interaction):
             return
         await interaction.response.defer()
         try:
@@ -71,49 +77,43 @@ def register(client: discord.Client):
                     await interaction.edit_original_response(content=f"❌ {msg}")
                 return
 
-            # type.value == "local"
-            url = f"{OLLAMA_URL}/api/pull"
-            response = requests.post(url, json={"name": model}, stream=True, timeout=600)
-            if response.status_code != 200:
-                await interaction.followup.send(f"❌ Pull failed: HTTP {response.status_code}")
-                return
+            # type.value == "local": stream Ollama's pull progress without blocking the loop.
             lines = [f"⏳ **Pulling `{model}`**\n"]
             await interaction.edit_original_response(content=lines[0])
-            last_update = 0
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
+            last_edit = time.monotonic()
+            timeout = aiohttp.ClientTimeout(total=PULL_TIMEOUT_SECONDS)
+            async with aio_session().post(f"{ollama_base_url()}/api/pull", json={"name": model}, timeout=timeout) as response:
+                if response.status != 200:
+                    await interaction.edit_original_response(content=f"❌ Pull failed: HTTP {response.status}")
+                    return
+                async for raw in response.content:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
                     if "status" in data:
                         lines.append(_status_line(data))
                     if "error" in data:
                         lines.append(f"❌ {data['error']}")
                         break
-                except json.JSONDecodeError:
-                    pass
-                if len(lines) >= 2 and (len(lines) - last_update) >= 3:
-                    msg = "\n".join(lines[-15:])
-                    if len(msg) > 1900:
-                        msg = msg[-1900:]
-                    try:
-                        await interaction.edit_original_response(content=msg)
-                    except discord.NotFound:
-                        pass
-                    last_update = len(lines)
-            final = "\n".join(lines[-20:])
-            if len(final) > 1900:
-                final = final[-1900:]
+                    if time.monotonic() - last_edit >= PROGRESS_EDIT_INTERVAL:
+                        try:
+                            await interaction.edit_original_response(content="\n".join(lines[-15:])[-1900:])
+                        except discord.NotFound:
+                            pass
+                        last_edit = time.monotonic()
+            final = "\n".join(lines[-20:])[-1900:]
             from utils.llm_service import clear_vision_model_cache
             clear_vision_model_cache()
-            model_manager.list_all_models(refresh_local=True)
+            await model_manager.refresh_async()
             if "error" in final.lower():
                 await interaction.edit_original_response(content=final)
             else:
                 await interaction.edit_original_response(
                     content=final.rstrip() + "\n\n✅ **Done.** Use **/llm-settings** to pick this model for chat or another function."
                 )
-        except requests.exceptions.Timeout:
+        except asyncio.TimeoutError:
             await interaction.followup.send("❌ Pull timed out. Try again or check Ollama.")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)[:200]}")

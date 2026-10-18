@@ -1,30 +1,16 @@
-import sys
 import os
-
-os.environ["DUBOT_RUNTIME"] = "discord"
-# Utility flows are invoked from adaptive DMs without slash commands; keep handlers for internal use.
-os.environ.setdefault("DUBOT_HIDE_UTILITY_SLASH", "1")
-
-try:
-    from utils.bootstrap_deps import ensure_discord_dependencies, ensure_news_dependencies
-    ensure_discord_dependencies()
-    ensure_news_dependencies()
-except Exception as e:
-    print(f"⚠️ bootstrap_deps failed (non-fatal): {e}", flush=True)
-
+import sys
 import asyncio
-try:
-    import discord
-except ModuleNotFoundError as e:
-    print("❌ Missing dependency: discord.py is not installed.", flush=True)
-    print("Try:", flush=True)
-    print(f"  {sys.executable} -m pip install -r requirements.txt", flush=True)
-    print("or:", flush=True)
-    print(f"  {sys.executable} -m pip install discord.py>=2.3.0", flush=True)
-    sys.exit(1)
+import random
 import signal
 import time
-import random
+
+try:
+    import discord
+except ModuleNotFoundError:
+    print("❌ Missing dependency: discord.py is not installed.", flush=True)
+    print(f"  Run: {sys.executable} -m pip install -r requirements.txt", flush=True)
+    sys.exit(1)
 from discord import app_commands
 from integrations import DISCORD_BOT_TOKEN
 from config import (
@@ -37,19 +23,17 @@ from config import (
 )
 from whitelist import get_user_permission
 from conversations import conversation_manager
+from models import model_manager
 from services.reminder_service import reminder_manager
 from services.news_service import news_manager
 from platforms.discord_chat import process_discord_message, handle_dm_user_typing
-from commands.shitpost import handle_shitpost
-from utils.llm_service import initialize_command_database
-from utils import home_log
-from utils import reliability_telemetry
-from commands.shared import send_long_to_channel, bot_embed_thumbnail_url, sanitize_discord_bot_content
+from commands.shitpost.trigger import handle_shitpost
+from utils.llm.command_db import command_db
+from utils import dm_background, home_log, http, reliability_telemetry
+from utils.paths import root_path
+from commands.shared import send_long_to_channel, sanitize_discord_bot_content
 from adaptive_dm import adaptive_dm_manager, is_adaptive_context_export_filename
 from services import notes_service
-
-# Initialize command database
-initialize_command_database()
 
 # Initialize intents and client
 intents = discord.Intents.default()
@@ -58,173 +42,101 @@ intents.messages = True
 intents.reactions = True
 intents.typing = True
 
+_SLEEP_REPLY = "😴 I am sleeping. Use `/wake` to bring me online."
+_BACKGROUND_WAIT_ON_SHUTDOWN = 4.0  # stop.sh sends SIGKILL after ~5s
+
+
+async def _ensure_ollama_running() -> None:
+    """If config says start_ollama_on_startup and Ollama is not responding, start ollama serve in background."""
+    if not get_config().get("start_ollama_on_startup"):
+        return
+    from utils.ollama import check_ollama_running_async, start_ollama_async
+
+    if not await check_ollama_running_async():
+        ok, msg = await start_ollama_async()
+        print(("✅ " if ok else "⚠️ ") + msg, flush=True)
+
+
+class BotCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """When sleeping, only allow /wake."""
+        if is_bot_awake() or getattr(interaction.command, "name", "") == "wake":
+            return True
+        if interaction.response.is_done():
+            await interaction.followup.send(_SLEEP_REPLY, ephemeral=True)
+        else:
+            await interaction.response.send_message(_SLEEP_REPLY, ephemeral=True)
+        return False
+
+
 class BotClient(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
+        self.tree = BotCommandTree(self)
         self.start_time = time.time()
-        self.commands_registered = False
+        self._startup_errors: list = []
+        self._ready_once = False
 
-    async def close(self):
-        try:
-            from utils import dm_background
-
-            await dm_background.wait_all(timeout=120.0)
-        except Exception:
-            pass
-        try:
-            from services.clone_service import revert_if_active
-            await revert_if_active(self)
-        except Exception:
-            pass
+    async def persist_state(self) -> None:
+        """Flush everything that lives in memory to disk (shutdown, restart)."""
         try:
             from adaptive_dm import export_adaptive_to_personas
-            from personas import persona_manager as _persona_manager
+            from personas import persona_manager
 
-            export_adaptive_to_personas(_persona_manager)
-        except Exception:
-            pass
+            export_adaptive_to_personas(persona_manager)
+        except Exception as e:
+            print(f"⚠️ Adaptive export failed: {e}", flush=True)
+        adaptive_dm_manager.flush()
         conversation_manager.save()
-        reminder_manager.stop()
-        news_manager.stop()
-        try:
-            from utils.dm_image_flow_temp import clear_all_temp_sessions_sync
+        reminder_manager.save()
 
-            clear_all_temp_sessions_sync()
-        except Exception:
-            pass
+    async def close(self):
+        if self.is_closed() or getattr(self, "_closing", False):
+            return
+        self._closing = True
+        await self.persist_state()
+        await dm_background.wait_all(timeout=_BACKGROUND_WAIT_ON_SHUTDOWN)
+        try:
+            from services.clone_service import revert_if_active
+
+            await revert_if_active(self)
+        except Exception as e:
+            print(f"⚠️ Clone revert failed: {e}", flush=True)
+        await reminder_manager.stop()
+        await news_manager.stop()
+        # Background summaries may have updated state while we waited.
+        await self.persist_state()
+        await http.close()
         await super().close()
 
     async def setup_hook(self):
-        """Setup hook to sync commands"""
-        # Only register commands if not already registered
-        if not self.commands_registered:
-            await self.register_all_commands()
-            self.commands_registered = True
-            
-        # Set reminder service client
-        reminder_manager.set_client(self)
+        await self.register_all_commands()
+        from commands.admin.update_shared import build_update_action_view
 
-        # Set news service client
-        news_manager.set_client(self)
-
+        self.add_view(build_update_action_view())  # update/rollback buttons survive restarts
+        try:
+            self.loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(self.close()))
+        except (NotImplementedError, RuntimeError):
+            pass  # Windows
+        await _ensure_ollama_running()
+        await model_manager.refresh_async()
+        reminder_manager.start(self)
+        news_manager.start(self)
         try:
             from adaptive_dm import export_adaptive_to_personas
-            from personas import persona_manager as _persona_manager
+            from personas import persona_manager
 
-            export_adaptive_to_personas(_persona_manager)
-        except Exception:
-            pass
+            export_adaptive_to_personas(persona_manager)
+        except Exception as e:
+            print(f"⚠️ Adaptive export failed: {e}", flush=True)
 
     async def register_all_commands(self):
-        """Register ALL commands without duplicates"""
-        # Clear existing commands
-        self.tree.clear_commands(guild=None)
-        
-        errors = []
-        # 1. General Commands
-        try:
-            from commands.general import GeneralCommands
-            GeneralCommands(self).register()
-        except Exception as e:
-            errors.append(f"general: {e}")
-        # 2. File Analysis
-        try:
-            from commands.file import FileCommands
-            FileCommands(self).register()
-        except Exception as e:
-            errors.append(f"file: {e}")
-        # 3. Chat
-        try:
-            from commands.chat import ChatCommands
-            ChatCommands(self).register()
-        except Exception as e:
-            errors.append(f"chat: {e}")
-        # 4. Reminder
-        try:
-            from commands.reminder import ReminderCommands
-            ReminderCommands(self).register()
-        except Exception as e:
-            errors.append(f"reminder: {e}")
-        # 4b. Calendar (.ics batch)
-        try:
-            from commands.cal import CalCommands
-            CalCommands(self).register()
-        except Exception as e:
-            errors.append(f"cal: {e}")
-        # 5. Persona
-        try:
-            from commands.persona import PersonaCommands
-            PersonaCommands(self).register()
-        except Exception as e:
-            errors.append(f"persona: {e}")
-        # 6. Model
-        try:
-            from commands.model import ModelCommands
-            ModelCommands(self).register()
-        except Exception as e:
-            errors.append(f"model: {e}")
-        # 6b. Download
-        try:
-            from commands.download import DownloadCommands
-            DownloadCommands(self).register()
-        except Exception as e:
-            errors.append(f"download: {e}")
-        # 6c. Translate
-        try:
-            from commands.translate import TranslateCommands
-            TranslateCommands(self).register()
-        except Exception as e:
-            errors.append(f"translate: {e}")
-        # 6d. Scripts
-        try:
-            from commands.scripts import ScriptsCommands
-            ScriptsCommands(self).register()
-        except Exception as e:
-            errors.append(f"scripts: {e}")
-        # 7. Admin
-        try:
-            from commands.admin import AdminCommands
-            AdminCommands(self).register()
-        except Exception as e:
-            errors.append(f"admin: {e}")
-        # 7b. Shitpost
-        try:
-            from commands.shitpost import ShitpostCommands
-            ShitpostCommands(self).register()
-        except Exception as e:
-            errors.append(f"shitpost: {e}")
-        # 7c. Ollama
-        try:
-            from commands.ollama import OllamaCommands
-            OllamaCommands(self).register()
-        except Exception as e:
-            errors.append(f"ollama: {e}")
-        # 8. Home Assistant
-        try:
-            from commands.ha import HACommands
-            HACommands(self).register()
-        except Exception as e:
-            errors.append(f"ha: {e}")
-        # 9. Help
-        try:
-            from commands.help import HelpCommands
-            HelpCommands(self).register()
-        except Exception as e:
-            errors.append(f"help: {e}")
-        # 10. News
-        try:
-            from commands.news import NewsCommands
-            NewsCommands(self).register()
-        except Exception as e:
-            errors.append(f"news: {e}")
-        # 11. Notes
-        try:
-            from commands.notes import NotesCommands
-            NotesCommands(self).register()
-        except Exception as e:
-            errors.append(f"notes: {e}")
+        from commands import register_all
 
+        self.tree.clear_commands(guild=None)
+        errors, catalogue = register_all(self)
+        command_db.populate(catalogue)
+        print(f"✅ Registered {len(catalogue)} commands", flush=True)
         try:
             await self.tree.sync()
         except Exception as e:
@@ -232,20 +144,8 @@ class BotClient(discord.Client):
             print(f"⚠️ tree.sync() failed: {e}", flush=True)
         self._startup_errors = errors
 
+
 client = BotClient()
-
-
-@client.tree.interaction_check
-async def _awake_interaction_gate(interaction: discord.Interaction) -> bool:
-    """When sleeping, only allow /wake."""
-    command_name = getattr(interaction.command, "name", "")
-    if is_bot_awake() or command_name == "wake":
-        return True
-    if interaction.response.is_done():
-        await interaction.followup.send("😴 I am sleeping. Use `/wake` to bring me online.", ephemeral=True)
-    else:
-        await interaction.response.send_message("😴 I am sleeping. Use `/wake` to bring me online.", ephemeral=True)
-    return False
 
 # In-memory counters for auto-conversation per channel: {channel_id: {"count": int, "next": int}}
 _auto_conversation_state = {}
@@ -253,14 +153,16 @@ _auto_conversation_state = {}
 # Event handlers
 @client.event
 async def on_ready():
-    """Called when bot is ready. Run startup checks and send a single embed to home."""
+    """Called when bot is ready (also after every reconnect). Startup work runs only the first time."""
     home_log.set_client(client)
+    status_text = get_config().get("bot_status", "Analyzing files with AI")
+    await client.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=status_text))
+    if client._ready_once:
+        return
+    client._ready_once = True
     from services.clone_service import on_bot_ready_baseline
+
     await on_bot_ready_baseline(client)
-    config = get_config()
-    status_text = config.get("bot_status", "Analyzing files with AI")
-    activity = discord.Activity(type=discord.ActivityType.listening, name=status_text)
-    await client.change_presence(activity=activity)
     notes_service.start_idle_loop(client)
 
     from integrations import refresh_environment_location_async
@@ -284,23 +186,20 @@ async def on_typing(channel, user, when):
 @client.event
 async def on_message(message):
     """Handle incoming messages with file attachments"""
-    if message.author == client.user:
+    # Ignore ourselves and other bots for everything below
+    if message.author.bot:
         return
 
     from services.clone_service import mirror_message_if_clone
     if await mirror_message_if_clone(client, message):
         return
 
-    # Ignore other bots for auto-conversation and permissions
-    if message.author.bot:
-        return
-
     # Note taker counts every human message in tracked channels (not just whitelisted users)
     if message.guild:
         try:
             notes_service.on_guild_message(client, message)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ notes on_guild_message failed: {e}", flush=True)
 
     # Get permission level
     permission = get_user_permission(message.author.id)
@@ -554,86 +453,30 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             pass
         await home_log.send_to_home(f"🔴 **App command** error: {str(error)[:500]}")
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    print("\n👋 Received shutdown signal, cleaning up...")
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            import asyncio as _asyncio
-            from utils import dm_background as _dm_bg
-
-            _asyncio.run(_dm_bg.wait_all(timeout=60.0))
-        except Exception:
-            pass
-        conversation_manager.save()
-        reminder_manager.stop()
-        news_manager.stop()
-        sys.exit(0)
-        return
-    if not client.is_closed():
-        loop.create_task(client.close())
-    else:
-        conversation_manager.save()
-        reminder_manager.stop()
-        news_manager.stop()
-        sys.exit(0)
-
-def _ensure_ollama_running():
-    """If config says start_ollama_on_startup and Ollama is not responding, start ollama serve in background."""
-    try:
-        if not get_config().get("start_ollama_on_startup"):
-            return
-        from utils.ollama import check_ollama_running, start_ollama
-        if check_ollama_running():
-            return
-        start_ollama()
-    except Exception:
-        pass
-
-
 if __name__ == "__main__":
     print(f"[startup] Python {sys.version}", flush=True)
-    print(f"[startup] cwd = {os.getcwd()}", flush=True)
     print(f"[startup] discord.py {discord.__version__}", flush=True)
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    for d in ("data", "data/files", "assets", "web"):
-        os.makedirs(d, exist_ok=True)
+    for d in ("data", "assets", "web"):
+        os.makedirs(root_path(d), exist_ok=True)
 
     try:
         from services.status_server import start_status_server
+
         start_status_server()
     except Exception as e:
         print(f"⚠️ Status server failed: {e}", flush=True)
 
-    _ensure_ollama_running()
-    reminder_manager.start()
-    news_manager.start()
-
     print("[startup] Connecting to Discord...", flush=True)
     try:
+        # client.run handles Ctrl+C by calling close(); SIGTERM is wired in setup_hook.
         client.run(DISCORD_BOT_TOKEN)
-    except KeyboardInterrupt:
-        print("\n👋 Shutting down gracefully...")
-        conversation_manager.save()
-        reminder_manager.stop()
-        news_manager.stop()
-        sys.exit(0)
     except discord.errors.LoginFailure:
-        print("❌ Invalid Discord token. Check your DISCORD_BOT_TOKEN in integrations.py",
-              flush=True)
-        reminder_manager.stop()
-        news_manager.stop()
+        print("❌ Invalid Discord token. Check DISCORD_BOT_TOKEN in .env", flush=True)
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Error starting bot: {e}", flush=True)
         import traceback
+
+        print(f"❌ Error starting bot: {e}", flush=True)
         traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        reminder_manager.stop()
-        news_manager.stop()
         sys.exit(1)

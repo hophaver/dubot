@@ -88,28 +88,6 @@ def _effective_variant(state: Dict[str, Any]) -> Optional[str]:
     return "bot_mirror"
 
 
-def is_clone_active() -> bool:
-    return bool(load_state().get("active"))
-
-
-def get_clone_target_user_id() -> Optional[int]:
-    s = load_state()
-    if not s.get("active") or _effective_variant(s) != "bot_mirror":
-        return None
-    tid = s.get("target_user_id")
-    return int(tid) if tid is not None else None
-
-
-def get_clone_guild_id() -> Optional[int]:
-    s = load_state()
-    gid = s.get("guild_id")
-    return int(gid) if gid is not None else None
-
-
-def should_delete_original() -> bool:
-    return bool(load_state().get("delete_original"))
-
-
 def _nick_norm(n: Optional[str]) -> str:
     return (n or "").strip()
 

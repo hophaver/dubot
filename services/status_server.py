@@ -4,8 +4,10 @@ import json
 import os
 import threading
 
+from utils.paths import root_path
+
 PORT = 3000
-STATUS_JSON_PATH = os.path.join("web", "status.json")
+STATUS_JSON_PATH = root_path("web", "status.json")
 
 
 class StatusHandler(http.server.BaseHTTPRequestHandler):

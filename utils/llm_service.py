@@ -1,14 +1,12 @@
 import re
 import json
 import os
-import asyncio
 import base64
 import mimetypes
 import time
-import requests
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 import integrations
-from integrations import OLLAMA_URL, OPENROUTER_API_KEY, update_system_time_date, get_location_by_ip
+from integrations import update_system_time_date
 from conversations import (
     conversation_manager,
     is_news_style_dm_bot_text,
@@ -18,7 +16,7 @@ from conversations import (
 from personas import persona_manager
 from models import model_manager
 from llm_function_prefs import get_function_persona_name
-from utils.openrouter_image import generate_openrouter_image, probe_openrouter_image_model
+from utils.openrouter_image import probe_openrouter_image_model
 from adaptive_dm import (
     adaptive_dm_manager,
     ADAPTIVE_DM_BASE_PERSONA,
@@ -26,8 +24,8 @@ from adaptive_dm import (
     is_adaptive_context_export_filename,
 )
 from utils import home_log
-from utils import reliability_telemetry
 from utils import dm_background
+from utils.llm import providers
 
 def _get_fallback_chain():
     from utils.model_fallback import get_fallback_chain
@@ -66,325 +64,7 @@ SUPPORTED_EXTENSION_TO_TYPE = {
     for ext in extensions
 }
 
-# Command database for LLM awareness
-class CommandDatabase:
-    def __init__(self):
-        self.commands = {}
-        self.categories = {}
-    
-    def add_command(self, name: str, description: str, category: str = "General"):
-        """Add a command to the database"""
-        self.commands[name] = {
-            "name": name,
-            "description": description,
-            "category": category,
-            "aliases": []
-        }
-        
-        if category not in self.categories:
-            self.categories[category] = []
-        self.categories[category].append(name)
-    
-    def add_alias(self, command_name: str, alias: str):
-        """Add an alias for a command"""
-        if command_name in self.commands:
-            self.commands[command_name]["aliases"].append(alias)
-    
-    def get_command(self, name: str) -> Optional[Dict]:
-        """Get command info by name or alias"""
-        # Direct match
-        if name in self.commands:
-            return self.commands[name]
-        
-        # Alias match
-        for cmd_name, cmd_info in self.commands.items():
-            if name in cmd_info["aliases"]:
-                return cmd_info
-        
-        return None
-    
-    def search_commands(self, search_term: str, limit: int = 5) -> List[str]:
-        """Search for commands by name or description"""
-        results = []
-        search_lower = search_term.lower()
-        
-        for cmd_name, cmd_info in self.commands.items():
-            # Check name
-            if search_lower in cmd_name.lower():
-                results.append((cmd_name, cmd_info, 3))  # Higher weight for name match
-            
-            # Check description
-            elif search_lower in cmd_info["description"].lower():
-                results.append((cmd_name, cmd_info, 1))  # Lower weight for description match
-            
-            # Check aliases
-            elif any(search_lower in alias.lower() for alias in cmd_info["aliases"]):
-                results.append((cmd_name, cmd_info, 2))  # Medium weight for alias match
-        
-        # Sort by weight and limit results
-        results.sort(key=lambda x: x[2], reverse=True)
-        return [r[0] for r in results[:limit]]
-    
-    def get_suggestions(self, user_input: str, limit: int = 3) -> List[Dict]:
-        """Get command suggestions based on user input"""
-        # Try to match commands
-        matched_commands = self.search_commands(user_input, limit=10)
-        
-        if matched_commands:
-            # Calculate similarity
-            suggestions = []
-            for cmd_name in matched_commands:
-                cmd_info = self.commands[cmd_name]
-                suggestions.append({
-                    "name": cmd_name,
-                    "description": cmd_info["description"],
-                    "category": cmd_info["category"]
-                })
-            
-            return suggestions[:limit]
-        
-        return []
-    
-    def get_all_commands_formatted(self) -> str:
-        """Get all commands formatted for LLM context"""
-        formatted = "Available commands (use /help for more info):\n"
-        
-        for category, cmd_names in self.categories.items():
-            formatted += f"\n{category}:\n"
-            for cmd_name in sorted(cmd_names):
-                cmd_info = self.commands[cmd_name]
-                formatted += f"- /{cmd_name}: {cmd_info['description']}\n"
-        
-        return formatted
-
-command_db = CommandDatabase()
-_location_cache = {"value": "Unknown", "city": "Unknown", "country": "Unknown", "ts": 0.0}
-
-
-def sync_location_cache_from_integrations() -> None:
-    """After integrations.get_location_by_ip / refresh, copy globals into the chat LLM cache."""
-    global _location_cache
-    now = time.time()
-    loc = str(getattr(integrations, "LOCATION", None) or "").strip()
-    if loc and loc.lower() != "unknown":
-        _location_cache["value"] = loc
-        _location_cache["city"] = str(getattr(integrations, "CITY", None) or "").strip() or "Unknown"
-        _location_cache["country"] = str(getattr(integrations, "COUNTRY", None) or "").strip() or "Unknown"
-        _location_cache["ts"] = now
-    else:
-        _location_cache = {"value": "Unknown", "city": "Unknown", "country": "Unknown", "ts": 0.0}
-
-
-async def _get_runtime_location_cached() -> Tuple[str, str, str]:
-    """Return cached location; refresh in background only occasionally."""
-    now = time.time()
-    current_location = str(getattr(integrations, "LOCATION", None) or "").strip()
-    current_city = str(getattr(integrations, "CITY", None) or "").strip()
-    current_country = str(getattr(integrations, "COUNTRY", None) or "").strip()
-
-    if current_location and current_location.lower() != "unknown":
-        _location_cache["value"] = current_location
-        _location_cache["city"] = current_city or "Unknown"
-        _location_cache["country"] = current_country or "Unknown"
-        _location_cache["ts"] = now
-        return _location_cache["value"], _location_cache["city"], _location_cache["country"]
-
-    # Avoid blocking every message with network location requests.
-    if now - float(_location_cache.get("ts", 0.0)) < 600:
-        return (
-            str(_location_cache.get("value", "Unknown") or "Unknown"),
-            str(_location_cache.get("city", "Unknown") or "Unknown"),
-            str(_location_cache.get("country", "Unknown") or "Unknown"),
-        )
-
-    try:
-        location, city, country = await asyncio.to_thread(get_location_by_ip)
-        _location_cache["value"] = location or "Unknown"
-        _location_cache["city"] = city or "Unknown"
-        _location_cache["country"] = country or "Unknown"
-        _location_cache["ts"] = now
-    except Exception:
-        _location_cache["ts"] = now
-    return (
-        str(_location_cache.get("value", "Unknown") or "Unknown"),
-        str(_location_cache.get("city", "Unknown") or "Unknown"),
-        str(_location_cache.get("country", "Unknown") or "Unknown"),
-    )
-
-
-def initialize_command_database():
-    command_db.commands.clear()
-    command_db.categories.clear()
-    
-    # General Commands
-    command_db.add_command("chat", "Chat with AI (starts new chat)", "General")
-    command_db.add_command("forget", "Clear chat history (admin only)", "General")
-    command_db.add_command("chat-history", "View or set how many user messages to remember per chat (1–100; set: admin only)", "General")
-    command_db.add_command("dm-history", "DM only: view/set history cutoff for rolling summarization", "General")
-    command_db.add_command("adaptive", "DMs: adaptive assistant on/off", "General")
-    command_db.add_command("adaptive-tune", "DMs: apply queued messages to adaptive profile", "General")
-    command_db.add_command(
-        "adaptive-tune-batch",
-        "DMs: tune adaptive from a message link or .txt corpus (preserves newlines)",
-        "General",
-    )
-    command_db.add_command(
-        "adaptive-status",
-        "DMs: export adaptive context; reply with notes or attach adaptive-dm-context.txt to replace context",
-        "General",
-    )
-    command_db.add_command(
-        "notes",
-        "Server: /notes shows this channel's project notes; /notes channel:#x toggles note-taking there",
-        "General",
-    )
-    command_db.add_command(
-        "adaptive-tune-channel",
-        "Tune adaptive profile from a server channel (same as DMs; your messages only; URLs ignored for tuning)",
-        "General",
-    )
-    command_db.add_command(
-        "imagine",
-        "Generate an image via OpenRouter (model: /llm-settings → Image generation; add model: /pull-model)",
-        "General",
-    )
-    command_db.add_command("fast-reply", "DM only: temporarily enable faster, shorter replies", "General")
-    command_db.add_command("conversation", "Enable or disable auto-conversation in a channel", "General")
-    command_db.add_command("conversation-frequency", "View or set how often the bot auto-replies in conversation channels", "General")
-    command_db.add_command("status", "Show system status and bot info", "General")
-    command_db.add_command("reliability", "[Admin] View or reset reliability telemetry counters", "General")
-    command_db.add_command("checkwake", "Check current wake word", "General")
-    command_db.add_command("sleep", "Put bot offline until /wake", "General")
-    command_db.add_command("wake", "Bring bot back online", "General")
-    command_db.add_command("bal", "Check OpenRouter account credits (OPENROUTER_API_KEY)", "General")
-    command_db.add_command("openrouter-check", "Diagnose OpenRouter keys for chat and credits", "General")
-    command_db.add_command("help", "List all commands", "General")
-    
-    # File Analysis Commands
-    command_db.add_command("analyze", "Analyze uploaded files (images, text, code, documents)", "File Analysis")
-    command_db.add_command("ocr", "Extract text from images or documents (text only)", "File Analysis")
-    command_db.add_command("code-review", "Review and analyze code files", "File Analysis")
-    command_db.add_command("compare-files", "Compare two or more text files", "File Analysis")
-    command_db.add_command("examine", "Detailed image analysis (full description)", "File Analysis")
-    command_db.add_command("interrogate", "Short image answer (few sentences or bullets)", "File Analysis")
-    
-    # Reminder Commands
-    command_db.add_command("remind", "Set a reminder", "Reminders")
-    command_db.add_command("reminders", "List your active reminders", "Reminders")
-    command_db.add_command("cancel-reminder", "Cancel a reminder by ID", "Reminders")
-    command_db.add_command(
-        "cal",
-        "Build an .ics file: repeated events on chosen weekdays between two dates (local server timezone)",
-        "Calendar",
-    )
-
-    # Persona Commands
-    command_db.add_command("persona-create", "[Admin] Create a new persona", "Persona")
-    
-    # Model Commands
-    command_db.add_command(
-        "llm-settings",
-        "Per-function model (local/cloud) and persona; default chat; OpenRouter image model for /imagine",
-        "Model",
-    )
-    command_db.add_command(
-        "pull-model",
-        "Install local model, validate cloud chat model, or validate OpenRouter image-generation model",
-        "Model",
-    )
-    
-    # Download Commands
-    command_db.add_command("download", "Download media from link or last message and send to chat", "Download")
-    command_db.add_command("download-limit", "[Admin] Set max download file size in MB", "Download")
-    
-    # Scripts Commands
-    command_db.add_command("scripts", "List scripts in the scripts folder", "Scripts")
-    command_db.add_command("run", "Run a script from scripts folder (now or at time)", "Scripts")
-    
-    # Admin Commands
-    command_db.add_command("update", "Update bot from git, with buttons to restart or mark version safe", "Admin")
-    command_db.add_command("rollback", "Rollback bot to safe/last working git commit", "Admin")
-    command_db.add_command("purge", "Delete messages from channel", "Admin")
-    command_db.add_command("restart", "Restart the bot", "Admin")
-    command_db.add_command("kill", "Kill the bot", "Admin")
-    command_db.add_command("whitelist", "View whitelist or set user role: /whitelist @user admin (set: admin only)", "Admin")
-    command_db.add_command("setwake", "Change wake word", "Admin")
-    command_db.add_command("sethome", "Set startup channel", "Admin")
-    command_db.add_command("setstatus", "Change bot status", "Admin")
-    command_db.add_command(
-        "clone",
-        "Bot mirror (on/replace) or server-wide nick clone as one user (all); off reverts (permanent admin only)",
-        "Admin",
-    )
-    command_db.add_command("profanity", "View/edit profanity list used by clone filtering (permanent admin only)", "Admin")
-    command_db.add_command(
-        "remover",
-        "Set emoji so permanent admin can react-delete messages (servers: any; DMs: bot messages only)",
-        "Admin",
-    )
-    command_db.add_command("ollama-on", "Start Ollama server (admin only)", "Admin")
-    command_db.add_command("ollama-off", "Stop Ollama server (admin only)", "Admin")
-
-    # Shitpost
-    command_db.add_command("ignore", "Add a word to shitpost ignore list (admin only)", "Shitpost")
-
-    # Home Assistant Commands
-    command_db.add_command("himas", "Control Home Assistant with natural language", "Home Assistant")
-    command_db.add_command("explain", "Add a friendly name mapping for Home Assistant", "Home Assistant")
-    command_db.add_command("listentities", "List all entity mappings", "Home Assistant")
-    command_db.add_command("removeentity", "Remove an entity mapping", "Home Assistant")
-    command_db.add_command("ha-status", "Check Home Assistant connection and entities", "Home Assistant")
-    command_db.add_command("find-sensor", "Find and query sensors", "Home Assistant")
-    
-    command_db.add_alias("help", "commands")
-    command_db.add_alias("help", "what can you do")
-    command_db.add_alias("chat", "talk")
-    command_db.add_alias("chat", "ask")
-    command_db.add_alias("forget", "clear")
-    command_db.add_alias("forget", "reset")
-    command_db.add_alias("forget", "clear-chat")
-    command_db.add_alias("status", "info")
-    command_db.add_alias("status", "stats")
-    command_db.add_alias("bal", "balance")
-    command_db.add_alias("bal", "openrouter")
-    command_db.add_alias("bal", "credits")
-    command_db.add_alias("whitelist", "permissions")
-    command_db.add_alias("whitelist", "users")
-    command_db.add_alias("himas", "home")
-    command_db.add_alias("himas", "lights")
-    command_db.add_alias("himas", "smart home")
-    command_db.add_alias("explain", "add")
-    command_db.add_alias("explain", "map")
-    command_db.add_alias("remind", "reminder")
-    command_db.add_alias("reminders", "my reminders")
-    command_db.add_alias("llm-settings", "llm")
-    command_db.add_alias("llm-settings", "persona")
-    command_db.add_alias("llm-settings", "personas")
-    command_db.add_alias("llm-settings", "model")
-    command_db.add_alias("llm-settings", "models")
-    command_db.add_alias("llm-settings", "currentmodel")
-    command_db.add_alias("analyze", "analyze-file")
-    command_db.add_alias("analyze", "file-analysis")
-    command_db.add_alias("ocr", "extract-text")
-    command_db.add_alias("ocr", "read-image")
-    command_db.add_alias("code-review", "review-code")
-    command_db.add_alias("compare-files", "compare")
-    command_db.add_alias("download", "dl")
-
-    # News Commands
-    command_db.add_command("news", "Subscribe to news topics delivered to your DMs", "News")
-    command_db.add_command("news-model", "[Admin] Set the LLM model for news summarization", "News")
-    command_db.add_command("news-time", "Set daily quiet hours for news DMs (server local time; digest when quiet ends)", "News")
-    command_db.add_command("news-source", "[Admin] Manage custom RSS sources for news topics", "News")
-    command_db.add_alias("news", "subscribe")
-    command_db.add_alias("news", "news feed")
-    command_db.add_alias("news-time", "quiet time")
-    command_db.add_alias("news-time", "pause news")
-
-    print(f"✅ Initialized command database with {len(command_db.commands)} commands")
-
-
-initialize_command_database()
+from utils.llm.command_db import command_db  # noqa: E402  (re-exported for callers)
 
 class FileProcessor:
     """Process and analyze different types of files"""
@@ -523,7 +203,6 @@ def _heuristic_merge_manual_into_profile(current: Dict[str, Any], guidance: str)
         lines.append(s[:200])
     if not lines:
         return base
-    lower_full = text.lower()
     pn = base["preferred_name"]
     m_name = re.search(r"\bcall me ([a-zA-Z0-9_\- ]{2,30})", text, flags=re.IGNORECASE)
     if m_name:
@@ -773,33 +452,8 @@ async def compact_dm_history_for_channel(
     }
 
 
-ADAPTIVE_PLANNER_EXCLUDED_COMMANDS = frozenset(
-    {
-        "translate",
-        "analyze",
-        "ocr",
-        "code-review",
-        "examine",
-        "interrogate",
-        "compare-files",
-        "dm-history",
-    }
-)
-
-
-def build_adaptive_command_schema(full_schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Planner schema without utility commands that are handled directly in adaptive DMs."""
-    out: List[Dict[str, Any]] = []
-    for cmd in full_schema or []:
-        name = str((cmd or {}).get("name", "") or "").strip().lower()
-        if name in ADAPTIVE_PLANNER_EXCLUDED_COMMANDS:
-            continue
-        out.append(cmd)
-    return out
-
-
 async def plan_command_from_text(user_id: int, message_text: str, command_schema: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Infer a slash command plan from natural language in DMs (utility commands are excluded from schema)."""
+    """Infer a slash command plan from natural language in DMs."""
     if not message_text or not command_schema:
         return {"should_execute": False}
     schema_json = json.dumps(command_schema, ensure_ascii=True)
@@ -1007,7 +661,7 @@ async def ask_llm(
         return ""
     # Get system info
     date, time = update_system_time_date()
-    location, city, country = await _get_runtime_location_cached()
+    location, city, country = await integrations.get_location_cached()
     
     # Persona: adaptive DM mode uses a minimal base + user-built context only (no global persona).
     adaptive_dm = bool(is_dm and adaptive_dm_manager.is_enabled(user_id))
@@ -1476,120 +1130,6 @@ def _vision_candidates(requested_model: str) -> List[str]:
     ordered = dict.fromkeys(m for m in [cached, requested_model, *likely, *others] if m)
     return list(ordered)[:_MAX_VISION_CANDIDATES]
 
-def _to_openrouter_messages(messages: list) -> list:
-    converted = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        images = msg.get("images") or []
-        if images:
-            parts = []
-            if content:
-                parts.append({"type": "text", "text": str(content)})
-            for base64_img in images:
-                parts.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{base64_img}"},
-                    }
-                )
-            converted.append({"role": role, "content": parts})
-        else:
-            converted.append({"role": role, "content": str(content)})
-    return converted
-
-
-async def _make_openrouter_request(
-    model_name: str,
-    messages: list,
-    max_tokens: Optional[int] = None,
-    abort_check: Optional[Callable[[], Awaitable[bool]]] = None,
-) -> Optional[str]:
-    if not OPENROUTER_API_KEY:
-        return "Error: OPENROUTER_API_KEY is not configured."
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    payload = {
-        "model": model_name,
-        "messages": _to_openrouter_messages(messages),
-        "temperature": 0.7,
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = int(max(64, min(1024, max_tokens)))
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    def _extract_openrouter_error(status_code: int, body: dict, raw_text: str) -> str:
-        error_obj = body.get("error") if isinstance(body, dict) else {}
-        if not isinstance(error_obj, dict):
-            error_obj = {}
-        message = str(error_obj.get("message", "")).strip()
-        metadata = error_obj.get("metadata") if isinstance(error_obj.get("metadata"), dict) else {}
-        raw_meta = str(metadata.get("raw", "")).strip()
-        detail = raw_meta or message or raw_text
-        if status_code == 429:
-            return (
-                f"Rate limited for `{model_name}` on OpenRouter. "
-                "Retry in a moment, switch to another cloud model, or use a local model."
-            )
-        if status_code == 401:
-            return f"OpenRouter authentication failed. Check OPENROUTER_API_KEY.{(' Details: ' + detail[:180]) if detail else ''}"
-        if status_code == 402:
-            return "OpenRouter credits required for this request. Top up credits or choose another model."
-        if detail:
-            return f"OpenRouter request failed ({status_code}): {detail[:220]}"
-        return f"OpenRouter request failed ({status_code})."
-
-    try:
-        if abort_check and await abort_check():
-            return None
-        response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
-        if abort_check and await abort_check():
-            return None
-        body = {}
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-
-        if response.status_code == 429:
-            await asyncio.sleep(2)
-            if abort_check and await abort_check():
-                return None
-            response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=90)
-            if abort_check and await abort_check():
-                return None
-            try:
-                body = response.json()
-            except ValueError:
-                body = {}
-
-        if response.status_code == 401:
-            err = _extract_openrouter_error(response.status_code, body, response.text or "")
-            home_log.log_sync(f"⚠️ OpenRouter 401 for model `{model_name}`: {err}")
-            return f"Error: {err}"
-
-        if response.status_code != 200:
-            return f"Error: {_extract_openrouter_error(response.status_code, body, response.text or '')}"
-
-        choices = body.get("choices") or []
-        if not choices:
-            return "Error: No choices returned by OpenRouter."
-        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-        content = message.get("content", "")
-        if isinstance(content, list):
-            text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
-            content = "".join(text_parts)
-        if abort_check and await abort_check():
-            return None
-        return str(content).strip() or "No response."
-    except requests.exceptions.Timeout:
-        return "Error: Request timed out"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
 async def _try_models_with_fallback(
     requested_model,
     messages,
@@ -1600,17 +1140,7 @@ async def _try_models_with_fallback(
 ):
     provider = (provider or "local").strip().lower()
     if provider == "cloud":
-        max_tokens = None
-        if isinstance(request_options, dict) and request_options.get("num_predict") is not None:
-            try:
-                max_tokens = int(request_options.get("num_predict"))
-            except (TypeError, ValueError):
-                max_tokens = None
-        if abort_check and await abort_check():
-            return requested_model, ""
-        response = await _make_openrouter_request(
-            requested_model, messages, max_tokens=max_tokens, abort_check=abort_check
-        )
+        response = await providers.openrouter_chat(requested_model, messages, request_options, abort_check)
         if response is None:
             return requested_model, ""
         if response and not response.startswith("Error:"):
@@ -1627,11 +1157,11 @@ async def _try_models_with_fallback(
     for model_name in models_to_try:
         if abort_check and await abort_check():
             return requested_model, ""
-        response = await _make_ollama_request(
-            model_name, messages, request_options=request_options, abort_check=abort_check
-        )
+        response = await providers.ollama_chat(model_name, messages, request_options, abort_check)
         if response is None:
             return requested_model, ""
+        if response == providers.OLLAMA_UNREACHABLE:
+            break  # server is down; every other local model would fail the same way
 
         if response and not response.startswith("Error:"):
             if images:
@@ -1647,179 +1177,13 @@ async def _try_models_with_fallback(
         return requested_model, _format_vision_help_message()
     return requested_model, "⚠️ All models are unavailable. Please check your Ollama server."
 
-async def _make_ollama_request(
-    model_name,
-    messages,
-    request_options: Optional[Dict[str, Any]] = None,
-    abort_check: Optional[Callable[[], Awaitable[bool]]] = None,
-) -> Optional[str]:
-    """Make request to Ollama API. Returns None when aborted (coalesced DM)."""
-    endpoints = [
-        OLLAMA_URL,
-        "http://localhost:11434",
-        "http://127.0.0.1:11434",
-    ]
-
-    def _is_transient_status(code: int) -> bool:
-        return code in {408, 425, 429, 500, 502, 503, 504}
-
-    has_images = any(isinstance(msg, dict) and msg.get("images") for msg in messages)
-    if has_images:
-        formatted_messages = []
-        for msg in messages:
-            if msg.get("role") == "user" and msg.get("images"):
-                formatted_messages.append(
-                    {
-                        "role": "user",
-                        "content": msg["content"],
-                        "images": msg["images"],
-                    }
-                )
-            else:
-                formatted_messages.append(
-                    {
-                        "role": msg.get("role", "user"),
-                        "content": msg.get("content", ""),
-                    }
-                )
-        data = {"model": model_name, "messages": formatted_messages, "stream": False}
-    else:
-        options = {"temperature": 0.7, "num_predict": 1024}
-        if isinstance(request_options, dict):
-            for k in ("temperature", "num_predict"):
-                if request_options.get(k) is not None:
-                    options[k] = request_options.get(k)
-        data = {
-            "model": model_name,
-            "messages": messages,
-            "stream": False,
-            "options": options,
-        }
-
-    for base_url in endpoints:
-        url = f"{base_url}/api/chat"
-
-        for attempt in range(3):
-            try:
-                if abort_check and await abort_check():
-                    return None
-                # Run blocking I/O in a thread so Discord event loop stays responsive.
-                response = await asyncio.to_thread(requests.post, url, json=data, timeout=75)
-                if abort_check and await abort_check():
-                    return None
-
-                if response.status_code == 404:
-                    break
-
-                if response.status_code != 200:
-                    if _is_transient_status(response.status_code) and attempt < 2:
-                        reliability_telemetry.increment("llm_retries")
-                        home_log.log_sync(
-                            f"⚠️ LLM transient HTTP {response.status_code} for model `{model_name}` "
-                            f"(attempt {attempt + 1}/3). "
-                            f"{reliability_telemetry.format_snapshot('Counters')}"
-                        )
-                        await asyncio.sleep(1 + attempt)
-                        if abort_check and await abort_check():
-                            return None
-                        continue
-                    error_text = (response.text or "")[:140]
-                    error_count = reliability_telemetry.increment("llm_errors")
-                    home_log.log_sync(
-                        f"🔴 LLM HTTP error {response.status_code} for model `{model_name}` "
-                        f"(error #{error_count}): {error_text}"
-                    )
-                    return f"Error {response.status_code}: {error_text}"
-
-                try:
-                    result = response.json()
-                except ValueError:
-                    if attempt < 2:
-                        reliability_telemetry.increment("llm_retries")
-                        home_log.log_sync(
-                            f"⚠️ LLM returned non-JSON response for model `{model_name}` "
-                            f"(attempt {attempt + 1}/3)."
-                        )
-                        await asyncio.sleep(1 + attempt)
-                        if abort_check and await abort_check():
-                            return None
-                        continue
-                    error_count = reliability_telemetry.increment("llm_errors")
-                    home_log.log_sync(
-                        f"🔴 LLM returned invalid JSON for model `{model_name}` "
-                        f"(error #{error_count})."
-                    )
-                    return "Error: Invalid JSON response from Ollama."
-                if abort_check and await abort_check():
-                    return None
-                return result.get("message", {}).get("content", "No response.")
-
-            except requests.exceptions.ConnectionError:
-                if attempt < 2:
-                    reliability_telemetry.increment("llm_retries")
-                    home_log.log_sync(
-                        f"⚠️ LLM connection error for model `{model_name}` "
-                        f"(attempt {attempt + 1}/3). "
-                        f"{reliability_telemetry.format_snapshot('Counters')}"
-                    )
-                    await asyncio.sleep(1 + attempt)
-                    if abort_check and await abort_check():
-                        return None
-                    continue
-                break
-            except requests.exceptions.Timeout:
-                if attempt < 2:
-                    reliability_telemetry.increment("llm_retries")
-                    home_log.log_sync(
-                        f"⚠️ LLM timeout for model `{model_name}` "
-                        f"(attempt {attempt + 1}/3). "
-                        f"{reliability_telemetry.format_snapshot('Counters')}"
-                    )
-                    await asyncio.sleep(1 + attempt)
-                    if abort_check and await abort_check():
-                        return None
-                    continue
-                timeout_count = reliability_telemetry.increment("llm_timeouts")
-                home_log.log_sync(
-                    f"🔴 LLM timeout after retries for model `{model_name}` "
-                    f"(timeout #{timeout_count}). "
-                    f"{reliability_telemetry.format_snapshot('Counters')}"
-                )
-                return "Error: Request timed out"
-            except Exception as e:
-                if attempt < 2:
-                    reliability_telemetry.increment("llm_retries")
-                    home_log.log_sync(
-                        f"⚠️ LLM unexpected error for model `{model_name}`: {str(e)[:200]} "
-                        f"(attempt {attempt + 1}/3)."
-                    )
-                    await asyncio.sleep(1 + attempt)
-                    if abort_check and await abort_check():
-                        return None
-                    continue
-                error_count = reliability_telemetry.increment("llm_errors")
-                home_log.log_sync(
-                    f"🔴 LLM fatal error for model `{model_name}` (error #{error_count}): {str(e)[:300]}"
-                )
-                return f"Error: {str(e)}"
-
-    error_count = reliability_telemetry.increment("llm_errors")
-    home_log.log_sync(
-        f"🔴 LLM connection failed for all Ollama endpoints (error #{error_count}) for model `{model_name}`. "
-        f"{reliability_telemetry.format_snapshot('Counters')}"
-    )
-    return "Error: Cannot connect to Ollama server."
-
 async def probe_model(provider: str, model_name: str) -> Tuple[bool, str]:
     """Return (ok, message) after a minimal completion probe (does not persist)."""
     provider = (provider or "local").strip().lower()
     if provider not in {"local", "cloud"}:
         return False, "Provider must be 'local' or 'cloud'."
     test_messages = [{"role": "user", "content": "Test"}]
-    if provider == "cloud":
-        response = await _make_openrouter_request(model_name, test_messages)
-    else:
-        response = await _make_ollama_request(model_name, test_messages)
+    response = await providers.chat(provider, model_name, test_messages)
     if response is None:
         return False, f"Cannot use model '{model_name}' (aborted)."
     if response and not response.startswith("Error:"):
@@ -1928,59 +1292,6 @@ async def validate_and_set_image_generation_model(user_id: int, model_name: str)
     return False, msg
 
 
-async def commentary_for_generated_image(
-    user_id: int,
-    user_request: str,
-    model_label: str,
-    image_bytes: bytes,
-    mime: str,
-) -> str:
-    """
-    Short assistant text about the generated image vs user intent (vision + chat model).
-    Returns empty string on failure or when model declines.
-    """
-    if not image_bytes:
-        return ""
-    eff = model_manager.get_effective_model_for_function(user_id, "chat")
-    requested_model = eff.get("model", "qwen2.5:7b")
-    provider = eff.get("provider", "local")
-    try:
-        import base64 as _b64
-
-        b64 = _b64.b64encode(image_bytes).decode("ascii")
-    except Exception:
-        return ""
-    sys = (
-        "You are helping in Discord after an AI image was just generated for the user.\n"
-        "The user's request (may be truncated):\n"
-        f"{(user_request or '')[:1200]}\n\n"
-        "You can see the generated image attached as the user message image.\n"
-        "Write a brief follow-up (usually 1-4 short sentences).\n"
-        "If the image matches the request well and there are no notable issues, you may answer with exactly: OK\n"
-        "If the image is off, misleading, low quality, wrong subject, wrong text in image, artifacts, or safety-filtered oddly, explain briefly and suggest a tighter prompt or different angle.\n"
-        "Do not be verbose. No bullet lists unless the user asked for critique. Plain text only."
-    )
-    user_text = f"Model used for generation: {model_label}\nComment on this result vs what I asked for."
-    messages = [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": user_text, "images": [b64]},
-    ]
-    try:
-        _, text = await _try_models_with_fallback(
-            requested_model,
-            messages,
-            images=True,
-            provider=provider,
-        )
-    except Exception:
-        return ""
-    text = _clean_response(text or "")
-    if not text or text.startswith("Error:") or text.startswith("⚠️"):
-        return ""
-    if text.strip().upper() in {"OK", "OK.", "OK!"}:
-        return ""
-    return text.strip()
-
 async def analyze_file(
     user_id: int,
     channel_id: int,
@@ -2081,10 +1392,7 @@ async def analyze_file(
         else:
             model_name = model_used
     else:
-        if provider == "cloud":
-            response = await _make_openrouter_request(model_name, messages)
-        else:
-            response = await _make_ollama_request(model_name, messages)
+        response = await providers.chat(provider, model_name, messages)
         if response is None:
             response = ""
     
@@ -2165,10 +1473,7 @@ async def compare_files(
         {"role": "user", "content": f"{analysis_prompt}\n\nFiles to compare:{file_content_str}"}
     ]
     
-    if provider == "cloud":
-        response = await _make_openrouter_request(model_name, messages)
-    else:
-        response = await _make_ollama_request(model_name, messages)
+    response = await providers.chat(provider, model_name, messages)
     response = _clean_response(response or "")
     
     # Format response

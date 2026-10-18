@@ -1,11 +1,14 @@
+import asyncio
 import os
-import re
 from typing import Dict, List, Tuple
 
 import discord
 import requests
+from dotenv import dotenv_values
 
-from commands.shared import require_admin
+from commands.shared import _chunk_message, require_admin
+from utils.http import OPENROUTER_BASE, OPENROUTER_CHAT_URL, openrouter_headers, session
+from utils.paths import root_path
 from models import model_manager
 import integrations
 
@@ -17,42 +20,22 @@ def _mask_key(k: str) -> str:
     return f"{text[:6]}...{text[-4:]}"
 
 
-def _parse_env(path: str = ".env") -> Dict[str, str]:
-    values: Dict[str, str] = {}
-    env_path = path
-    if not os.path.isabs(env_path):
-        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), path)
-    if not os.path.isfile(env_path):
-        return values
+def _parse_env() -> Dict[str, str]:
+    """Raw .env values (normalized like integrations does), to spot shell-vs-file mismatches."""
     try:
-        with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.lower().startswith("export "):
-                    line = line[7:].strip()
-                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
-                if not m:
-                    continue
-                key, val = m.group(1), m.group(2).strip()
-                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-                    val = val[1:-1]
-                else:
-                    if " #" in val:
-                        val = val.split(" #", 1)[0].rstrip()
-                val = val.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
-                val = "".join(ch for ch in val if ch.isprintable())
-                val = re.sub(r"\s+", "", val)
-                if val:
-                    values[key] = val
+        raw = dotenv_values(root_path(".env"))
     except Exception:
         return {}
-    return values
+    out: Dict[str, str] = {}
+    for key, val in raw.items():
+        v = integrations._normalize_secret(val or "")
+        if v:
+            out[key] = v
+    return out
 
 
 def _candidate_keys() -> List[Tuple[str, str]]:
-    raw_env = _parse_env(".env")
+    raw_env = _parse_env()
     seen = set()
     out: List[Tuple[str, str]] = []
     candidates = [
@@ -97,11 +80,7 @@ def _extract_error_message(resp: requests.Response) -> str:
 
 def _test_credits(key: str) -> Tuple[bool, str]:
     try:
-        r = requests.get(
-            "https://openrouter.ai/api/v1/credits",
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=20,
-        )
+        r = session().get(f"{OPENROUTER_BASE}/credits", headers=openrouter_headers(key), timeout=20)
     except Exception as exc:
         return False, f"request error: {str(exc)[:160]}"
     if r.status_code == 200:
@@ -117,17 +96,8 @@ def _test_chat(key: str, model_name: str) -> Tuple[bool, str]:
         "temperature": 0.0,
     }
     try:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/hophaver/dubot",
-                "X-Title": "dubot",
-            },
-            json=payload,
-            timeout=30,
-        )
+        headers = {**openrouter_headers(key), "HTTP-Referer": "https://github.com/hophaver/dubot", "X-Title": "dubot"}
+        r = session().post(OPENROUTER_CHAT_URL, headers=headers, json=payload, timeout=30)
     except Exception as exc:
         return False, f"request error: {str(exc)[:160]}"
     if r.status_code == 200:
@@ -141,11 +111,7 @@ def _test_chat(key: str, model_name: str) -> Tuple[bool, str]:
 def _test_management_key_endpoint(key: str) -> Tuple[bool, str]:
     """Check whether key works against management keys API (typically management-only keys)."""
     try:
-        r = requests.get(
-            "https://openrouter.ai/api/v1/keys",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            timeout=20,
-        )
+        r = session().get(f"{OPENROUTER_BASE}/keys", headers=openrouter_headers(key), timeout=20)
     except Exception as exc:
         return False, f"request error: {str(exc)[:160]}"
     if r.status_code == 200:
@@ -178,10 +144,15 @@ def register(client):
         chat_ok = False
         credits_ok = False
         mgmt_api_ok = False
-        for source, key in keys:
-            c_ok, c_msg = _test_credits(key)
-            m_ok, m_msg = _test_chat(key, model_name)
-            g_ok, g_msg = _test_management_key_endpoint(key)
+        async def _probe(key: str):
+            return await asyncio.gather(
+                asyncio.to_thread(_test_credits, key),
+                asyncio.to_thread(_test_chat, key, model_name),
+                asyncio.to_thread(_test_management_key_endpoint, key),
+            )
+
+        results = await asyncio.gather(*(_probe(key) for _, key in keys))
+        for (source, key), ((c_ok, c_msg), (m_ok, m_msg), (g_ok, g_msg)) in zip(keys, results):
             credits_ok = credits_ok or c_ok
             chat_ok = chat_ok or m_ok
             mgmt_api_ok = mgmt_api_ok or g_ok
@@ -207,7 +178,5 @@ def register(client):
         else:
             lines.append("❌ No candidate key worked for chat or credits.")
 
-        message = "\n".join(lines)
-        if len(message) > 1900:
-            message = message[:1900] + "\n..."
-        await interaction.followup.send(message, ephemeral=True)
+        for chunk in _chunk_message("\n".join(lines)):
+            await interaction.followup.send(chunk, ephemeral=True)

@@ -1,89 +1,51 @@
-import os
-import json
 import time
 import discord
-from discord import app_commands
-from whitelist import get_user_permission
+from commands.shared import require_user
 from models import model_manager
+from services.status_server import STATUS_JSON_PATH
+from utils.json_store import save_json
 from utils.llm_service import command_db, SUPPORTED_FILE_TYPES
-from utils.system_monitor import get_system_status
-
-STATUS_WEB_DIR = "web"
-STATUS_JSON_PATH = os.path.join(STATUS_WEB_DIR, "status.json")
-
-
-def _write_status_json(
-    sys_status,
-    bot_uptime_sec,
-    bot_uptime,
-    current_model,
-    basic_local_model,
-    commands_count,
-    file_types_count,
-):
-    os.makedirs(STATUS_WEB_DIR, exist_ok=True)
-    payload = {
-        "system": sys_status,
-        "bot_uptime_sec": round(bot_uptime_sec, 1),
-        "bot_uptime": bot_uptime,
-        "model": current_model,
-        "basic_local_model": basic_local_model,
-        "commands_count": commands_count,
-        "file_types_count": file_types_count,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    with open(STATUS_JSON_PATH, "w") as f:
-        json.dump(payload, f, indent=2)
+from utils.system_monitor import format_uptime, get_system_status_async
 
 
 def register(client):
     @client.tree.command(name="status", description="Show system status and bot info")
     async def status(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_user(interaction):
             return
         await interaction.response.defer()
-        try:
-            from services.clone_service import sync_identity
-            from integrations import refresh_environment_location_async
-            from utils.bot_overview_embed import build_bot_overview_embed
+        from services.clone_service import sync_identity
+        from integrations import refresh_environment_location_async
+        from utils.bot_overview_embed import build_bot_overview_embed
 
-            await sync_identity(client, interaction.guild)
-            await refresh_environment_location_async()
+        await sync_identity(client, interaction.guild)
+        await refresh_environment_location_async()
 
-            sys_status = get_system_status()
-            if "error" in sys_status:
-                await interaction.followup.send(f"❌ Error getting status: {sys_status['error']}")
-                return
+        sys_status = await get_system_status_async()
+        if "error" in sys_status:
+            await interaction.followup.send(f"❌ Error getting status: {sys_status['error']}")
+            return
 
-            bot_uptime_sec = time.time() - client.start_time
-            b_days = int(bot_uptime_sec // 86400)
-            b_hours = int((bot_uptime_sec % 86400) // 3600)
-            b_mins = int((bot_uptime_sec % 3600) // 60)
-            bot_uptime = f"{b_days}d {b_hours}h {b_mins}m" if b_days else f"{b_hours}h {b_mins}m"
+        bot_uptime_sec = time.time() - client.start_time
+        model_info = model_manager.get_user_model_info(interaction.user.id)
+        save_json(
+            STATUS_JSON_PATH,
+            {
+                "system": sys_status,
+                "bot_uptime_sec": round(bot_uptime_sec, 1),
+                "bot_uptime": format_uptime(bot_uptime_sec),
+                "model": f"{model_info.get('model', 'default')} ({model_info.get('provider', 'local')})",
+                "basic_local_model": model_manager.get_last_local_model(interaction.user.id, refresh_local=True),
+                "commands_count": len(command_db.commands),
+                "file_types_count": len(SUPPORTED_FILE_TYPES),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
 
-            model_info = model_manager.get_user_model_info(interaction.user.id)
-            current_model = f"{model_info.get('model', 'default')} ({model_info.get('provider', 'local')})"
-            basic_local_model = model_manager.get_last_local_model(interaction.user.id, refresh_local=True)
-            commands_count = len(command_db.commands)
-            file_types_count = len(SUPPORTED_FILE_TYPES)
-
-            _write_status_json(
-                sys_status,
-                bot_uptime_sec,
-                bot_uptime,
-                current_model,
-                basic_local_model,
-                commands_count,
-                file_types_count,
-            )
-
-            _errs, embed = await build_bot_overview_embed(
-                client,
-                errors=[],
-                include_hardware=True,
-                sys_status=sys_status,
-            )
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error getting status: {str(e)}")
+        _errs, embed = await build_bot_overview_embed(
+            client,
+            errors=[],
+            include_hardware=True,
+            sys_status=sys_status,
+        )
+        await interaction.followup.send(embed=embed)

@@ -8,12 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 
-from commands.shared import bot_embed_thumbnail_url
+from commands.shared import make_bot_embed
 from config import get_current_persona, get_startup_channel_id, get_wake_word
 from integrations import PERMANENT_ADMIN
 from models import model_manager
 from services.status_server import PORT as STATUS_PORT
 from utils.openrouter import fetch_credits
+from utils.system_monitor import format_uptime
 from utils.update_state import update_state_manager
 
 
@@ -55,7 +56,7 @@ async def build_bot_overview_embed(
     model_owner_id = PERMANENT_ADMIN
     model_info = model_manager.get_user_model_info(model_owner_id)
     chat_provider = str(model_info.get("provider", "local")).strip().lower() or "local"
-    chat_model = str(model_info.get("model", "qwen2.5:7b")).strip() or "qwen2.5:7b"
+    chat_model = str(model_info.get("model") or "").strip()
     basic_local_model = model_manager.get_last_local_model(model_owner_id, refresh_local=True)
 
     news_provider = "local"
@@ -135,14 +136,12 @@ async def build_bot_overview_embed(
     if errors:
         desc_lines.insert(0, "Some command packages did not load.")
 
-    embed = discord.Embed(
-        title="Online" if not errors else "Online with warnings",
-        description="\n".join(desc_lines),
+    embed = make_bot_embed(
+        client,
+        "Online" if not errors else "Online with warnings",
+        "\n".join(desc_lines),
         color=discord.Color.green() if not errors else discord.Color.orange(),
     )
-    _thumb = bot_embed_thumbnail_url(client.user)
-    if _thumb:
-        embed.set_thumbnail(url=_thumb)
 
     embed.add_field(name="OpenRouter", value=openrouter_value[:1024], inline=False)
     embed.add_field(
@@ -169,11 +168,7 @@ async def build_bot_overview_embed(
     )
 
     if include_hardware and sys_status and "error" not in sys_status:
-        bot_uptime_sec = time.time() - client.start_time
-        b_days = int(bot_uptime_sec // 86400)
-        b_hours = int((bot_uptime_sec % 86400) // 3600)
-        b_mins = int((bot_uptime_sec % 3600) // 60)
-        bot_uptime = f"{b_days}d {b_hours}h {b_mins}m" if b_days else f"{b_hours}h {b_mins}m"
+        bot_uptime = format_uptime(time.time() - client.start_time)
         sys_block = (
             f"**IP** `{sys_status['ip_address']}` · **Host** `{sys_status['hostname']}`\n"
             f"**OS** {sys_status['os']}\n"

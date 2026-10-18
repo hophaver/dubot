@@ -1,15 +1,19 @@
 """Model preferences and Ollama model list"""
-import json
-import requests
+import asyncio
+import time
 from typing import Any, Dict, List, Optional, Tuple
-from integrations import OLLAMA_URL
-from utils import home_log
 
+import requests
+
+from utils import home_log
+from utils.http import session as http_session
 from utils.json_store import load_json, save_json
+from utils.ollama import base_url as ollama_base_url
 from utils.paths import data_path
 
 MODELS_FILE = data_path("models.json")
-DEFAULT_FALLBACK = ["qwen2.5:7b", "llama3.2:3b", "llama3.2:1b"]
+DEFAULT_LOCAL_MODEL = "qwen2.5:7b"
+_REFRESH_TTL_SECONDS = 30.0
 
 
 class ModelManager:
@@ -17,27 +21,52 @@ class ModelManager:
         self.available_models: List[str] = []
         self.user_models: Dict[str, Dict] = {}
         self.ollama_online: bool = False
+        self._refreshed_at = float("-inf")
+        self._refresh_task: Optional[asyncio.Task] = None
         self.load_models()
-        self.refresh_local_models()
 
     def refresh_local_models(self) -> bool:
-        """Fetch available models from Ollama. On failure, set available_models to [] (no fake list)."""
+        """Fetch available models from Ollama (blocking). On failure, available_models becomes []."""
+        was_online, prev_count = self.ollama_online, len(self.available_models)
+        self._refreshed_at = time.monotonic()
         try:
-            response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+            response = http_session().get(f"{ollama_base_url()}/api/tags", timeout=5)
             if response.status_code == 200:
                 models_data = response.json().get("models", [])
                 self.available_models = [m.get("name") for m in models_data if m.get("name")]
-                home_log.log_sync(f"✅ Found {len(self.available_models)} Ollama models")
                 self.ollama_online = True
+                if not was_online or len(self.available_models) != prev_count:
+                    home_log.log_sync(f"✅ Found {len(self.available_models)} Ollama models")
                 return True
         except requests.exceptions.ConnectionError:
-            # Console only; the startup embed shows Ollama online/offline instead.
-            print(f"⚠️ Cannot connect to Ollama at {OLLAMA_URL}")
+            if was_online or prev_count == 0:
+                # Console only; the startup embed shows Ollama online/offline instead.
+                print(f"⚠️ Cannot connect to Ollama at {ollama_base_url()}")
         except Exception as e:
             home_log.log_sync(f"⚠️ Error fetching models: {e}")
         self.available_models = []
         self.ollama_online = False
         return False
+
+    async def refresh_async(self) -> bool:
+        """Refresh the Ollama model list in a worker thread."""
+        return await asyncio.to_thread(self.refresh_local_models)
+
+    def _maybe_refresh(self) -> None:
+        """Refresh when the list is older than the TTL.
+
+        Inside the event loop this never blocks: a background refresh is scheduled and the cached
+        list is used for this call. Outside a loop (threads, startup) it refreshes synchronously.
+        """
+        if time.monotonic() - self._refreshed_at < _REFRESH_TTL_SECONDS:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.refresh_local_models()
+            return
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = loop.create_task(self.refresh_async())
 
     def set_user_model(self, user_id, model_name: str, provider: str = "local") -> None:
         provider = (provider or "local").strip().lower()
@@ -53,7 +82,7 @@ class ModelManager:
         entry = {
             "provider": provider,
             "model": model_name,
-            "last_local_model": current.get("last_local_model", "qwen2.5:7b"),
+            "last_local_model": current.get("last_local_model", DEFAULT_LOCAL_MODEL),
             "cloud_history": cloud_history,
             "function_models": fm,
         }
@@ -108,8 +137,8 @@ class ModelManager:
         fm[str(function_key)] = {"provider": provider, "model": model_name}
         entry = {
             "provider": current.get("provider", "local"),
-            "model": current.get("model", "qwen2.5:7b"),
-            "last_local_model": current.get("last_local_model", "qwen2.5:7b"),
+            "model": current.get("model", DEFAULT_LOCAL_MODEL),
+            "last_local_model": current.get("last_local_model", DEFAULT_LOCAL_MODEL),
             "cloud_history": cloud_history,
             "function_models": fm,
         }
@@ -136,7 +165,12 @@ class ModelManager:
         self.save_models()
 
     def get_user_model_info(self, user_id):
-        default = {"provider": "local", "model": "qwen2.5:7b", "last_local_model": "qwen2.5:7b", "cloud_history": []}
+        default = {
+            "provider": "local",
+            "model": DEFAULT_LOCAL_MODEL,
+            "last_local_model": DEFAULT_LOCAL_MODEL,
+            "cloud_history": [],
+        }
         model_info = self.user_models.get(str(user_id), default)
         if not isinstance(model_info, dict):
             return default
@@ -157,22 +191,6 @@ class ModelManager:
         if provider == "local":
             last_local_model = model_name
         fm = self._normalize_function_models(model_info.get("function_models"))
-        prev_fm = self._normalize_function_models(model_info.get("function_models"))
-        if (
-            provider != model_info.get("provider")
-            or model_name != model_info.get("model")
-            or last_local_model != model_info.get("last_local_model")
-            or cloud_history != model_info.get("cloud_history")
-            or fm != prev_fm
-        ):
-            self.user_models[str(user_id)] = {
-                "provider": provider,
-                "model": model_name,
-                "last_local_model": last_local_model,
-                "cloud_history": cloud_history,
-                "function_models": fm,
-            }
-            self.save_models()
         return {
             "provider": provider,
             "model": model_name,
@@ -214,19 +232,11 @@ class ModelManager:
                 seen.append(m)
         return seen
 
-    def get_recent_cloud_models(self, user_id: int) -> List[str]:
-        info = self.get_user_model_info(user_id)
-        history = info.get("cloud_history", [])
-        if not isinstance(history, list):
-            return []
-        cleaned = [m for m in history if isinstance(m, str) and m.strip()]
-        return list(dict.fromkeys(cleaned))
-
     def get_last_local_model(self, user_id, refresh_local: bool = True) -> str:
         info = self.get_user_model_info(user_id)
-        preferred = info.get("last_local_model") or "qwen2.5:7b"
+        preferred = info.get("last_local_model") or DEFAULT_LOCAL_MODEL
         if refresh_local:
-            self.refresh_local_models()
+            self._maybe_refresh()
         if preferred in self.available_models:
             return preferred
         if self.available_models:
@@ -243,55 +253,8 @@ class ModelManager:
 
     def list_all_models(self, refresh_local: bool = False) -> List[str]:
         if refresh_local:
-            self.refresh_local_models()
+            self._maybe_refresh()
         return sorted(self.available_models)
-
-    def check_model_availability(self, model_name: str) -> tuple[bool, str]:
-        if model_name in self.available_models:
-            return True, "Model found"
-        self.refresh_local_models()
-        if model_name in self.available_models:
-            return True, "Model found after refresh"
-        return False, f"Model '{model_name}' not found. Use /pull-model to download."
-
-    def suggest_alternative_models(self, failed_model: str) -> List[str]:
-        suggestions = []
-        base = failed_model.split(":")[0] if ":" in failed_model else failed_model
-        for m in self.available_models:
-            if m == failed_model:
-                continue
-            if base in m or (("llama" in failed_model.lower() and "llama" in m.lower()) or ("qwen" in failed_model.lower() and "qwen" in m.lower())):
-                suggestions.append(m)
-        return list(dict.fromkeys(suggestions))[:5]
-
-    def get_ha_context(self, user_id: int) -> str:
-        try:
-            with open("ha_entities_cache.json") as f:
-                entities = json.load(f)
-            lines = []
-            for entity_id, data in list(entities.items())[:20]:
-                name = data.get("attributes", {}).get("friendly_name", "")
-                if name:
-                    lines.append(f"{name} -> {entity_id}")
-            if lines:
-                return "Available entities:\n" + "\n".join(lines)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        return "No entity cache. Use /listentities to update."
-
-    def suggest_ha_entities(self, search_term: str) -> List[str]:
-        try:
-            with open("ha_entities_cache.json") as f:
-                entities = json.load(f)
-            search = search_term.lower()
-            out = []
-            for entity_id, data in entities.items():
-                name = data.get("attributes", {}).get("friendly_name", "")
-                if search in entity_id.lower() or search in name.lower():
-                    out.append(f"{name} ({entity_id})")
-            return out[:10]
-        except (FileNotFoundError, json.JSONDecodeError):
-            return []
 
     def save_models(self) -> None:
         save_json(MODELS_FILE, {"user_models": self.user_models})

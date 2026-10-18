@@ -1,6 +1,9 @@
 """Send logs and errors to the /sethome channel. Set client in on_ready."""
 import asyncio
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import discord
 
 _client: Optional["discord.Client"] = None  # type: ignore[name-defined]
 

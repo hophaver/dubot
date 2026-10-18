@@ -1,5 +1,5 @@
 import discord
-from whitelist import is_admin
+from commands.shared import require_admin
 from utils import home_log
 from commands.admin.update_shared import (
     build_update_action_view,
@@ -18,21 +18,13 @@ def register(client: discord.Client):
         description="Update bot from git and upgrade Python dependencies (requirements.txt)",
     )
     async def update(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            try:
-                from integrations import refresh_environment_location_async
-
-                await refresh_environment_location_async()
-            except Exception:
-                pass
-
-            before_commit = get_current_commit()
-            result = run_git(["pull"])
-            after_commit = get_current_commit()
+            before_commit = await get_current_commit()
+            result = await run_git(["pull"])
+            after_commit = await get_current_commit()
             update_state_manager.record_update(before_commit, after_commit)
 
             state = update_state_manager.get_state()
@@ -49,7 +41,7 @@ def register(client: discord.Client):
                     f"- Safe rollback target: `{short_sha(safe_commit)}`"
                 )
 
-                pip_res = pip_upgrade_dependencies()
+                pip_res = await pip_upgrade_dependencies()
                 msg += "\n\n" + format_requirements_status(pip_res)
                 msg += (
                     "\n\n### Next step\n"

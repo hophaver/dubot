@@ -32,14 +32,3 @@ def add_ignored(word: str) -> bool:
     _save(words)
     return True
 
-
-def remove_ignored(word: str) -> bool:
-    """Remove word from blacklist. Return True if removed."""
-    word = (word or "").strip().lower()
-    words = _load()
-    normalized = [w.lower() for w in words]
-    if word not in normalized:
-        return False
-    words = [w for w in words if w.lower() != word]
-    _save(words)
-    return True

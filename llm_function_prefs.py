@@ -6,7 +6,7 @@ Model overrides per function live in data/models.json under user_models[].functi
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from config import get_config, save_config, get_current_persona
 
@@ -70,7 +70,3 @@ def set_function_persona_name(function_key: str, persona_name: str) -> None:
     cfg["function_personas"] = fp
     save_config(cfg)
 
-
-def list_function_persona_status() -> Dict[str, str]:
-    """Resolved persona name per function key (after defaulting)."""
-    return {k: get_function_persona_name(k) for k in LLM_FUNCTION_KEYS}
