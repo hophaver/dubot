@@ -345,3 +345,23 @@ class OwnerOnlyView(discord.ui.View):
             return True
         await _deny(interaction, "❌ Only the user who ran this command can use these controls.")
         return False
+
+
+async def read_text_attachment(message: discord.Message, accept) -> Tuple[Optional[str], Optional[str]]:
+    """(filename, decoded text) of the first attachment whose filename satisfies ``accept``.
+
+    Returns (filename, None) when the matching attachment can't be read, (None, None) when none matches.
+    """
+    for att in list(getattr(message, "attachments", []) or []):
+        fn = (att.filename or "").strip()
+        if not accept(fn):
+            continue
+        try:
+            return fn, (await att.read()).decode("utf-8", errors="replace")
+        except discord.HTTPException:
+            return fn, None
+    return None, None
+
+
+async def read_first_txt_attachment(message: discord.Message) -> Optional[str]:
+    return (await read_text_attachment(message, lambda fn: fn.lower().endswith(".txt")))[1]

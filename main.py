@@ -87,7 +87,7 @@ class BotClient(discord.Client):
         except Exception as e:
             print(f"⚠️ Adaptive export failed: {e}", flush=True)
         adaptive_dm_manager.flush()
-        conversation_manager.save()
+        conversation_manager.flush()
         reminder_manager.save()
 
     async def close(self):

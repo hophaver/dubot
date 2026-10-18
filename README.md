@@ -1,77 +1,74 @@
 # Dubot
 
-Discord bot with LLM chat and various features
+Discord bot with LLM chat (local Ollama or OpenRouter), adaptive DMs, news digests, reminders,
+Home Assistant control and assorted admin tools.
 
 ## Requirements
 
-- Python 3
-- Discord bot token
-- Ollama
+- Python 3.10+
+- A Discord bot token
+- Ollama (for local models) and/or an OpenRouter API key
 
-### minimum system requirements
-- raspberry pi 4 2GB (LLM has a really hard time)
+Minimum hardware: a Raspberry Pi 4 (2 GB) runs it, but local LLMs struggle.
 
 ## Setup
 
-1. Setup `.env`
-2. `python -m venv venv`
-3. `source venv/bin/activate`
-4. `pip install -r requirements.txt`
-5. Run: `sh start.sh`
+1. `cp .env.example .env` and fill in at least `DISCORD_BOT_TOKEN`
+2. `python -m venv venv && source venv/bin/activate`
+3. `pip install -r requirements.txt`
+4. `./start.sh` (runs in the background; `./stop.sh` stops it and saves state)
 
-## Config
+Logs go to `bot-discord.log` (rotated to `bot-discord.log.1` past ~10 MB on start).
 
-- **`.env`** – Secrets
-- **`config.json`** – Wake word, startup channel, download limit, etc.
-- **`model_fallback.json`** – Model fallback
-- **`system_prompts.json`** – System prompts
-- **`whitelist.json`** – Permissions
-- **`data/ha_mappings.json`** – HA friendly name → entity_id (from `/explain`)
-- **`data/ha_entities_allowlist.json`** – Optional
+## Configuration
 
-### reliability defaults (recommended)
-- keep `OLLAMA_URL` pointed to a reachable Ollama host
-- set at least one local fallback model in `model_fallback.json`
-- if using cloud models, set `OPENROUTER_API_KEY`
-- use `/reliability` to inspect retry/timeout/error counters
+| File | Purpose |
+| --- | --- |
+| `.env` | Secrets and endpoints — see `.env.example` for every variable |
+| `config.json` | Wake word, home channel, download limit, persona, auto-conversation (created on first run) |
+| `model_fallback.json` | Local models to try when the chosen one is unavailable (largest first) |
+| `system_prompts.json` | Prompt templates |
 
-## Commands (summary)
+Runtime state lives in `data/` (git-ignored) and is written atomically; a corrupt file is kept as
+`<name>.corrupt-<timestamp>` instead of being overwritten:
 
-- **Use** `/help`
+- `whitelist.json`, `personas.json`, `reminders.json`, `models.json`, `conversations.json`, `adaptive_state.json`
+- `news/` (subscriptions, preferences, seen articles, digest queue)
+- `ha_mappings.json` (friendly name → entity id, from `/explain`), `ha_entities_allowlist.json` (optional)
+- `notes_state.json`, `clone_state.json`, `profanity.json`, `remover.json`, `update_state.json`
 
-### Commands have different permission levels
-- **permanent admin** hardcoded admin
-- **admin** (everything)
-- **himas** (HA + user)
-- **user** (basic)
+Older installs that kept `whitelist.json`, `personas.json` or `reminders.json` in the repo root are migrated on startup.
+
+## Permissions
+
+- **permanent admin** — hard-coded owner (`PERMANENT_ADMIN` in `integrations.py`)
+- **admin** — everything
+- **himas** — Home Assistant + user commands
+- **user** — basic commands
+
+## Commands
+
+`/help` lists every registered command; `/help <name>` shows one. The list is generated from the
+registered slash commands, so it is always current.
 
 ## Structure
 
-- **`main.py`** – Entry point, command registration, events
-- **`commands/`** – Slash commands:
-  - `general/` – status, checkwake
-  - `file/` – analyze, examine, interrogate, code_review, ocr, compare_files
-  - `chat/` – chat, forget
-  - `reminder/` – remind, reminders, cancel_reminder
-  - `persona/` – persona, persona_create
-  - `model/` – model, pull_model
-  - `download/` – download, download_limit
-  - `translate/` – translate
-  - `scripts/` – scripts, run
-  - `admin/` – whitelist, update, purge, restart, kill, setwake, sethome, setstatus
-  - `ha/` – himas, explain, listentities, removeentity, ha_status, find_sensor
-  - `help/` – help
-- **`commands/shared.py`** – Shared helpers
-- **`utils/llm_service.py`** – LLM calls, fallback, vision, file analysis
-- **`utils/ha_integration.py`** – Home Assistant parsing and control
-- **`conversations.py`** – Per-channel conversation history
-- **`models.py`** – User model preferences
-- **`personas.py`** – Persona definitions
-- **`services/`** – Reminder service
+- `main.py` — client, events, startup/shutdown
+- `commands/` — one package per area; `commands/__init__.py` (`COMMAND_GROUPS`) is the registry
+  - `commands/shared.py` — message chunking, permission guards (`require_user`, `require_admin`, …), embed/view helpers
+- `platforms/discord_chat.py` — message routing (wake word, DMs, adaptive command planning, coalescing)
+- `utils/llm_service.py` — chat entry points (`ask_llm`, `persist_turn`, …)
+- `utils/llm/` — providers (Ollama/OpenRouter), fallback, prompts, files, DM memory, command catalogue
+- `services/news/` — RSS fetch, scoring, summaries, delivery loop
+- `services/` — reminders, notes, clone, profanity, remover, local status server
+- `utils/json_store.py`, `utils/paths.py`, `utils/http.py` — persistence, paths, shared HTTP sessions
+- `conversations.py`, `models.py`, `personas.py`, `adaptive_dm.py`, `whitelist.py`, `config.py` — state managers
 
 ## Reliability notes
 
-- Discord message sends are retried automatically on transient HTTP failures.
-- LLM calls retry transient errors and model fallback is used when a model is unavailable.
-- DMs support compacted long history summaries to keep context while reducing token load.
-- File and image flows are handled through shared LLM service code paths, so behavior is consistent between chat and file commands.
+- Discord sends are retried on transient HTTP failures; LLM calls retry transient errors and fall back
+  to other local models (an unreachable Ollama fails fast).
+- Long DM histories are compacted into topic summaries to keep context small.
+- `/reliability` shows retry/timeout/error counters.
+- The status server (`services/status_server.py`) listens on port 3000 on all interfaces and serves
+  host details from `/status`; firewall it if the host is on an untrusted network.

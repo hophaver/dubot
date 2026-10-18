@@ -1,14 +1,26 @@
+# Secrets and runtime state
 .env
 config.json
 data/
-assets/original_avatar.png
-assets/original_avatar.gif
-assets/original_avatar.webp
 web/
+assets/original_avatar.*
+# Legacy root-level state files (moved to data/ on startup)
+whitelist.json
+personas.json
+reminders.json
+ha_entities_cache.json
+
+# Logs / process files
+*.log
+*.log.1
+.bot.pid*
+
+# Python
 __pycache__/
 *.pyc
 .venv/
 venv/
 env/
-.bot.pid
-bot.log
+
+# OS
+.DS_Store

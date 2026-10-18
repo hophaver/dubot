@@ -19,9 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import discord
 
 from config import is_bot_awake
-from llm_function_prefs import get_function_persona_name
-from models import model_manager
-from personas import persona_manager
+from commands.shared import read_first_txt_attachment
 from utils import dm_background
 from utils.json_store import load_json, save_json
 from utils.paths import data_path
@@ -283,13 +281,10 @@ def _projects_context(projects: List[Dict[str, Any]], now: float) -> str:
 
 
 def _model_and_system(user_id: int, prompt_key: str) -> Tuple[str, str, str]:
-    from utils.llm_service import get_enhanced_prompt
+    from utils.llm.prompts import function_model, function_system, get_enhanced_prompt
 
-    eff = model_manager.get_effective_model_for_function(user_id, "notes")
-    sys_p = get_enhanced_prompt(prompt_key)
-    base = persona_manager.get_persona(get_function_persona_name("notes")).strip()
-    full_sys = f"{base}\n\n{sys_p}" if base else sys_p
-    return eff.get("model", "qwen2.5:7b"), eff.get("provider", "local"), full_sys
+    model, provider = function_model(user_id, "notes")
+    return model, provider, function_system("notes", get_enhanced_prompt(prompt_key))
 
 
 async def _llm_json(user_id: int, prompt_key: str, user_block: str, num_predict: int) -> Optional[Dict[str, Any]]:
@@ -304,7 +299,8 @@ async def _llm_json(user_id: int, prompt_key: str, user_block: str, num_predict:
             provider=provider,
             request_options={"num_predict": num_predict, "temperature": 0.1},
         )
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ notes LLM call failed: {e}", flush=True)
         return None
     parsed = extract_json_object_loose(raw or "")
     return parsed or None
@@ -443,8 +439,8 @@ async def _idle_loop(client: discord.Client) -> None:
                     if pending is None or (pending > 0 and quiet):
                         _pending_count[cid] = 0
                         _spawn_update(client, cid)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ notes idle loop error: {e}", flush=True)
         await asyncio.sleep(LOOP_INTERVAL_SECONDS)
 
 
@@ -550,18 +546,6 @@ class NotesRevertView(discord.ui.View):
         self.stop()
 
 
-async def _read_first_txt_attachment(message: discord.Message) -> Optional[str]:
-    for att in list(getattr(message, "attachments", []) or []):
-        if not (att.filename or "").lower().endswith(".txt"):
-            continue
-        try:
-            raw = await att.read()
-            return raw.decode("utf-8", errors="replace")
-        except Exception:
-            return None
-    return None
-
-
 async def try_handle_notes_reply(client: discord.Client, message: discord.Message) -> bool:
     """Reply to a /notes message → apply edit to that channel's notes. Returns True if handled."""
     ref = message.reference
@@ -571,7 +555,7 @@ async def try_handle_notes_reply(client: discord.Client, message: discord.Messag
     if notes_cid is None:
         return False
 
-    file_body = await _read_first_txt_attachment(message)
+    file_body = await read_first_txt_attachment(message)
     text = (file_body if file_body is not None else (message.content or "")).strip()
     if not text:
         await message.reply("Reply with an edit (e.g. `remove X`) or attach an edited `.txt` of the notes.")

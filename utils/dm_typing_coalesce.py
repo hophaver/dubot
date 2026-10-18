@@ -83,16 +83,20 @@ class DmTypingCoalescer:
         start_loop: Callable[[int], Awaitable[None]],
     ) -> None:
         """Append text for this DM and wake / start the processor loop."""
-        st = self._state(channel_id)
-        async with st.cond:
-            st.lines.append(clean_content)
-            st.epoch += 1
-            st.anchor = anchor_message
-            st.handler_ctx = handler_ctx
-            # A sent message supersedes "still typing" from the composer for this burst.
-            st.typing_active = False
-            self._cancel_debounce(st)
-            st.cond.notify_all()
+        while True:
+            st = self._state(channel_id)
+            async with st.cond:
+                if self._states.get(channel_id) is not st:
+                    continue  # state was discarded as idle while we waited for the lock
+                st.lines.append(clean_content)
+                st.epoch += 1
+                st.anchor = anchor_message
+                st.handler_ctx = handler_ctx
+                # A sent message supersedes "still typing" from the composer for this burst.
+                st.typing_active = False
+                self._cancel_debounce(st)
+                st.cond.notify_all()
+                break
 
         await start_loop(channel_id)
 
@@ -104,12 +108,22 @@ class DmTypingCoalescer:
             st.lines = list(prefix) + list(st.lines)
             st.cond.notify_all()
 
-    async def wait_batch(self, channel_id: int) -> tuple[List[str], discord.Message, Dict[str, Any]]:
-        """Block until the user is not typing and there is at least one pending line; then dequeue all lines."""
+    async def wait_batch(
+        self, channel_id: int, idle_timeout: Optional[float] = None
+    ) -> Optional[tuple[List[str], discord.Message, Dict[str, Any]]]:
+        """Block until the user is not typing and there is at least one pending line; then dequeue all lines.
+
+        Returns None if nothing arrived within ``idle_timeout`` seconds.
+        """
         st = self._state(channel_id)
         async with st.cond:
             while st.typing_active or not st.lines:
-                await st.cond.wait()
+                try:
+                    await asyncio.wait_for(st.cond.wait(), timeout=idle_timeout)
+                except asyncio.TimeoutError:
+                    if st.typing_active or st.lines:
+                        continue
+                    return None
             batch = list(st.lines)
             st.lines.clear()
             anchor = st.anchor
@@ -117,6 +131,18 @@ class DmTypingCoalescer:
             if anchor is None:
                 raise RuntimeError("dm coalesce: anchor message missing")
             return batch, anchor, ctx
+
+    async def discard_if_idle(self, channel_id: int) -> bool:
+        """Forget this channel's state if nothing is pending. True if discarded."""
+        st = self._states.get(channel_id)
+        if st is None:
+            return True
+        async with st.cond:
+            if st.lines or st.typing_active or self._states.get(channel_id) is not st:
+                return False
+            self._cancel_debounce(st)
+            del self._states[channel_id]
+            return True
 
     async def should_abort_generation(self, channel_id: int) -> bool:
         """True while the user is typing or new text is queued (another message arrived)."""

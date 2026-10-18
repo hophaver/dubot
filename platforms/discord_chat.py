@@ -34,13 +34,21 @@ from utils import home_log
 from utils import reliability_telemetry
 from integrations import PERMANENT_ADMIN
 from adaptive_dm import ADAPTIVE_DM_SYSTEM_SUFFIX, adaptive_dm_manager, is_adaptive_context_export_filename
-from commands.shared import sanitize_discord_bot_content, _CHUNK_SEND_DELAY, _chunk_message, MAX_MESSAGE_LENGTH
+from commands.shared import (
+    MAX_MESSAGE_LENGTH,
+    _CHUNK_SEND_DELAY,
+    _chunk_message,
+    read_first_txt_attachment,
+    read_text_attachment,
+    sanitize_discord_bot_content,
+)
 from utils.dm_typing_coalesce import dm_typing_coalescer
 
 log = logging.getLogger(__name__)
 
 # One background consumer per DM channel (typing-aware coalescing).
 _dm_llm_tasks: Dict[int, asyncio.Task] = {}
+_DM_CONSUMER_IDLE_SECONDS = 15 * 60
 
 
 def _is_transient_http_error(exc: Exception) -> bool:
@@ -92,6 +100,50 @@ def _schedule_adaptive_post_reply_calibration(message: discord.Message, message_
         adaptive_dm_manager.run_tone_tuning_now(user_id, False)
     except Exception as e:
         home_log.log_sync(f"⚠️ Adaptive live tune failed: {e}")
+
+
+_GENERATION_FAILURES = {
+    "timeout": ("llm_timeouts", "timed out", "⚠️ I timed out while generating a reply. Please try again in a moment."),
+    "crash": ("llm_errors", "crashed", "⚠️ I hit an internal error while generating a reply. Please try again."),
+    "empty": ("llm_errors", "returned empty response", "⚠️ I could not generate a response this time. Please try again."),
+}
+
+
+async def _report_generation_failure(anchor: discord.Message, kind: str, user_id: int, exc: Optional[BaseException] = None) -> None:
+    """Count, report to the home channel, and tell the user that reply generation failed."""
+    counter, what, user_text = _GENERATION_FAILURES[kind]
+    n = reliability_telemetry.increment(counter)
+    detail = f"error={str(exc)[:280]}" if exc is not None else reliability_telemetry.format_snapshot("Counters")
+    await home_log.send_to_home(
+        f"🔴 Message generation {what} (#{n}) in channel {anchor.channel.id}. user={user_id}. {detail}"
+    )
+    await _send_with_retry(lambda: _send_chat_output(anchor, user_text))
+
+
+async def _send_reply_chunks(anchor: discord.Message, answer: str) -> None:
+    """Send a (possibly long) reply and remember the sent messages as the bot's last messages."""
+    cid = anchor.channel.id
+    chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            response = await _send_with_retry(lambda: _send_chat_output(anchor, chunk))
+        else:
+            await asyncio.sleep(_CHUNK_SEND_DELAY)
+            response = await _send_with_retry(lambda: anchor.channel.send(chunk))
+        conversation_manager.set_last_bot_message(cid, response.id)
+    conversation_manager.save()
+
+
+async def _send_long_chat_output(message: discord.Message, text: str):
+    """Like _send_chat_output but splits long text into several messages instead of truncating."""
+    sent = None
+    for i, chunk in enumerate(_chunk_message(text or "", MAX_MESSAGE_LENGTH)):
+        if i:
+            await asyncio.sleep(_CHUNK_SEND_DELAY)
+            sent = await message.channel.send(chunk)
+        else:
+            sent = await _send_chat_output(message, chunk)
+    return sent
 
 
 async def _send_chat_output(message: discord.Message, content=None, *, embed=None, embeds=None, file=None, files=None, view=None):
@@ -401,12 +453,9 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
                 message, content=content, file=discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
             )
         )
-        try:
-            cid = message.channel.id
-            conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
-            conversation_manager.add_message(cid, "assistant", content)
-        except Exception:
-            pass
+        cid = message.channel.id
+        conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
+        conversation_manager.add_message(cid, "assistant", content)
         conversation_manager.set_last_bot_message(message.channel.id, sent.id)
         conversation_manager.save()
         _schedule_adaptive_post_reply_calibration(message, clean_content)
@@ -941,7 +990,7 @@ class AdaptiveManualMergeConfirmView(View):
 
             export_adaptive_to_personas(_pm)
         except Exception:
-            pass
+            log.exception("adaptive persona export failed")
         for child in self.children:
             child.disabled = True
         await interaction.edit_original_response(view=self)
@@ -989,31 +1038,9 @@ class AdaptiveManualMergeConfirmView(View):
         self.stop()
 
 
-async def _read_first_txt_attachment(message: discord.Message) -> Optional[str]:
-    for att in list(getattr(message, "attachments", []) or []):
-        fn = (att.filename or "").lower()
-        if not fn.endswith(".txt"):
-            continue
-        try:
-            raw = await att.read()
-            return raw.decode("utf-8", errors="replace")
-        except Exception:
-            return None
-    return None
-
-
 async def _read_adaptive_context_txt_attachment(message: discord.Message) -> Tuple[Optional[str], Optional[str]]:
     """Return (filename, text) for exact adaptive-dm-context.txt attachment."""
-    for att in list(getattr(message, "attachments", []) or []):
-        fn = (att.filename or "").strip()
-        if not is_adaptive_context_export_filename(fn):
-            continue
-        try:
-            raw = await att.read()
-            return fn, raw.decode("utf-8", errors="replace")
-        except Exception:
-            return fn, None
-    return None, None
+    return await read_text_attachment(message, is_adaptive_context_export_filename)
 
 
 async def _try_handle_dm_status_reply(client: discord.Client, message: discord.Message) -> bool:
@@ -1046,7 +1073,7 @@ async def _try_handle_dm_status_reply(client: discord.Client, message: discord.M
             return True
         pasted = ctx_body.strip()
     else:
-        file_body = await _read_first_txt_attachment(message)
+        file_body = await read_first_txt_attachment(message)
         pasted = (file_body.strip() if file_body is not None else text)
 
     if not pasted:
@@ -1223,7 +1250,7 @@ async def _handle_adaptive_utility_commands(client: discord.Client, message: dis
         if not out:
             await _send_chat_output(message, "❌ Translation failed.")
             return True
-        await _send_chat_output(message, out[:1900])
+        await _send_long_chat_output(message, out)
         return True
 
     if intent == "dm_history":
@@ -1292,7 +1319,7 @@ async def _handle_adaptive_utility_commands(client: discord.Client, message: dis
         except Exception as exc:
             await _send_chat_output(message, f"❌ Compare failed: {str(exc)[:200]}")
             return True
-        await _send_chat_output(message, res[:1900] if res else "❌ Empty result.")
+        await _send_long_chat_output(message, res or "❌ Empty result.")
         return True
 
     # analyze / ocr / code-review / examine / interrogate
@@ -1337,7 +1364,7 @@ async def _handle_adaptive_utility_commands(client: discord.Client, message: dis
     except Exception as exc:
         await _send_chat_output(message, f"❌ File analysis failed: {str(exc)[:200]}")
         return True
-    await _send_chat_output(message, res[:1900] if res else "❌ Empty result.")
+    await _send_long_chat_output(message, res or "❌ Empty result.")
     return True
 
 
@@ -1415,7 +1442,7 @@ async def _handle_adaptive_command_flow(client: discord.Client, message: discord
         if await _handle_adaptive_utility_commands(client, message, clean_content):
             return True
     except Exception:
-        pass
+        log.exception("adaptive utility command failed; falling back to chat")
 
     if _looks_like_himas_request(clean_content):
         command_obj = client.tree.get_command("himas")
@@ -1497,12 +1524,20 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
     """Serialize DM LLM work: wait for typing to settle, merge lines, cancel superseded generations."""
     while True:
         try:
-            batch, anchor, ctx = await dm_typing_coalescer.wait_batch(channel_id)
+            got = await dm_typing_coalescer.wait_batch(channel_id, idle_timeout=_DM_CONSUMER_IDLE_SECONDS)
         except asyncio.CancelledError:
             return
         except Exception:
             log.exception("dm coalesce wait_batch failed ch=%s", channel_id)
             return
+        if got is None:
+            # Idle: free this channel's task and state (a new message starts a fresh loop).
+            if await dm_typing_coalescer.discard_if_idle(channel_id):
+                if _dm_llm_tasks.get(channel_id) is asyncio.current_task():
+                    del _dm_llm_tasks[channel_id]
+                return
+            continue
+        batch, anchor, ctx = got
 
         combined = _join_dm_coalesced_user_text(batch)
         if not combined:
@@ -1572,25 +1607,11 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
                 timeout=150,
             )
         except asyncio.TimeoutError:
-            timeout_count = reliability_telemetry.increment("llm_timeouts")
-            await home_log.send_to_home(
-                f"🔴 Message generation timed out (timeout #{timeout_count}) in channel {cid}. "
-                f"user={user_id}. {reliability_telemetry.format_snapshot('Counters')}"
-            )
-            await _send_with_retry(
-                lambda: _send_chat_output(anchor, "⚠️ I timed out while generating a reply. Please try again in a moment.")
-            )
+            await _report_generation_failure(anchor, "timeout", user_id)
             await dm_typing_coalescer.prepend_lines_async(cid, batch)
             continue
         except Exception as exc:
-            error_count = reliability_telemetry.increment("llm_errors")
-            await home_log.send_to_home(
-                f"🔴 Message generation crashed (error #{error_count}) in channel {cid}. "
-                f"user={user_id}. error={str(exc)[:280]}"
-            )
-            await _send_with_retry(
-                lambda: _send_chat_output(anchor, "⚠️ I hit an internal error while generating a reply. Please try again.")
-            )
+            await _report_generation_failure(anchor, "crash", user_id, exc)
             await dm_typing_coalescer.prepend_lines_async(cid, batch)
             continue
 
@@ -1610,14 +1631,7 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
                 if merged:
                     await dm_typing_coalescer.prepend_lines_async(cid, merged)
                 continue
-            error_count = reliability_telemetry.increment("llm_errors")
-            await home_log.send_to_home(
-                f"🔴 Message generation returned empty response (error #{error_count}) in channel {cid}. "
-                f"user={user_id}. {reliability_telemetry.format_snapshot('Counters')}"
-            )
-            await _send_with_retry(
-                lambda: _send_chat_output(anchor, "⚠️ I could not generate a response this time. Please try again.")
-            )
+            await _report_generation_failure(anchor, "empty", user_id)
             continue
 
         try:
@@ -1625,18 +1639,7 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
         except Exception as exc:
             await home_log.send_to_home(f"⚠️ Failed to persist DM turn in channel {cid}: {str(exc)[:300]}")
 
-        chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
-        response = None
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                response = await _send_with_retry(lambda: _send_chat_output(anchor, chunk))
-            else:
-                response = await _send_with_retry(lambda: ch.send(chunk))
-            conversation_manager.set_last_bot_message(cid, response.id)
-            if i < len(chunks) - 1:
-                await asyncio.sleep(_CHUNK_SEND_DELAY)
-
-        conversation_manager.save()
+        await _send_reply_chunks(anchor, answer)
         _schedule_adaptive_post_reply_calibration(anchor, combined)
 
 
@@ -1699,7 +1702,7 @@ async def process_discord_message(client, message, permission, conversation_mana
             if await _try_handle_dm_status_reply(client, message):
                 return True
         except Exception:
-            pass
+            log.exception("DM status reply handler failed; falling back to chat")
 
     if not clean_content and message.attachments:
         clean_content = "Please analyze this file and use it as context for our conversation."
@@ -1738,8 +1741,7 @@ async def process_discord_message(client, message, permission, conversation_mana
             if await _handle_adaptive_command_flow(client, message, clean_content):
                 return True
         except Exception:
-            # If adaptive command routing fails, fall back to normal chat flow.
-            pass
+            log.exception("adaptive command routing failed; falling back to chat")
 
     if (
         is_dm
@@ -1750,7 +1752,7 @@ async def process_discord_message(client, message, permission, conversation_mana
             if await _try_send_adaptive_dm_imagine(client, message, clean_content):
                 return True
         except Exception:
-            pass
+            log.exception("adaptive imagine handler failed; falling back to chat")
 
     if is_dm:
         conversation_manager.touch_dm_user_activity(message.channel.id)
@@ -1835,49 +1837,17 @@ async def process_discord_message(client, message, permission, conversation_mana
                 timeout=150,
             )
         except asyncio.TimeoutError:
-            timeout_count = reliability_telemetry.increment("llm_timeouts")
-            await home_log.send_to_home(
-                f"🔴 Message generation timed out (timeout #{timeout_count}) in channel {message.channel.id}. "
-                f"user={message.author.id}. {reliability_telemetry.format_snapshot('Counters')}"
-            )
-            await _send_with_retry(
-                lambda: _send_chat_output(message, "⚠️ I timed out while generating a reply. Please try again in a moment.")
-            )
+            await _report_generation_failure(message, "timeout", message.author.id)
             return True
         except Exception as exc:
-            error_count = reliability_telemetry.increment("llm_errors")
-            await home_log.send_to_home(
-                f"🔴 Message generation crashed (error #{error_count}) in channel {message.channel.id}. "
-                f"user={message.author.id}. error={str(exc)[:280]}"
-            )
-            await _send_with_retry(
-                lambda: _send_chat_output(message, "⚠️ I hit an internal error while generating a reply. Please try again.")
-            )
+            await _report_generation_failure(message, "crash", message.author.id, exc)
             return True
 
         if not answer:
-            error_count = reliability_telemetry.increment("llm_errors")
-            await home_log.send_to_home(
-                f"🔴 Message generation returned empty response (error #{error_count}) in channel {message.channel.id}. "
-                f"user={message.author.id}. {reliability_telemetry.format_snapshot('Counters')}"
-            )
-            await _send_with_retry(
-                lambda: _send_chat_output(message, "⚠️ I could not generate a response this time. Please try again.")
-            )
+            await _report_generation_failure(message, "empty", message.author.id)
             return True
 
-        chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
-        response = None
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                response = await _send_with_retry(lambda: _send_chat_output(message, chunk))
-            else:
-                response = await _send_with_retry(lambda: message.channel.send(chunk))
-            conversation_manager.set_last_bot_message(message.channel.id, response.id)
-            if i < len(chunks) - 1:
-                await asyncio.sleep(_CHUNK_SEND_DELAY)
-
-        conversation_manager.save()
+        await _send_reply_chunks(message, answer)
         return True
 
 async def process_wakeword_download(client, message, link_or_empty):
@@ -1983,7 +1953,7 @@ async def process_wakeword_admin_command(client, message, command, content, perm
         if not content:
             return False
         answer = await ask_home_assistant(content)
-        await message.reply(answer[:1900])
+        await _send_long_chat_output(message, answer)
         return True
     elif command == "sleep" and message.author.id == PERMANENT_ADMIN:
         set_bot_awake(False)

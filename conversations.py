@@ -1,3 +1,4 @@
+import asyncio
 import re
 import time
 from collections import defaultdict
@@ -8,6 +9,7 @@ from utils.json_store import load_json, save_json
 from utils.paths import data_path
 
 
+_SAVE_DEBOUNCE_SECONDS = 1.0
 DM_SESSION_GAP_SECONDS = 36 * 3600  # treat as fresh session after this idle (unless reply-to-bot)
 _TOPIC_STALE_SECONDS = 30 * 86400  # forget topic summaries not touched in ~30 days
 _DM_TOPICS_MAX = 14
@@ -65,6 +67,8 @@ class ConversationManager:
     def __init__(self, save_file=data_path("conversations.json")):
         self.max_history = get_chat_history()
         self.save_file = save_file
+        self._dirty = False
+        self._flush_handle: Optional[asyncio.TimerHandle] = None
         self.conversations = defaultdict(list)
         self.last_bot_message = {}
         self.recent_bot_message_ids = defaultdict(list)  # per channel, last 10 bot message ids (in-memory only)
@@ -325,18 +329,38 @@ class ConversationManager:
         self.recent_bot_message_ids[key] = ids[-10:]
 
     def save(self):
+        """Mark dirty. Inside the event loop, writes are coalesced (several saves per turn -> one write).
+
+        Outside a loop it writes immediately; call flush() before shutdown/restart.
+        """
+        self._dirty = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.flush()
+            return
+        if self._flush_handle is None:
+            self._flush_handle = loop.call_later(_SAVE_DEBOUNCE_SECONDS, self.flush)
+
+    def flush(self):
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        if not self._dirty:
+            return
+        self._dirty = False
         save_json(
             self.save_file,
             {
-                    "conversations": dict(self.conversations),
-                    "last_bot_message": self.last_bot_message,
-                    "dm_history_cutoff": self.dm_history_cutoff,
-                    "dm_summaries": dict(self.dm_summaries),
-                    "dm_topics": dict(self.dm_topics),
-                    "dm_profile_llm": dict(self.dm_profile_llm),
-                    "dm_last_user_ts": dict(self.dm_last_user_ts),
-                    "dm_adaptive_user_id": dict(self.dm_adaptive_user_id),
-                    "dm_fast_reply_until": self.dm_fast_reply_until,
+                "conversations": dict(self.conversations),
+                "last_bot_message": self.last_bot_message,
+                "dm_history_cutoff": self.dm_history_cutoff,
+                "dm_summaries": dict(self.dm_summaries),
+                "dm_topics": dict(self.dm_topics),
+                "dm_profile_llm": dict(self.dm_profile_llm),
+                "dm_last_user_ts": dict(self.dm_last_user_ts),
+                "dm_adaptive_user_id": dict(self.dm_adaptive_user_id),
+                "dm_fast_reply_until": self.dm_fast_reply_until,
             },
             indent=None,
         )

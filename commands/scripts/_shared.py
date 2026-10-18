@@ -18,7 +18,7 @@ def list_scripts():
         return []
     out = []
     for name in sorted(os.listdir(SCRIPTS_DIR)):
-        if name.startswith("."):
+        if name.startswith((".", "_")):  # hidden files and helper modules are not runnable
             continue
         path = os.path.join(SCRIPTS_DIR, name)
         if os.path.isfile(path) and name.lower().endswith(ALLOWED_EXTENSIONS):
