@@ -525,11 +525,7 @@ def build_notes_payload(channel_id: int, channel_name: str) -> Tuple[discord.Emb
     archived = sum(1 for p in projects if _is_archived(p, now))
     embed = discord.Embed(
         title=f"Notes · #{channel_name}",
-        description=(
-            f"**Attachment:** `{NOTES_EXPORT_FILENAME}` — products/projects discussed here.\n\n"
-            "**Reply** to this message with an edit (e.g. `remove X`, `merge A into B`, `X is now called Y`) "
-            "or attach an edited `.txt` of the notes. You get a **Revert** button after each edit."
-        ),
+        description="Reply with edits, or attach an edited .txt of the notes",
         color=discord.Color.blurple(),
     )
     embed.add_field(name="On", value="yes" if st.get("enabled") else "no", inline=True)
