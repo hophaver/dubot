@@ -521,17 +521,11 @@ def build_notes_payload(channel_id: int, channel_name: str) -> Tuple[discord.Emb
     last_run = float(st.get("last_run_ts") or 0)
     body = render_notes(channel_name, projects, last_run)
     attachment = discord.File(io.BytesIO(body.encode("utf-8")), filename=NOTES_EXPORT_FILENAME)
-    now = time.time()
-    archived = sum(1 for p in projects if _is_archived(p, now))
     embed = discord.Embed(
         title=f"Notes · #{channel_name}",
         description="Reply with edits, or attach an edited .txt of the notes",
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="On", value="yes" if st.get("enabled") else "no", inline=True)
-    embed.add_field(name="Projects", value=str(len(projects) - archived), inline=True)
-    embed.add_field(name="Archived", value=str(archived), inline=True)
-    embed.add_field(name="Last update", value=f"<t:{int(last_run)}:R>" if last_run else "never", inline=True)
     return embed, attachment
 
 
