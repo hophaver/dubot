@@ -59,13 +59,10 @@ def _schedule_adaptive_profile_update(interaction: discord.Interaction, message:
         if not adaptive_dm_manager.is_enabled(user_id):
             return
 
-        async def _runner():
-            await asyncio.to_thread(adaptive_dm_manager.apply_live_message_tune, user_id, message)
-            await asyncio.to_thread(adaptive_dm_manager.run_tone_tuning_now, user_id, False)
-
-        asyncio.create_task(_runner())
-    except Exception:
-        pass
+        adaptive_dm_manager.apply_live_message_tune(user_id, message)
+        adaptive_dm_manager.run_tone_tuning_now(user_id, False)
+    except Exception as e:
+        print(f"⚠️ Adaptive live tune failed: {e}")
 
 
 def register(client: discord.Client):
@@ -112,13 +109,6 @@ def register(client: discord.Client):
                     record_in_conversation=not skip_adaptive_transcript,
                 )
                 await send_long_message(interaction, result)
-                if not skip_adaptive_transcript:
-                    conversation_manager.add_message(
-                        interaction.channel.id, "user",
-                        f"{interaction.user.name} says: [Compare files] {message}"
-                    )
-                    conversation_manager.add_message(interaction.channel.id, "assistant", result)
-                    conversation_manager.save()
                 return
             except Exception as e:
                 await interaction.followup.send(f"⚠️ Error comparing files: {str(e)[:100]}")
@@ -136,10 +126,6 @@ def register(client: discord.Client):
                     record_in_conversation=not skip_adaptive_transcript,
                 )
                 await send_long_message(interaction, result)
-                if not skip_adaptive_transcript:
-                    conversation_manager.add_message(interaction.channel.id, "user", f"{interaction.user.name} says: [File: {a['filename']}] {message}")
-                    conversation_manager.add_message(interaction.channel.id, "assistant", result)
-                    conversation_manager.save()
                 return
             except Exception as e:
                 await interaction.followup.send(f"⚠️ Error analyzing file: {str(e)[:100]}")

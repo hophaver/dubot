@@ -14,17 +14,28 @@ from integrations import (
     OLLAMA_URL,
     OPENROUTER_API_KEY,
 )
-import sys
-import os
-
 from utils import home_log
-
-# Add the project root to the path so we can import from utils
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.json_store import CachedJsonFile
+from utils.paths import data_path
 
 # Optional allowlist: only these entity_ids are visible to the bot (data/ha_entities_allowlist.json).
 # If missing or empty, all entities from the HA token are used.
-HA_ENTITIES_ALLOWLIST_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ha_entities_allowlist.json")
+HA_ENTITIES_ALLOWLIST_FILE = data_path("ha_entities_allowlist.json")
+# Friendly name -> entity_id mappings (from /explain).
+HA_MAPPINGS_FILE = data_path("ha_mappings.json")
+
+_allowlist_store = CachedJsonFile(HA_ENTITIES_ALLOWLIST_FILE, default=[])
+_mappings_store = CachedJsonFile(
+    HA_MAPPINGS_FILE, default={}, normalize=lambda d: d if isinstance(d, dict) else {}
+)
+
+
+def load_ha_mappings() -> Dict[str, str]:
+    return _mappings_store.get()
+
+
+def save_ha_mappings(mappings: Dict[str, str]) -> None:
+    _mappings_store.save(mappings, indent=2)
 
 # Home Assistant service constants
 HA_SERVICES = {
@@ -220,17 +231,24 @@ class HomeAssistantManager:
     
     def _get_entity_allowlist(self) -> Optional[List[str]]:
         """Return list of allowed entity_ids from data/ha_entities_allowlist.json, or None if not used."""
-        try:
-            if not os.path.isfile(HA_ENTITIES_ALLOWLIST_FILE):
-                return None
-            with open(HA_ENTITIES_ALLOWLIST_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            ids = data if isinstance(data, list) else data.get("entity_ids", data.get("allowlist", []))
-            if not ids:
-                return None
-            return [str(e).strip() for e in ids if e]
-        except (FileNotFoundError, json.JSONDecodeError):
+        data = _allowlist_store.get()
+        ids = data if isinstance(data, list) else data.get("entity_ids", data.get("allowlist", []))
+        if not ids:
             return None
+        return [str(e).strip() for e in ids if e]
+
+    async def get_api_status(self) -> Tuple[int, Dict[str, Any]]:
+        """GET /api/ -> (http_status, json body or {}). Status 0 means the request itself failed."""
+        try:
+            session = await self.get_session()
+            async with session.get(
+                f"{HA_URL}/api/", headers=self.headers, timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                body = await response.json(content_type=None) if response.status == 200 else {}
+                return response.status, body if isinstance(body, dict) else {}
+        except Exception as e:
+            home_log.log_sync(f"HA status check failed: {e}")
+            return 0, {}
 
     async def get_all_entities(self, force_refresh: bool = False) -> Dict:
         """Get all entities from Home Assistant with caching. If ha_entities_allowlist.json exists, only those entities are returned."""
@@ -544,14 +562,8 @@ User command: "{user_command}"
         
         if not entity_id:
             # Try custom mappings from data/ha_mappings.json (from /explain)
-            try:
-                mapping_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ha_mappings.json")
-                if os.path.exists(mapping_file):
-                    with open(mapping_file, 'r') as f:
-                        mappings = json.load(f)
-                    entity_id = mappings.get(entity_name.lower()) or mappings.get(entity_name.strip().lower())
-            except Exception:
-                pass
+            mappings = load_ha_mappings()
+            entity_id = mappings.get(entity_name.lower()) or mappings.get(entity_name.strip().lower())
             
         if not entity_id:
             return False, f"Could not find entity: \"{entity_name}\". Use /explain to add a mapping, e.g. /explain \"{entity_name}\" light.your_entity_id", None

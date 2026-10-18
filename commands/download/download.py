@@ -3,7 +3,7 @@ import discord
 from discord import app_commands
 from whitelist import get_user_permission
 from config import get_download_limit_mb
-from commands.download._helpers import extract_urls, download_url_sync
+from commands.download._helpers import DOWNLOAD_EXTENSIONS, IMAGE_EXTENSIONS, extract_urls, download_url_sync
 
 def register(client: discord.Client):
     @client.tree.command(name="download", description="Download media from a link or the last message with media and send to chat")
@@ -32,13 +32,14 @@ def register(client: discord.Client):
                         break
                     for att in msg.attachments:
                         name = (att.filename or "").lower()
-                        if any(name.endswith(ext) for ext in (".mp4", ".webm", ".mkv", ".mov", ".mp3", ".wav", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
+                        if os.path.splitext(name)[1] in DOWNLOAD_EXTENSIONS:
                             target_attachment = att
                             break
                     if target_attachment:
                         break
-            except Exception:
-                pass
+            except discord.HTTPException as e:
+                await interaction.followup.send(f"❌ Couldn't read recent messages: {e}")
+                return
         if not target_url and not target_attachment:
             await interaction.followup.send("❌ No link or media found. Send a link, or use `/download` after a message that contains a link or attachment.")
             return
@@ -64,7 +65,7 @@ def register(client: discord.Client):
             return
         from utils.llm_service import ask_llm
         ext = os.path.splitext(filename or "")[1].lower()
-        is_image = ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+        is_image = ext in IMAGE_EXTENSIONS
         if is_image:
             try:
                 reply = await ask_llm(

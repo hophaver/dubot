@@ -1,9 +1,14 @@
-import json
+import asyncio
 import os
 import re
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
+
+_SAVE_DEBOUNCE_SECONDS = 1.0
 
 # Minimal base instructions when adaptive DM assistant is on (replaces global persona for that DM).
 ADAPTIVE_DM_BASE_PERSONA = (
@@ -91,15 +96,17 @@ def text_for_adaptive_tuning_batch(raw: Optional[str]) -> Optional[str]:
 class AdaptiveDmManager:
     """DM-only per-user adaptive assistant state."""
 
-    def __init__(self, save_file: str = "data/adaptive_state.json"):
-        legacy = "data/jarvis_state.json"
-        if save_file == "data/adaptive_state.json" and os.path.isfile(legacy) and not os.path.isfile(save_file):
+    def __init__(self, save_file: str = data_path("adaptive_state.json")):
+        legacy = data_path("jarvis_state.json")
+        if os.path.isfile(legacy) and not os.path.isfile(save_file):
             try:
                 os.replace(legacy, save_file)
             except OSError:
                 pass
         self.save_file = save_file
         self.state: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self._dirty = False
+        self._flush_handle: Optional[asyncio.TimerHandle] = None
         self._load()
 
     @staticmethod
@@ -839,17 +846,32 @@ class AdaptiveDmManager:
         return False
 
     def save(self) -> None:
-        os.makedirs(os.path.dirname(self.save_file), exist_ok=True)
-        with open(self.save_file, "w") as f:
-            json.dump({"state": dict(self.state)}, f, indent=2)
+        """Mark state dirty. Inside the event loop, writes are coalesced (one write per burst of changes).
+
+        State must only be mutated from the event loop thread; call flush() before shutdown.
+        """
+        self._dirty = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.flush()
+            return
+        if self._flush_handle is None:
+            self._flush_handle = loop.call_later(_SAVE_DEBOUNCE_SECONDS, self.flush)
+
+    def flush(self) -> None:
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        if not self._dirty:
+            return
+        self._dirty = False
+        save_json(self.save_file, {"state": dict(self.state)})
 
     def _load(self) -> None:
-        try:
-            with open(self.save_file) as f:
-                data = json.load(f)
+        data = load_json(self.save_file, {})
+        if isinstance(data, dict):
             self.state = defaultdict(dict, data.get("state", {}))
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
 
 
 adaptive_dm_manager = AdaptiveDmManager()
@@ -912,6 +934,7 @@ def export_adaptive_to_personas(persona_manager) -> None:
             persona_manager.personas[k] = v
         if state_dirty:
             adaptive_dm_manager.save()
+        adaptive_dm_manager.flush()
         if keys_written or removed:
             persona_manager.save_personas()
     except OSError:

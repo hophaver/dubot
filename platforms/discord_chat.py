@@ -91,14 +91,12 @@ def _schedule_adaptive_post_reply_calibration(message: discord.Message, message_
     if not adaptive_dm_manager.is_enabled(user_id):
         return
 
-    async def _runner():
-        try:
-            await asyncio.to_thread(adaptive_dm_manager.apply_live_message_tune, user_id, message_text)
-            await asyncio.to_thread(adaptive_dm_manager.run_tone_tuning_now, user_id, False)
-        except Exception:
-            pass
-
-    asyncio.create_task(_runner())
+    # Pure regex work: run on the loop so adaptive state is never mutated from a worker thread.
+    try:
+        adaptive_dm_manager.apply_live_message_tune(user_id, message_text)
+        adaptive_dm_manager.run_tone_tuning_now(user_id, False)
+    except Exception as e:
+        home_log.log_sync(f"⚠️ Adaptive live tune failed: {e}")
 
 
 async def _send_chat_output(message: discord.Message, content=None, *, embed=None, embeds=None, file=None, files=None, view=None):
@@ -405,9 +403,12 @@ async def _try_send_adaptive_dm_imagine(client: discord.Client, message: discord
                 content = content[:1890].rstrip() + "…"
 
             ext = _ext_for_generated_image_mime(mime)
-            file = discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
-
-            sent = await _send_with_retry(lambda: _send_chat_output(message, content=content, file=file))
+            # Build a fresh discord.File per attempt: a retried send would otherwise reuse a consumed stream.
+            sent = await _send_with_retry(
+                lambda: _send_chat_output(
+                    message, content=content, file=discord.File(io.BytesIO(img_bytes), filename=f"imagine{ext}")
+                )
+            )
             try:
                 cid = message.channel.id
                 conversation_manager.add_message(cid, "user", f"{message.author.name} says: {clean_content}")
@@ -1643,8 +1644,8 @@ async def _dm_llm_consumer_loop(channel_id: int) -> None:
                 persist=True,
                 reuse_response=answer,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            await home_log.send_to_home(f"⚠️ Failed to persist DM turn in channel {cid}: {str(exc)[:300]}")
 
         chunks = _chunk_message(answer, MAX_MESSAGE_LENGTH)
         response = None

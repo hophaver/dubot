@@ -1,159 +1,74 @@
-import os
 import asyncio
-import subprocess
 from typing import Optional
 import discord
 from discord import app_commands
-from whitelist import is_admin
-from utils import home_log
-from ._shared import list_scripts, parse_when, SCRIPTS_DIR
+from commands.shared import require_admin
+from utils import dm_background, home_log
+from ._shared import parse_when, resolve_script, run_script_file
 
 # Scripts that wait for remote output (e.g. tail -f until sentinel): need longer timeout and background run
 LONG_RUNNING_SCRIPTS = {"site-update-1.py", "site-start-1.py"}
 LONG_RUNNING_TIMEOUT = 600  # seconds
+DEFAULT_TIMEOUT = 120
+SCHEDULED_TIMEOUT = 300
+
+
+def _result_embed(name: str, result, scheduled: bool = False) -> discord.Embed:
+    out = result.output
+    if len(out) > 4000:
+        out = out[:4000] + "..."
+    ok = result.returncode == 0
+    embed = discord.Embed(
+        title=f"📜 Ran `{name}`" + (" (scheduled)" if scheduled else ""),
+        description=out,
+        color=discord.Color.green() if ok else discord.Color.orange(),
+    )
+    embed.set_footer(text="Timed out" if result.returncode is None else f"Exit code: {result.returncode}")
+    return embed
+
+
+async def _run_to_home(name: str, timeout: float, scheduled: bool = False, delay: float = 0.0) -> None:
+    if delay > 0:
+        await asyncio.sleep(delay)
+    try:
+        result = await run_script_file(name, timeout)
+        await home_log.send_to_home(embed=_result_embed(name, result, scheduled))
+    except Exception as e:
+        await home_log.send_to_home(content=f"❌ Script `{name}` error: {str(e)[:500]}")
 
 
 def register(client: discord.Client):
     @client.tree.command(name="run", description="Run a script from the scripts folder (now or at specified time)")
     @app_commands.describe(script="Script name (e.g. backup.py)", when="Optional: 'now', 'in 5 minutes', or 'at 15:30' (default: now)")
     async def run_script(interaction: discord.Interaction, script: str, when: Optional[str] = "now"):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_admin(interaction):
             return
-        names = list_scripts()
-        chosen = None
-        base = script.lower().strip()
-        for ext in (".py", ".sh", ".bash"):
-            if base.endswith(ext):
-                base = base[: -len(ext)]
-                break
-        for n in names:
-            if n == script or n == script.strip() or n.lower() == script.lower():
-                chosen = n
-                break
-            if base and n.lower() == base + n[n.rfind(".") :]:
-                chosen = n
-                break
-        if not chosen:
-            for n in names:
-                if n.lower().startswith(script.lower().strip()):
-                    chosen = n
-                    break
+        chosen = resolve_script(script)
         if not chosen:
             await interaction.response.send_message(f"❌ Script `{script}` not found. Use `/scripts` to list.", ephemeral=True)
             return
-        path = os.path.join(SCRIPTS_DIR, chosen)
-        if not os.path.isfile(path):
-            await interaction.response.send_message("❌ Script file not found.", ephemeral=True)
+        delay = parse_when(when)
+        if delay is None:
+            await interaction.response.send_message(
+                f"❌ Couldn't parse `when: {when}`. Use `now`, `in 5 minutes`, `in 2 hours`, or `at 15:30`.",
+                ephemeral=True,
+            )
             return
-        run_now, delay_sec, _ = parse_when(when)
-        if not run_now and delay_sec is not None and delay_sec > 0:
-            await interaction.response.send_message(f"⏱️ Scheduled `{chosen}` to run in {int(delay_sec)}s.")
-            async def run_later():
-                await asyncio.sleep(delay_sec)
-                try:
-                    if chosen.endswith(".py"):
-                        result = subprocess.run([os.environ.get("PYTHON", "python3"), path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=300)
-                    else:
-                        result = subprocess.run(["bash", path], cwd=SCRIPTS_DIR, capture_output=True, text=True, timeout=300)
-                    out = (result.stdout or "").strip() or "(no output)"
-                    err = (result.stderr or "").strip()
-                    if result.returncode != 0:
-                        out = f"Exit code: {result.returncode}\n{out}"
-                        if err:
-                            out += f"\n{err}"
-                    if len(out) > 1900:
-                        out = out[:1900] + "..."
-                    embed = discord.Embed(title=f"📜 Ran `{chosen}` (scheduled)", description=out, color=discord.Color.green() if result.returncode == 0 else discord.Color.orange())
-                    embed.set_footer(text=f"Exit code: {result.returncode}")
-                    await home_log.send_to_home(embed=embed)
-                except subprocess.TimeoutExpired:
-                    await home_log.send_to_home(content=f"❌ Script `{chosen}` timed out (300s).")
-                except Exception as e:
-                    home_log.log_sync(f"Script run error: {e}")
-            asyncio.create_task(run_later())
+        if delay > 0:
+            await interaction.response.send_message(f"⏱️ Scheduled `{chosen}` to run in {int(delay)}s.")
+            dm_background.spawn(_run_to_home(chosen, SCHEDULED_TIMEOUT, scheduled=True, delay=delay))
             return
-        is_long_running = chosen in LONG_RUNNING_SCRIPTS
-        if is_long_running:
+        if chosen in LONG_RUNNING_SCRIPTS:
             await interaction.response.send_message(
                 f"⏳ Running `{chosen}` (may take a few minutes). Output will be sent to home when done.",
                 ephemeral=True,
             )
-
-        async def run_and_send_to_home():
-            timeout = LONG_RUNNING_TIMEOUT if is_long_running else 120
-            try:
-                if chosen.endswith(".py"):
-                    result = subprocess.run(
-                        [os.environ.get("PYTHON", "python3"), path],
-                        cwd=SCRIPTS_DIR,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                    )
-                else:
-                    result = subprocess.run(
-                        ["bash", path],
-                        cwd=SCRIPTS_DIR,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                    )
-                out = (result.stdout or "").strip() or "(no output)"
-                err = (result.stderr or "").strip()
-                if result.returncode != 0:
-                    out = f"Exit code: {result.returncode}\n{out}"
-                    if err:
-                        out += f"\n{err}"
-                if len(out) > 1900:
-                    out = out[:1900] + "..."
-                embed = discord.Embed(
-                    title=f"📜 Ran `{chosen}`",
-                    description=out,
-                    color=discord.Color.green() if result.returncode == 0 else discord.Color.orange(),
-                )
-                embed.set_footer(text=f"Exit code: {result.returncode}")
-                await home_log.send_to_home(embed=embed)
-            except subprocess.TimeoutExpired:
-                await home_log.send_to_home(content=f"❌ Script `{chosen}` timed out ({timeout}s).")
-            except Exception as e:
-                await home_log.send_to_home(content=f"❌ Script `{chosen}` error: {str(e)[:500]}")
-
-        if is_long_running:
-            asyncio.create_task(run_and_send_to_home())
+            dm_background.spawn(_run_to_home(chosen, LONG_RUNNING_TIMEOUT))
             return
         await interaction.response.defer()
-        try:
-            result = subprocess.run(
-                [os.environ.get("PYTHON", "python3"), path] if chosen.endswith(".py") else ["bash", path],
-                cwd=SCRIPTS_DIR,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            out = (result.stdout or "").strip() or "(no output)"
-            err = (result.stderr or "").strip()
-            if result.returncode != 0:
-                out = f"Exit code: {result.returncode}\n{out}"
-                if err:
-                    out += f"\n{err}"
-            if len(out) > 1900:
-                out = out[:1900] + "..."
-            embed = discord.Embed(
-                title=f"📜 Ran `{chosen}`",
-                description=out,
-                color=discord.Color.green() if result.returncode == 0 else discord.Color.orange(),
-            )
-            embed.set_footer(text=f"Exit code: {result.returncode}")
-            sent = await home_log.send_to_home(embed=embed)
-            if sent:
-                await interaction.followup.send("✅ Output sent to home channel.", ephemeral=True)
-            else:
-                await interaction.followup.send(
-                    embed=embed,
-                    content="*(Home channel not set; use /sethome.)*",
-                )
-        except subprocess.TimeoutExpired:
-            await interaction.followup.send(f"❌ Script `{chosen}` timed out (120s).")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)[:200]}")
+        result = await run_script_file(chosen, DEFAULT_TIMEOUT)
+        embed = _result_embed(chosen, result)
+        if await home_log.send_to_home(embed=embed):
+            await interaction.followup.send("✅ Output sent to home channel.", ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, content="*(Home channel not set; use /sethome.)*")

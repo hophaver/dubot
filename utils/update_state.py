@@ -1,10 +1,10 @@
-import json
-import os
 import time
 from typing import Dict, Tuple
 
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
 
-UPDATE_STATE_FILE = "data/update_state.json"
+UPDATE_STATE_FILE = data_path("update_state.json")
 
 
 class UpdateStateManager:
@@ -73,21 +73,13 @@ class UpdateStateManager:
         return "", "none"
 
     def save(self) -> None:
-        folder = os.path.dirname(self.save_file)
-        if folder:
-            os.makedirs(folder, exist_ok=True)
-        with open(self.save_file, "w") as f:
-            json.dump({"state": self.state}, f, indent=2)
+        save_json(self.save_file, {"state": self.state})
 
     def _load(self) -> None:
-        try:
-            with open(self.save_file) as f:
-                data = json.load(f)
-            loaded = data.get("state", {}) if isinstance(data, dict) else {}
-            if isinstance(loaded, dict):
-                self.state.update(loaded)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+        data = load_json(self.save_file, {})
+        loaded = data.get("state", {}) if isinstance(data, dict) else {}
+        if isinstance(loaded, dict):
+            self.state.update(loaded)
 
 
 update_state_manager = UpdateStateManager()

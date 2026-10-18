@@ -72,6 +72,8 @@ def _normalize_secret(value: str) -> str:
         "OPENROUTER_API_KEY",
         "OPENROUTER_CHAT_API_KEY",
         "OPENROUTER_MANAGEMENT_API_KEY",
+        "URL",
+        "YOUR_URL",
     }:
         return ""
     return v
@@ -115,7 +117,7 @@ def _get_secret(*keys: str) -> str:
 
 
 DISCORD_BOT_TOKEN = _get_secret("DISCORD_BOT_TOKEN")
-HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or 'http://192.168.0.149:8123'
+HA_URL = _normalize_secret(_DOTENV_VALUES.get("HA_URL", "") or os.environ.get("HA_URL", "")) or ""
 HA_ACCESS_TOKEN = _get_secret("HA_ACCESS_TOKEN")
 OLLAMA_URL = _normalize_secret(_DOTENV_VALUES.get("OLLAMA_URL", "") or os.environ.get("OLLAMA_URL", "")) or 'http://localhost:11434'
 
@@ -154,8 +156,9 @@ PERMANENT_ADMIN = 266952987128233985
 
 # Paths relative to project root (where integrations.py lives) so they work regardless of cwd
 _ROOT = os.path.dirname(os.path.abspath(__file__))
-WHITELIST_FILE = os.path.join(_ROOT, "whitelist.json")
-CONFIG_FILE = "config.json"
+from utils.paths import migrate_root_file  # noqa: E402
+
+WHITELIST_FILE = migrate_root_file("whitelist.json")
 
 # System time and location
 SYSTEM_TIME = None

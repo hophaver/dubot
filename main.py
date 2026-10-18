@@ -311,22 +311,13 @@ async def on_message(message):
         return
 
     if message.guild:
-        ag_cid = message.channel.id
-        ag_aid = message.author.id
-        ag_content = message.content
-
-        async def _guild_adaptive_tune():
-            try:
-                await asyncio.to_thread(
-                    adaptive_dm_manager.maybe_tune_from_guild_channel_message,
-                    ag_cid,
-                    ag_aid,
-                    ag_content,
-                )
-            except Exception:
-                pass
-
-        asyncio.create_task(_guild_adaptive_tune())
+        # Pure regex work; runs on the loop so adaptive state is only mutated from one thread.
+        try:
+            adaptive_dm_manager.maybe_tune_from_guild_channel_message(
+                message.channel.id, message.author.id, message.content
+            )
+        except Exception as e:
+            print(f"⚠️ Guild adaptive tune failed: {e}", flush=True)
 
         if message.reference:
             try:

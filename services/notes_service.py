@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import os
 import re
 import time
 from collections import defaultdict
@@ -24,8 +23,10 @@ from llm_function_prefs import get_function_persona_name
 from models import model_manager
 from personas import persona_manager
 from utils import dm_background
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
 
-NOTES_STATE_FILE = "data/notes_state.json"
+NOTES_STATE_FILE = data_path("notes_state.json")
 NOTES_EXPORT_FILENAME = "channel-notes.txt"
 
 PENDING_THRESHOLD = 50
@@ -141,18 +142,13 @@ class NotesManager:
         return int(cid) if cid else None
 
     def save(self) -> None:
-        os.makedirs(os.path.dirname(self.save_file), exist_ok=True)
-        with open(self.save_file, "w") as f:
-            json.dump({"channels": self.channels, "anchors": self.anchors}, f, indent=2)
+        save_json(self.save_file, {"channels": self.channels, "anchors": self.anchors})
 
     def _load(self) -> None:
-        try:
-            with open(self.save_file) as f:
-                data = json.load(f)
+        data = load_json(self.save_file, {})
+        if isinstance(data, dict):
             self.channels = dict(data.get("channels", {}) or {})
             self.anchors = dict(data.get("anchors", {}) or {})
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
 
 
 notes_manager = NotesManager()

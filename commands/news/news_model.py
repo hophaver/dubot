@@ -116,15 +116,15 @@ class NewsModelSelectView(View):
             return
         selected_value = interaction.data.get("values", [None])[0]
         if not selected_value:
-            await interaction.response.defer_update()
+            await interaction.response.defer()
             return
         try:
             selected_idx = int(selected_value)
         except (TypeError, ValueError):
-            await interaction.response.defer_update()
+            await interaction.response.defer()
             return
         if selected_idx < 0 or selected_idx >= len(self.options):
-            await interaction.response.defer_update()
+            await interaction.response.defer()
             return
         self.selected = self.options[selected_idx]
         await self._refresh_message(interaction)
@@ -231,18 +231,3 @@ def register(client: discord.Client):
             view=view,
             ephemeral=True,
         )
-
-    @client.tree.command(
-        name="news-model-info",
-        description="Show the current news summarization model",
-    )
-    async def news_model_info(interaction: discord.Interaction):
-        model_type, model_name = get_news_model()
-        display_model = model_name or "default (same as chat)"
-        embed = discord.Embed(
-            title="📰 News Model",
-            color=0x5865F2,
-        )
-        embed.add_field(name="Provider", value=model_type, inline=True)
-        embed.add_field(name="Model", value=f"`{display_model}`", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -1,29 +1,21 @@
-import os
 import discord
-from whitelist import is_admin
-from commands.shared import bot_embed_thumbnail_url
-from ._shared import recheck_scripts
+from commands.shared import make_bot_embed, require_admin
+from ._shared import list_scripts
 
 
 def register(client: discord.Client):
     @client.tree.command(name="scripts", description="List scripts in the local scripts folder")
     async def scripts_list(interaction: discord.Interaction):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_admin(interaction):
             return
-        # Recheck scripts/ on every /scripts run so the list is always current
-        names = recheck_scripts()
-        embed = discord.Embed(title="📜 Scripts", color=discord.Color.blue())
-        _thumb = bot_embed_thumbnail_url(client.user)
-        if _thumb:
-            embed.set_thumbnail(url=_thumb)
+        names = list_scripts()  # re-scanned on every call so the list is always current
+        embed = make_bot_embed(client, "📜 Scripts", color=discord.Color.blue())
         if not names:
-            embed.description = "*No contents in `scripts/` folder.*"
-            embed.set_footer(text="Scanned scripts/ · Add files or folders to list")
+            embed.description = "*No runnable scripts (.py/.sh/.bash) in `scripts/`.*"
         else:
             value = ", ".join(f"`{n}`" for n in names[:25])
             if len(names) > 25:
                 value += f" *+{len(names) - 25} more*"
-            embed.add_field(name="Contents", value=value, inline=False)
-            embed.set_footer(text="Scanned scripts/ · /run <script> for .py or .sh [now|in N min|at HH:MM]")
+            embed.add_field(name="Scripts", value=value, inline=False)
+            embed.set_footer(text="/run <script> [now|in N min|at HH:MM]")
         await interaction.response.send_message(embed=embed)

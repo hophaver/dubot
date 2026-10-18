@@ -1,24 +1,16 @@
-import json
-import os
 import discord
 from discord import app_commands
-from whitelist import is_admin
-from ._shared import HA_MAPPINGS_FILE
+from commands.shared import require_admin
+from ._shared import load_ha_mappings, save_ha_mappings
 
 
 def register(client: discord.Client):
     @client.tree.command(name="explain", description="Add a friendly name mapping for Home Assistant")
     @app_commands.describe(friendly_name="Friendly name (e.g., 'living room light')", entity_id="Entity ID (e.g., 'light.living_room')")
     async def explain(interaction: discord.Interaction, friendly_name: str, entity_id: str):
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        if not await require_admin(interaction):
             return
-        try:
-            mappings = json.load(open(HA_MAPPINGS_FILE)) if os.path.exists(HA_MAPPINGS_FILE) else {}
-            mappings[friendly_name.lower()] = entity_id
-            os.makedirs(os.path.dirname(HA_MAPPINGS_FILE), exist_ok=True)
-            with open(HA_MAPPINGS_FILE, "w") as f:
-                json.dump(mappings, f, indent=2)
-            await interaction.response.send_message(f"✅ Mapped `{friendly_name}` to `{entity_id}`")
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {str(e)[:100]}")
+        mappings = load_ha_mappings()
+        mappings[friendly_name.lower()] = entity_id
+        save_ha_mappings(mappings)
+        await interaction.response.send_message(f"✅ Mapped `{friendly_name}` to `{entity_id}`")

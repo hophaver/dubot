@@ -1,10 +1,11 @@
-import json
 import re
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from config import get_chat_history
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
 
 
 DM_SESSION_GAP_SECONDS = 36 * 3600  # treat as fresh session after this idle (unless reply-to-bot)
@@ -61,7 +62,7 @@ def is_slash_command_bot_turn(meta: Optional[Dict[str, Any]]) -> bool:
 class ConversationManager:
     """One thread per channel. Reply to bot = continue that chat; wake word or /chat = new chat."""
 
-    def __init__(self, save_file="data/conversations.json"):
+    def __init__(self, save_file=data_path("conversations.json")):
         self.max_history = get_chat_history()
         self.save_file = save_file
         self.conversations = defaultdict(list)
@@ -217,7 +218,8 @@ class ConversationManager:
         self.last_bot_message.pop(key, None)
         self.recent_bot_message_ids.pop(key, None)
 
-    def clear_conversation(self, channel_id=None, user_id=None):
+    def clear_conversation(self, channel_id=None):
+        """Forget everything stored for one channel (transcript and DM memory)."""
         if channel_id is not None:
             key = self._key(channel_id)
             self.conversations.pop(key, None)
@@ -229,17 +231,6 @@ class ConversationManager:
             self.dm_last_user_ts.pop(key, None)
             self.dm_adaptive_user_id.pop(key, None)
             self.dm_fast_reply_until.pop(key, None)
-        elif user_id is not None:
-            self.conversations.clear()
-            self.last_bot_message.clear()
-            self.recent_bot_message_ids.clear()
-            self.dm_summaries.clear()
-            self.dm_history_cutoff.clear()
-            self.dm_fast_reply_until.clear()
-            self.dm_topics.clear()
-            self.dm_profile_llm.clear()
-            self.dm_last_user_ts.clear()
-            self.dm_adaptive_user_id.clear()
 
     def get_dm_history_cutoff(self, channel_id, default_cutoff=10):
         key = self._key(channel_id)
@@ -334,9 +325,9 @@ class ConversationManager:
         self.recent_bot_message_ids[key] = ids[-10:]
 
     def save(self):
-        with open(self.save_file, "w") as f:
-            json.dump(
-                {
+        save_json(
+            self.save_file,
+            {
                     "conversations": dict(self.conversations),
                     "last_bot_message": self.last_bot_message,
                     "dm_history_cutoff": self.dm_history_cutoff,
@@ -346,10 +337,9 @@ class ConversationManager:
                     "dm_last_user_ts": dict(self.dm_last_user_ts),
                     "dm_adaptive_user_id": dict(self.dm_adaptive_user_id),
                     "dm_fast_reply_until": self.dm_fast_reply_until,
-                },
-                f,
-                indent=2,
-            )
+            },
+            indent=None,
+        )
 
     def _migrate_legacy_summaries(self) -> None:
         """One-time: fold legacy dm_summaries into dm_topics so nothing is lost."""
@@ -382,20 +372,17 @@ class ConversationManager:
             self.save()
 
     def _load(self):
-        try:
-            with open(self.save_file) as f:
-                data = json.load(f)
-                self.conversations = defaultdict(list, data.get("conversations", {}))
-                self.last_bot_message = data.get("last_bot_message", {})
-                self.dm_history_cutoff = data.get("dm_history_cutoff", {})
-                self.dm_summaries = defaultdict(list, data.get("dm_summaries", {}))
-                self.dm_fast_reply_until = data.get("dm_fast_reply_until", {})
-                self.dm_topics = defaultdict(list, data.get("dm_topics", {}))
-                self.dm_profile_llm = dict(data.get("dm_profile_llm", {}))
-                self.dm_last_user_ts = dict(data.get("dm_last_user_ts", {}))
-                self.dm_adaptive_user_id = dict(data.get("dm_adaptive_user_id", {}))
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+        data = load_json(self.save_file, {})
+        if isinstance(data, dict):
+            self.conversations = defaultdict(list, data.get("conversations", {}))
+            self.last_bot_message = data.get("last_bot_message", {})
+            self.dm_history_cutoff = data.get("dm_history_cutoff", {})
+            self.dm_summaries = defaultdict(list, data.get("dm_summaries", {}))
+            self.dm_fast_reply_until = data.get("dm_fast_reply_until", {})
+            self.dm_topics = defaultdict(list, data.get("dm_topics", {}))
+            self.dm_profile_llm = dict(data.get("dm_profile_llm", {}))
+            self.dm_last_user_ts = dict(data.get("dm_last_user_ts", {}))
+            self.dm_adaptive_user_id = dict(data.get("dm_adaptive_user_id", {}))
         self._migrate_legacy_summaries()
         self._one_time_clear_transcripts_keep_dm_memory()
 
@@ -404,7 +391,7 @@ class ConversationManager:
         Clear persisted rolling transcripts once; keep DM summaries/topics/profile/cutoffs.
         Legacy flat summaries are migrated into dm_topics before dm_summaries is cleared.
         """
-        marker = "data/.dm_transcript_purge_v1"
+        marker = data_path(".dm_transcript_purge_v1")
         try:
             with open(marker) as f:
                 if (f.read() or "").strip():

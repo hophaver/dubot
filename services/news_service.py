@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import json
 import os
 import re
 import threading
@@ -15,11 +14,13 @@ import discord
 import requests
 
 from utils import home_log
+from utils import json_store
+from utils.paths import data_path
 
 InlineKeyboardButton = None
 InlineKeyboardMarkup = None
 
-DATA_DIR = os.path.join("data", "news")
+DATA_DIR = data_path("news")
 SUBSCRIPTIONS_FILE = os.path.join(DATA_DIR, "subscriptions.json")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_articles.json")
 PREFERENCES_FILE = os.path.join(DATA_DIR, "preferences.json")
@@ -204,17 +205,11 @@ def _hash_article(title: str, link: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _load_json(path: str, default: Any = None) -> Any:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default if default is not None else {}
+    return json_store.load_json(path, {} if default is None else default)
 
 
 def _save_json(path: str, data: Any) -> None:
-    _ensure_data_dir()
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, default=str)
+    json_store.save_json(path, data)
 
 
 # ---------------------------------------------------------------------------

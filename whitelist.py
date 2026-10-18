@@ -1,29 +1,30 @@
 """Permission hierarchy: admin (all commands) > himas (himas + user) > user (user only)."""
-import json
 from integrations import WHITELIST_FILE, PERMANENT_ADMIN
+from utils.json_store import CachedJsonFile
+
+_ROLES = ("admin", "himas", "user")
+
+
+def _normalize(data):
+    data = data if isinstance(data, dict) else {}
+    out = {}
+    for key in _ROLES:
+        lst = data.get(key, [])
+        out[key] = [int(x) for x in lst] if isinstance(lst, list) else []
+    return out
+
+
+# A corrupt file is backed up and treated as empty, but never overwritten until the next explicit save.
+_store = CachedJsonFile(WHITELIST_FILE, default={k: [] for k in _ROLES}, normalize=_normalize)
 
 
 def load_whitelist():
-    try:
-        with open(WHITELIST_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for key in ("admin", "himas", "user"):
-            if key in data and isinstance(data[key], list):
-                data[key] = [int(x) for x in data[key]]
-        return data
-    except (FileNotFoundError, json.JSONDecodeError):
-        default = {"admin": [], "himas": [], "user": []}
-        save_whitelist(default)
-        return default
+    return _store.get()
 
 
 def save_whitelist(data):
-    out = {}
-    for key in ("admin", "himas", "user"):
-        lst = data.get(key, [])
-        out[key] = [str(int(x)) for x in lst]
-    with open(WHITELIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=4)
+    _store.save({key: [str(int(x)) for x in data.get(key, [])] for key in _ROLES})
+
 
 def get_user_permission(user_id):
     whitelist = load_whitelist()

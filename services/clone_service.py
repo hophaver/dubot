@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any, Dict, Optional
 
 import discord
 from services.profanity_service import contains_profanity
+from utils.json_store import CachedJsonFile
+from utils.paths import data_path, root_path
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS_DIR = os.path.join(_ROOT, "assets")
-STATE_PATH = os.path.join(_ROOT, "data", "clone_state.json")
+ASSETS_DIR = root_path("assets")
+STATE_PATH = data_path("clone_state.json")
 
 # One member at a time; space out PATCH /guilds/.../members/... to avoid rate limits.
 SERVER_WIDE_PER_MEMBER_DELAY_SEC = 2.5
@@ -42,7 +42,17 @@ _default_state: Dict[str, Any] = {
 
 def _ensure_dirs() -> None:
     os.makedirs(ASSETS_DIR, exist_ok=True)
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+
+
+def _with_defaults(data: Any) -> Dict[str, Any]:
+    out = dict(_default_state)
+    if isinstance(data, dict):
+        out.update(data)
+    return out
+
+
+# Cached: mirror_message_if_clone reads this on every guild message.
+_state_store = CachedJsonFile(STATE_PATH, default=dict(_default_state), normalize=_with_defaults)
 
 
 def _avatar_basename(is_animated: bool) -> str:
@@ -62,21 +72,11 @@ def _find_saved_avatar_path() -> Optional[str]:
 
 
 def load_state() -> Dict[str, Any]:
-    _ensure_dirs()
-    try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return dict(_default_state)
-    out = dict(_default_state)
-    out.update(data)
-    return out
+    return _state_store.get()
 
 
 def save_state(state: Dict[str, Any]) -> None:
-    _ensure_dirs()
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    _state_store.save(state, indent=2)
 
 
 def _effective_variant(state: Dict[str, Any]) -> Optional[str]:

@@ -1,13 +1,13 @@
 """Persistent profanity list and strict matching helpers."""
 from __future__ import annotations
 
-import json
-import os
 import re
 from typing import List, Set
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH = os.path.join(_ROOT, "data", "profanity.json")
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
+
+DATA_PATH = data_path("profanity.json")
 
 DEFAULT_WORDS = [
     "asshole",
@@ -48,38 +48,26 @@ LEET_MAP = str.maketrans(
 )
 
 
-def _ensure_data_dir() -> None:
-    os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
-
-
 def _normalize_word(word: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (word or "").lower().translate(LEET_MAP))
 
 
 def _load_raw_words() -> List[str]:
-    _ensure_data_dir()
-    try:
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        words = data.get("words", [])
-        if not isinstance(words, list):
-            return list(DEFAULT_WORDS)
-        out = []
-        for w in words:
-            if isinstance(w, str):
-                nw = _normalize_word(w)
-                if nw:
-                    out.append(nw)
-        return sorted(set(out))
-    except (FileNotFoundError, json.JSONDecodeError):
+    data = load_json(DATA_PATH, None)
+    words = data.get("words") if isinstance(data, dict) else None
+    if not isinstance(words, list):
         return list(DEFAULT_WORDS)
+    out = []
+    for w in words:
+        if isinstance(w, str):
+            nw = _normalize_word(w)
+            if nw:
+                out.append(nw)
+    return sorted(set(out))
 
 
 def _save_words(words: List[str]) -> None:
-    _ensure_data_dir()
-    payload = {"words": sorted(set(_normalize_word(w) for w in words if _normalize_word(w)))}
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    save_json(DATA_PATH, {"words": sorted(set(_normalize_word(w) for w in words if _normalize_word(w)))})
 
 
 def get_words() -> List[str]:

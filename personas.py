@@ -4,12 +4,13 @@ Adaptive exports use persona keys: the user's Discord display name plus a space 
 (for example .dubyu adaptive). The bot updates these on startup/shutdown (see adaptive_dm.export_adaptive_to_personas).
 Legacy keys adaptive_dm_* are removed on export.
 """
-import json
 import os
 
 from config import get_current_persona, set_current_persona
+from utils.json_store import load_json, save_json
+from utils.paths import migrate_root_file
 
-PERSONAS_FILE = "personas.json"
+PERSONAS_FILE = migrate_root_file("personas.json")
 
 DEFAULT_PERSONAS = {
     "default": "You are a helpful AI assistant. Answer clearly and consistently. When multiple people are in the conversation, pay attention to who said what and keep the thread coherent.",
@@ -29,11 +30,8 @@ class PersonaManager:
 
     def load_personas(self):
         if os.path.exists(PERSONAS_FILE):
-            try:
-                with open(PERSONAS_FILE) as f:
-                    self.personas = json.load(f)
-            except json.JSONDecodeError:
-                self.personas = {}
+            data = load_json(PERSONAS_FILE, {})
+            self.personas = data if isinstance(data, dict) else {}
             changed = False
             for k, v in DEFAULT_PERSONAS.items():
                 if k not in self.personas:
@@ -50,8 +48,7 @@ class PersonaManager:
             set_current_persona("default")
 
     def save_personas(self):
-        with open(PERSONAS_FILE, "w") as f:
-            json.dump(self.personas, f, indent=2)
+        save_json(PERSONAS_FILE, self.personas)
 
     def get_persona(self, name):
         return self.personas.get(name, self.personas.get("default", ""))

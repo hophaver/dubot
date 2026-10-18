@@ -1,23 +1,17 @@
 """Blacklist of words the shitpost trigger ignores (data/shitpost_ignore.json)."""
-import json
-import os
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
 
-IGNORE_FILE = os.path.join("data", "shitpost_ignore.json")
+IGNORE_FILE = data_path("shitpost_ignore.json")
 
 
 def _load() -> list[str]:
-    try:
-        with open(IGNORE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    data = load_json(IGNORE_FILE, [])
+    return data if isinstance(data, list) else []
 
 
 def _save(words: list[str]) -> None:
-    os.makedirs(os.path.dirname(IGNORE_FILE), exist_ok=True)
-    with open(IGNORE_FILE, "w", encoding="utf-8") as f:
-        json.dump(words, f, indent=2)
+    save_json(IGNORE_FILE, words)
 
 
 def get_ignored_words() -> list[str]:

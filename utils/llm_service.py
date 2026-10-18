@@ -58,7 +58,7 @@ SUPPORTED_FILE_TYPES = {
     'image': ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'],
     'text': ['.txt', '.json', '.csv', '.xml', '.yaml', '.yml', '.md', '.log'],
     'code': ['.py', '.js', '.html', '.css', '.java', '.cpp', '.c', '.go', '.rs', '.php', '.sh'],
-    'document': ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']
+    'document': ['.pdf'],
 }
 SUPPORTED_EXTENSION_TO_TYPE = {
     ext: file_type
@@ -374,7 +374,6 @@ def initialize_command_database():
     # News Commands
     command_db.add_command("news", "Subscribe to news topics delivered to your DMs", "News")
     command_db.add_command("news-model", "[Admin] Set the LLM model for news summarization", "News")
-    command_db.add_command("news-model-info", "Show the current news summarization model", "News")
     command_db.add_command("news-time", "Set daily quiet hours for news DMs (server local time; digest when quiet ends)", "News")
     command_db.add_command("news-source", "[Admin] Manage custom RSS sources for news topics", "News")
     command_db.add_alias("news", "subscribe")
@@ -389,60 +388,62 @@ initialize_command_database()
 
 class FileProcessor:
     """Process and analyze different types of files"""
-    
+
     @staticmethod
     def get_file_type(filename: str) -> str:
         """Get the type of file based on extension"""
         ext = os.path.splitext((filename or "").lower())[1]
         return SUPPORTED_EXTENSION_TO_TYPE.get(ext, "unknown")
-    
+
     @staticmethod
     def read_text_file(content: bytes) -> str:
-        """Read text from a file"""
+        """Decode text bytes (UTF-8, then Latin-1)."""
         try:
-            # Try UTF-8 first
-            return content.decode('utf-8')
+            return content.decode("utf-8")
         except UnicodeDecodeError:
-            try:
-                # Try Latin-1 as fallback
-                return content.decode('latin-1')
-            except Exception:
-                # Return as base64 if can't decode
-                return f"[Binary file content encoded as base64]\n{base64.b64encode(content).decode('utf-8')}"
-    
+            return content.decode("latin-1")
+
+    @staticmethod
+    def extract_text(filename: str, content: bytes) -> str:
+        """Plain text for text/code files and PDFs (via pypdf)."""
+        if (filename or "").lower().endswith(".pdf"):
+            import io
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(content))
+            pages = [(page.extract_text() or "").strip() for page in reader.pages]
+            text = "\n\n".join(p for p in pages if p)
+            return text or "[No extractable text in this PDF — it may be scanned images.]"
+        return FileProcessor.read_text_file(content)
+
     @staticmethod
     def prepare_image_for_llm(image_data: bytes, filename: str) -> Dict:
         """Prepare image data for LLM with vision capabilities"""
-        import base64
-        mime_type = mimetypes.guess_type(filename)[0] or 'image/png'
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-        
+        mime_type = mimetypes.guess_type(filename)[0] or "image/png"
         return {
-            "data": base64_image,
+            "data": base64.b64encode(image_data).decode("utf-8"),
             "mime_type": mime_type,
-            "filename": filename
+            "filename": filename,
         }
-    
+
     @staticmethod
-    def analyze_file_content(filename: str, content: bytes, file_type: str) -> str:
-        """Generate analysis prompt based on file type"""
+    def default_analysis_prompt(filename: str, file_type: str) -> str:
+        """Instruction used when the user gave no prompt (file content is appended separately)."""
         if file_type == "text":
-            text_content = FileProcessor.read_text_file(content)
-            return f"Analyze the following text file '{filename}':\n\n{text_content}\n\nPlease provide: 1) Summary, 2) Key points, 3) Any issues or suggestions"
-        
-        elif file_type == "code":
-            code_content = FileProcessor.read_text_file(content)
-            return f"Review this code file '{filename}':\n\n```\n{code_content}\n```\n\nPlease provide: 1) What the code does, 2) Potential bugs or issues, 3) Suggestions for improvement, 4) Security concerns if any"
-        
-        elif file_type == "image":
-            return f"Analyze this image file: '{filename}'. Describe what you see in detail, including any text, objects, colors, and context. If there's text in the image, transcribe it."
-        
-        elif file_type == "document":
-            text_content = FileProcessor.read_text_file(content)
-            return f"Analyze this document '{filename}':\n\n{text_content[:5000]}...\n\nPlease provide: 1) Document type, 2) Main topics, 3) Key information, 4) Summary"
-        
-        else:
-            return f"Analyze this file '{filename}'. Provide information about what type of file it appears to be and any observations."
+            return f"Analyze the text file '{filename}'. Provide: 1) Summary, 2) Key points, 3) Any issues or suggestions"
+        if file_type == "code":
+            return (
+                f"Review the code file '{filename}'. Provide: 1) What the code does, 2) Potential bugs or issues, "
+                "3) Suggestions for improvement, 4) Security concerns if any"
+            )
+        if file_type == "image":
+            return (
+                f"Analyze this image file: '{filename}'. Describe what you see in detail, including any text, "
+                "objects, colors, and context. If there's text in the image, transcribe it."
+            )
+        if file_type == "document":
+            return f"Analyze the document '{filename}'. Provide: 1) Document type, 2) Main topics, 3) Key information, 4) Summary"
+        return f"Analyze this file '{filename}'. Provide information about what type of file it appears to be and any observations."
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
@@ -1191,7 +1192,8 @@ async def ask_llm(
         if adaptive_dm:
             history = conversation_manager.roll_adaptive_dm_transcript_messages(channel_id, history)
     else:
-        if is_dm and adaptive_dm:
+        if is_dm:
+            # New DM session: drop the rolling transcript but keep topic/profile memory.
             conversation_manager.reset_dm_transcript_only(channel_id)
         else:
             conversation_manager.clear_conversation(channel_id)
@@ -1429,13 +1431,13 @@ def _format_discord_message(username, message, context):
         context_str += f"{msg['author']}: {msg['content']}\n"
     return f"{context_str}\n{username} says: {message}"
 
-_vision_model_cache = None
+# requested model -> local model that last answered an image request for it
+_vision_model_cache: Dict[str, str] = {}
 
 
 def clear_vision_model_cache() -> None:
     """Call when model list changes (e.g. after /pull-model or remove) so vision is re-resolved."""
-    global _vision_model_cache
-    _vision_model_cache = None
+    _vision_model_cache.clear()
 
 
 # Name patterns that typically indicate vision-capable models (Ollama)
@@ -1462,23 +1464,17 @@ def _format_vision_help_message() -> str:
     return "\n".join(lines)
 
 
-async def _test_model_vision(model_name: str, messages: list) -> bool:
-    try:
-        r = await _make_ollama_request(model_name, messages)
-        return bool(r and not r.startswith("Error:"))
-    except Exception:
-        return False
+_MAX_VISION_CANDIDATES = 6
 
-async def _resolve_vision_model(requested_model: str, messages: list) -> Optional[str]:
-    global _vision_model_cache
-    if _vision_model_cache is not None:
-        return _vision_model_cache
-    chain = [requested_model] + [m for m in _get_fallback_chain() if m != requested_model]
-    for model in chain:
-        if await _test_model_vision(model, messages):
-            _vision_model_cache = model
-            return model
-    return None
+
+def _vision_candidates(requested_model: str) -> List[str]:
+    """Order to try for an image request: last known-good, requested, likely-vision installed, the rest."""
+    available = model_manager.list_all_models(refresh_local=False) or _get_fallback_chain()
+    cached = _vision_model_cache.get(requested_model)
+    likely = [m for m in available if _is_vision_capable(m)]
+    others = [m for m in available if not _is_vision_capable(m)]
+    ordered = dict.fromkeys(m for m in [cached, requested_model, *likely, *others] if m)
+    return list(ordered)[:_MAX_VISION_CANDIDATES]
 
 def _to_openrouter_messages(messages: list) -> list:
     converted = []
@@ -1622,15 +1618,8 @@ async def _try_models_with_fallback(
         return requested_model, f"⚠️ Cloud model unavailable: {response}"
 
     if images:
-        vision_model = await _resolve_vision_model(requested_model, messages)
-        if vision_model:
-            models_to_try = [vision_model]
-        else:
-            available = model_manager.list_all_models(refresh_local=True)
-            if available:
-                models_to_try = [requested_model] + [m for m in available if m != requested_model]
-            else:
-                models_to_try = [requested_model] + _get_fallback_chain()
+        # Each candidate gets the real request once; the first that answers is remembered.
+        models_to_try = _vision_candidates(requested_model)
     else:
         models_to_try = [requested_model] + _get_fallback_chain()
 
@@ -1645,6 +1634,8 @@ async def _try_models_with_fallback(
             return requested_model, ""
 
         if response and not response.startswith("Error:"):
+            if images:
+                _vision_model_cache[requested_model] = model_name
             return model_name, response
 
         if "404" in response or "not found" in response.lower():
@@ -2036,7 +2027,7 @@ async def analyze_file(
             else:
                 analysis_prompt = "Describe this image in detail. Be objective and factual. Describe what you actually see, not assumptions. Include: objects, people, animals, text, colors, setting, actions if any. If it's a screenshot or contains text, also extract and transcribe the text."
         else:
-            analysis_prompt = FileProcessor.analyze_file_content(filename, file_data, file_type)
+            analysis_prompt = FileProcessor.default_analysis_prompt(filename, file_type)
     
     # Prepare image if needed
     images_data = []
@@ -2071,7 +2062,7 @@ async def analyze_file(
         # For non-image files, include content
         if file_type in ["text", "code", "document"]:
             try:
-                text_content = FileProcessor.read_text_file(file_data)
+                text_content = FileProcessor.extract_text(filename, file_data)
                 # Limit content length to avoid token limits
                 if len(text_content) > 8000:
                     text_content = text_content[:8000] + "\n\n...[Content truncated due to length]..."
@@ -2139,7 +2130,7 @@ async def compare_files(
     file_contents = []
     for file_info in files:
         try:
-            text_content = FileProcessor.read_text_file(file_info['data'])
+            text_content = FileProcessor.extract_text(file_info['filename'], file_info['data'])
             # Limit content length
             if len(text_content) > 4000:
                 text_content = text_content[:4000] + "\n...[Content truncated]"

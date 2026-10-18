@@ -2,11 +2,11 @@ import os
 import re
 import tempfile
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 DOWNLOAD_EXTENSIONS = {
     ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v",
     ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
-}
+} | IMAGE_EXTENSIONS
 
 
 def extract_urls(text: str):
@@ -33,6 +33,8 @@ def download_url_sync(url: str, max_bytes: int):
                     "format": format_str,
                     "quiet": True,
                     "no_warnings": True,
+                    # Abort before downloading when the reported size is already over the limit.
+                    "max_filesize": max_bytes,
                 }
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
@@ -40,7 +42,7 @@ def download_url_sync(url: str, max_bytes: int):
                         return None, "Could not get media info"
                     files = [f for f in os.listdir(tmpdir) if os.path.isfile(os.path.join(tmpdir, f))]
                     if not files:
-                        return None, "No file produced"
+                        return None, f"No file produced (it may exceed the {max_bytes // (1024*1024)} MB limit)"
                     path = os.path.join(tmpdir, files[0])
                     if os.path.getsize(path) > max_bytes:
                         return None, f"File too large. Max: {max_bytes // (1024*1024)} MB."
@@ -70,11 +72,14 @@ def download_url_sync(url: str, max_bytes: int):
             from urllib.parse import urlparse
             name = os.path.basename(urlparse(url).path) or "download"
             filename = name if "." in name else name + ".bin"
-        data = b""
-        for chunk in r.iter_content(chunk_size=8192):
-            data += chunk
+        declared = r.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > max_bytes:
+            return None, f"File too large. Max: {max_bytes // (1024*1024)} MB."
+        data = bytearray()
+        for chunk in r.iter_content(chunk_size=65536):
+            data.extend(chunk)
             if len(data) > max_bytes:
                 return None, f"File too large. Max: {max_bytes // (1024*1024)} MB."
-        return data, filename
+        return bytes(data), filename
     except Exception as e:
         return None, str(e)[:200]

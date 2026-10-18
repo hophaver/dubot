@@ -1,10 +1,7 @@
-import json
-import os
 import discord
-import requests
 from whitelist import has_himas_permission
-from integrations import HA_URL, HA_ACCESS_TOKEN
-from ._shared import HA_MAPPINGS_FILE
+from utils.ha_integration import ha_manager
+from ._shared import load_ha_mappings
 
 
 def register(client: discord.Client):
@@ -14,22 +11,18 @@ def register(client: discord.Client):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
         await interaction.response.defer()
-        try:
-            headers = {"Authorization": f"Bearer {HA_ACCESS_TOKEN}", "Content-Type": "application/json"}
-            response = requests.get(f"{HA_URL}/api/", headers=headers, timeout=10)
-            embed = discord.Embed(title="🏠 Home Assistant Status", color=discord.Color.green() if response.status_code == 200 else discord.Color.red())
-            if response.status_code == 200:
-                data = response.json()
-                embed.add_field(name="Status", value="✅ Connected", inline=True)
-                embed.add_field(name="Version", value=data.get("message", "Unknown"), inline=True)
-                entities_response = requests.get(f"{HA_URL}/api/states", headers=headers, timeout=10)
-                if entities_response.status_code == 200:
-                    embed.add_field(name="Entities", value=str(len(entities_response.json())), inline=True)
-                if os.path.exists(HA_MAPPINGS_FILE):
-                    embed.add_field(name="Mappings", value=str(len(json.load(open(HA_MAPPINGS_FILE)))), inline=True)
-            else:
-                embed.add_field(name="Status", value="❌ Disconnected", inline=True)
-                embed.add_field(name="Error", value=f"HTTP {response.status_code}", inline=True)
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)[:200]}")
+        status, data = await ha_manager.get_api_status()
+        ok = status == 200
+        embed = discord.Embed(
+            title="🏠 Home Assistant Status", color=discord.Color.green() if ok else discord.Color.red()
+        )
+        if ok:
+            embed.add_field(name="Status", value="✅ Connected", inline=True)
+            embed.add_field(name="Version", value=data.get("message", "Unknown"), inline=True)
+            entities = await ha_manager.get_all_entities(force_refresh=True)
+            embed.add_field(name="Entities", value=str(len(entities)), inline=True)
+            embed.add_field(name="Mappings", value=str(len(load_ha_mappings())), inline=True)
+        else:
+            embed.add_field(name="Status", value="❌ Disconnected", inline=True)
+            embed.add_field(name="Error", value=f"HTTP {status}" if status else "Request failed", inline=True)
+        await interaction.followup.send(embed=embed)

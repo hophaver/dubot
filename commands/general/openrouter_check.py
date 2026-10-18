@@ -3,10 +3,9 @@ import re
 from typing import Dict, List, Tuple
 
 import discord
-from discord import app_commands
 import requests
 
-from whitelist import get_user_permission
+from commands.shared import require_admin
 from models import model_manager
 import integrations
 
@@ -157,8 +156,7 @@ def _test_management_key_endpoint(key: str) -> Tuple[bool, str]:
 def register(client):
     @client.tree.command(name="openrouter-check", description="Diagnose OpenRouter keys for chat and credits")
     async def openrouter_check(interaction: discord.Interaction):
-        if not get_user_permission(interaction.user.id):
-            await interaction.response.send_message("❌ Denied", ephemeral=True)
+        if not await require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True)
 

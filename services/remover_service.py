@@ -1,42 +1,28 @@
 """Global-admin 'remover' emoji: react on a message to delete it (guild: any; DM: bot messages only)."""
 from __future__ import annotations
 
-import json
-import os
 from typing import Optional, Set, Tuple
 
 import discord
 
 from integrations import PERMANENT_ADMIN
 from utils import home_log
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH = os.path.join(_ROOT, "data", "remover.json")
+DATA_PATH = data_path("remover.json")
 
 # (channel_id, message_id) awaiting first reaction to choose the remover emoji
 _pending_setup: Set[Tuple[int, int]] = set()
 
 
-def _ensure_data_dir() -> None:
-    os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
-
-
 def _load() -> dict:
-    _ensure_data_dir()
-    try:
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    return {}
+    data = load_json(DATA_PATH, {})
+    return data if isinstance(data, dict) else {}
 
 
 def _save(data: dict) -> None:
-    _ensure_data_dir()
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=True)
+    save_json(DATA_PATH, data)
 
 
 def get_remover_emoji() -> Optional[str]:

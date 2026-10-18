@@ -1,12 +1,14 @@
 """Model preferences and Ollama model list"""
 import json
-import os
 import requests
 from typing import Any, Dict, List, Optional, Tuple
 from integrations import OLLAMA_URL
 from utils import home_log
 
-MODELS_FILE = "data/models.json"
+from utils.json_store import load_json, save_json
+from utils.paths import data_path
+
+MODELS_FILE = data_path("models.json")
 DEFAULT_FALLBACK = ["qwen2.5:7b", "llama3.2:3b", "llama3.2:1b"]
 
 
@@ -292,19 +294,12 @@ class ModelManager:
             return []
 
     def save_models(self) -> None:
-        os.makedirs(os.path.dirname(MODELS_FILE), exist_ok=True)
-        with open(MODELS_FILE, "w") as f:
-            json.dump({"user_models": self.user_models}, f, indent=2)
+        save_json(MODELS_FILE, {"user_models": self.user_models})
 
     def load_models(self) -> None:
-        if os.path.exists(MODELS_FILE):
-            try:
-                with open(MODELS_FILE) as f:
-                    self.user_models = json.load(f).get("user_models", {})
-            except json.JSONDecodeError:
-                self.user_models = {}
-        else:
-            self.save_models()
+        data = load_json(MODELS_FILE, {})
+        um = data.get("user_models", {}) if isinstance(data, dict) else {}
+        self.user_models = um if isinstance(um, dict) else {}
 
 
 model_manager = ModelManager()

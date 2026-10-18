@@ -1,9 +1,8 @@
 from typing import Optional
 import discord
 from discord import app_commands
-import requests
 from whitelist import has_himas_permission
-from integrations import HA_URL, HA_ACCESS_TOKEN
+from utils.ha_integration import ha_manager
 
 
 def register(client: discord.Client):
@@ -14,27 +13,21 @@ def register(client: discord.Client):
             await interaction.response.send_message("❌ Denied", ephemeral=True)
             return
         await interaction.response.defer()
-        try:
-            headers = {"Authorization": f"Bearer {HA_ACCESS_TOKEN}", "Content-Type": "application/json"}
-            response = requests.get(f"{HA_URL}/api/states", headers=headers, timeout=10)
-            if response.status_code != 200:
-                await interaction.followup.send(f"❌ Failed to get entities: HTTP {response.status_code}")
-                return
-            entities = response.json()
-            if search:
-                entities = [e for e in entities if search.lower() in e["entity_id"].lower()]
-            if not entities:
-                suffix = f' matching "{search}"' if search else ""
-                await interaction.followup.send(f"🔍 No entities found{suffix}.")
-                return
-            title_suffix = f' matching "{search}"' if search else ""
-            embed = discord.Embed(title=f"🔍 Sensors{title_suffix}", color=discord.Color.blue())
-            for entity in entities[:10]:
-                state = entity.get("state", "unknown")
-                friendly_name = entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
-                embed.add_field(name=friendly_name, value=f"**ID:** `{entity['entity_id']}`\n**State:** {state}", inline=False)
-            if len(entities) > 10:
-                embed.set_footer(text=f"And {len(entities) - 10} more entities...")
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)[:200]}")
+        entities = list((await ha_manager.get_all_entities()).values())
+        if not entities:
+            await interaction.followup.send("❌ Failed to get entities from Home Assistant.")
+            return
+        if search:
+            entities = [e for e in entities if search.lower() in e["entity_id"].lower()]
+        suffix = f' matching "{search}"' if search else ""
+        if not entities:
+            await interaction.followup.send(f"🔍 No entities found{suffix}.")
+            return
+        embed = discord.Embed(title=f"🔍 Sensors{suffix}", color=discord.Color.blue())
+        for entity in entities[:10]:
+            state = entity.get("state", "unknown")
+            friendly_name = entity.get("attributes", {}).get("friendly_name", entity["entity_id"])
+            embed.add_field(name=friendly_name, value=f"**ID:** `{entity['entity_id']}`\n**State:** {state}", inline=False)
+        if len(entities) > 10:
+            embed.set_footer(text=f"And {len(entities) - 10} more entities...")
+        await interaction.followup.send(embed=embed)

@@ -1,12 +1,12 @@
 import asyncio
 import threading
-import json
-import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import discord
 
 from utils import home_log
+from utils.json_store import load_json, save_json
+from utils.paths import migrate_root_file
 
 
 def _runtime_platform() -> str:
@@ -56,7 +56,7 @@ class Reminder:
         return reminder
 
 class ReminderManager:
-    def __init__(self, save_file: str = "reminders.json"):
+    def __init__(self, save_file: str = migrate_root_file("reminders.json")):
         self.save_file = save_file
         self.reminders: Dict[str, Reminder] = {}
         self.running = False
@@ -101,25 +101,20 @@ class ReminderManager:
     
     def load(self):
         """Load reminders from file"""
-        if os.path.exists(self.save_file):
+        data = load_json(self.save_file, {})
+        for reminder_data in data.get("reminders", []) if isinstance(data, dict) else []:
             try:
-                with open(self.save_file, 'r') as f:
-                    data = json.load(f)
-                    for reminder_data in data.get("reminders", []):
-                        reminder = Reminder.from_dict(reminder_data)
-                        if getattr(reminder, "platform", "") == "telegram":
-                            reminder.platform = "discord"
-                        # Only load future reminders
-                        if reminder.trigger_time > datetime.now():
-                            self.reminders[reminder.id] = reminder
-            except (json.JSONDecodeError, KeyError) as e:
-                home_log.log_sync(f"Error loading reminders: {e}")
+                reminder = Reminder.from_dict(reminder_data)
+            except (KeyError, TypeError, ValueError) as e:
+                home_log.log_sync(f"Skipping malformed reminder: {e}")
+                continue
+            # Only load future reminders
+            if reminder.trigger_time > datetime.now():
+                self.reminders[reminder.id] = reminder
     
     def save(self):
         """Save reminders to file"""
-        data = {"reminders": [r.to_dict() for r in self.reminders.values()]}
-        with open(self.save_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        save_json(self.save_file, {"reminders": [r.to_dict() for r in list(self.reminders.values())]})
     
     def check_reminders(self):
         """Check and trigger due reminders"""

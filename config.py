@@ -1,8 +1,11 @@
 """Bot config: wake word, startup channel, download limit, etc."""
-import json
+import os
 from typing import Any, Dict
 
-CONFIG_FILE = "config.json"
+from utils.json_store import CachedJsonFile
+from utils.paths import root_path
+
+CONFIG_FILE = root_path("config.json")
 
 DEFAULTS = {
     "wake_word": "robot",
@@ -19,19 +22,25 @@ DEFAULTS = {
 }
 
 
+def _with_defaults(data: Any) -> Dict[str, Any]:
+    merged = dict(DEFAULTS)
+    if isinstance(data, dict):
+        merged.update(data)
+    return merged
+
+
+_store = CachedJsonFile(CONFIG_FILE, default=dict(DEFAULTS), normalize=_with_defaults)
+
+
 def get_config() -> Dict[str, Any]:
-    try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(DEFAULTS, f, indent=4)
-        return DEFAULTS.copy()
+    """Current config merged over DEFAULTS (cached; re-read only when config.json changes)."""
+    if not os.path.exists(CONFIG_FILE):
+        _store.save(dict(DEFAULTS))
+    return _store.get()
 
 
 def save_config(config: Dict[str, Any]) -> None:
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
+    _store.save(config)
 
 
 def get_wake_word() -> str:
