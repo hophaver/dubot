@@ -265,3 +265,73 @@ async def send_long_message(interaction: discord.Interaction, message: str, max_
         await interaction.followup.send(chunk)
         if i < len(chunks) - 1:
             await asyncio.sleep(_CHUNK_SEND_DELAY)
+
+
+# ---------------------------------------------------------------------------
+# Permission / embed / view helpers shared by slash commands
+# ---------------------------------------------------------------------------
+
+async def _deny(interaction: discord.Interaction, text: str) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(text, ephemeral=True)
+    else:
+        await interaction.response.send_message(text, ephemeral=True)
+
+
+async def require_user(interaction: discord.Interaction) -> bool:
+    """True if the invoker is whitelisted at any level; otherwise replies "❌ Denied"."""
+    from whitelist import get_user_permission
+
+    if get_user_permission(interaction.user.id):
+        return True
+    await _deny(interaction, "❌ Denied")
+    return False
+
+
+async def require_admin(interaction: discord.Interaction) -> bool:
+    """True if the invoker is an admin; otherwise replies "❌ Admin only."."""
+    from whitelist import is_admin
+
+    if is_admin(interaction.user.id):
+        return True
+    await _deny(interaction, "❌ Admin only.")
+    return False
+
+
+async def require_permanent_admin(interaction: discord.Interaction) -> bool:
+    from whitelist import is_permanent_admin
+
+    if is_permanent_admin(interaction.user.id):
+        return True
+    await _deny(interaction, "❌ Only the bot owner can use this.")
+    return False
+
+
+async def require_dm(interaction: discord.Interaction) -> bool:
+    if isinstance(interaction.channel, discord.DMChannel):
+        return True
+    await _deny(interaction, "❌ This command only works in DMs.")
+    return False
+
+
+def make_bot_embed(client: discord.Client, title: str, description: Optional[str] = None, **kwargs) -> discord.Embed:
+    """Embed with the bot avatar as thumbnail (when it has a custom one)."""
+    embed = discord.Embed(title=title, description=description, **kwargs)
+    thumb = bot_embed_thumbnail_url(getattr(client, "user", None))
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    return embed
+
+
+class OwnerOnlyView(discord.ui.View):
+    """View whose components only respond to the user who invoked the command."""
+
+    def __init__(self, owner_id: int, *, timeout: Optional[float] = 180):
+        super().__init__(timeout=timeout)
+        self.owner_id = int(owner_id)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await _deny(interaction, "❌ Only the user who ran this command can use these controls.")
+        return False

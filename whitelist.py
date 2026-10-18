@@ -41,6 +41,10 @@ def get_user_permission(user_id):
         return "user"
     return None
 
+def is_permanent_admin(user_id) -> bool:
+    return int(user_id) == PERMANENT_ADMIN
+
+
 def is_admin(user_id):
     return get_user_permission(user_id) == "admin"
 

@@ -7,9 +7,11 @@ FALLBACK_FILE = "model_fallback.json"
 _sorted_chain: list = []
 
 
-def _size_key(name: str) -> int:
-    m = re.search(r"(\d+)\s*b\s*$", name.lower()) or re.search(r":(\d+)b", name.lower())
-    return int(m.group(1)) if m else 0
+def _size_key(name: str) -> float:
+    """Parameter count in billions from a model tag (e.g. qwen2.5:1.5b -> 1.5, llama3.2:3b -> 3)."""
+    low = name.lower()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*b\s*$", low) or re.search(r":(\d+(?:\.\d+)?)b", low)
+    return float(m.group(1)) if m else 0.0
 
 
 def load_and_sort_fallback() -> list:
